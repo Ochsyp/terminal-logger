@@ -1,0 +1,82 @@
+#!/bin/sh
+# Refuse commits on main, and commits whose staged content, staged path names, author or committer
+# holds a term from the local denylist. git commit runs this hook, and git merge runs it through
+# pre-merge-commit; the changes that rebase, cherry-pick, revert and am replay are not checked.
+# A commit in a detached HEAD is not refused for its branch but still gets the denylist check.
+
+# The full ref name, since a tag named main, for example, turns the short name into heads/main.
+ref=$(git symbolic-ref --quiet HEAD) || ref=
+case "$ref" in
+    refs/heads/main | refs/heads/master)
+        echo "pre-commit: commits on '${ref#refs/heads/}' are refused. Create a feature branch first, for example:" >&2
+        echo "    git switch -c fix/short-name" >&2
+        exit 1
+        ;;
+esac
+
+# shellcheck source=SCRIPTDIR/denylist.sh
+. "$(dirname -- "$0")/denylist.sh"
+denylist_load pre-commit || exit 0
+
+# The author and committer name and e-mail go into the commit as well. git commit exports the
+# author it uses, an --author option included, so git var reads the identity the commit gets.
+{ git var GIT_AUTHOR_IDENT && git var GIT_COMMITTER_IDENT; } > "$denylist_dir/ident" ||
+    denylist_fail pre-commit "cannot read the author and committer identity"
+denylist_match "$denylist_dir/ident"
+case $? in
+    0) ident=1 ;;
+    1) ident=0 ;;
+    *) denylist_fail pre-commit "the denylist check failed" ;;
+esac
+
+# Every added, copied, modified, renamed or type-changed file, such as a file that becomes a
+# symlink, NUL-separated so that git quotes no name.
+git diff --cached --name-only -z --diff-filter=ACMRT > "$denylist_dir/paths" ||
+    denylist_fail pre-commit "cannot list the staged files"
+tr '\0' '\n' < "$denylist_dir/paths" > "$denylist_dir/list" ||
+    denylist_fail pre-commit "cannot list the staged files"
+
+# A path name that holds a term is only counted, since printing it would print the term. A file
+# whose staged content holds one is listed by its path, which then holds none. The content is
+# searched without its NUL bytes, so that UTF-16 text matches a term as UTF-8 text does.
+found=0
+named=0
+while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    printf '%s\n' "$path" | denylist_match
+    case $? in
+        0) named=$((named + 1)); continue ;;
+        1) ;;
+        *) denylist_fail pre-commit "the denylist check failed" ;;
+    esac
+    # :0: names stage 0 explicitly, so that git reads a path such as 0:notes.txt as it is.
+    git show ":0:$path" > "$denylist_dir/staged" ||
+        denylist_fail pre-commit "cannot read the staged content of $path"
+    tr -d '\000' < "$denylist_dir/staged" > "$denylist_dir/text" ||
+        denylist_fail pre-commit "cannot read the staged content of $path"
+    denylist_match "$denylist_dir/text"
+    case $? in
+        0)
+            [ "$found" -eq 1 ] ||
+                echo "pre-commit: the staged content of these files holds a term from the denylist:" >&2
+            printf '    %s\n' "$path" >&2
+            found=1
+            ;;
+        1) ;;
+        *) denylist_fail pre-commit "the denylist check failed" ;;
+    esac
+done < "$denylist_dir/list"
+
+if [ "$named" -gt 0 ]; then
+    echo "pre-commit: $named staged path name(s) hold a term from the denylist and are not shown." >&2
+    echo "    Find them in: git diff --cached --name-only" >&2
+fi
+if [ "$ident" -eq 1 ]; then
+    echo "pre-commit: the author or committer name or e-mail holds a term from the denylist." >&2
+    echo "    Check them with: git var GIT_AUTHOR_IDENT; git var GIT_COMMITTER_IDENT" >&2
+fi
+if [ "$found" -eq 1 ] || [ "$named" -gt 0 ] || [ "$ident" -eq 1 ]; then
+    echo "pre-commit: remove the term or unstage the file, then commit again." >&2
+    exit 1
+fi
+exit 0

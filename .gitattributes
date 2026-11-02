@@ -1,0 +1,2 @@
+# Kali runs the scripts and zsh reads the plugin; CRLF breaks both.
+* text=auto eol=lf
