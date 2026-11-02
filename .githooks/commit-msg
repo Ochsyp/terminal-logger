@@ -1,0 +1,19 @@
+#!/bin/sh
+# Refuse a commit message that holds a term from the local denylist, without printing the term.
+# git passes the path of the message file as $1. When an editor wrote the message, the file still
+# holds git's comment lines, such as the branch name, and a term there is refused as well.
+
+# shellcheck source=SCRIPTDIR/denylist.sh
+. "$(dirname -- "$0")/denylist.sh"
+denylist_load commit-msg || exit 0
+
+denylist_match "$1"
+case $? in
+    0)
+        echo "commit-msg: the commit message, or a comment line git adds to it such as the branch name," >&2
+        echo "    holds a term from the denylist. Reword the message or rename the branch, then commit again." >&2
+        exit 1
+        ;;
+    1) exit 0 ;;
+    *) denylist_fail commit-msg "the denylist check failed" ;;
+esac

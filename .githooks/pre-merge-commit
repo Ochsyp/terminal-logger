@@ -1,0 +1,4 @@
+#!/bin/sh
+# git merge runs this hook instead of pre-commit before it records a merge commit, so it hands
+# over to pre-commit: no merge commit on main, and no denylist term in what the merge brings in.
+exec "$(dirname -- "$0")/pre-commit"
