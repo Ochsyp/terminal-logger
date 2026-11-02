@@ -1,0 +1,29 @@
+# Editor defaults; .gitattributes decides what git stores.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{sh,bash,bats,zsh,awk}]
+indent_style = space
+indent_size = 4
+
+# The hooks have no file extension.
+[.githooks/*]
+indent_style = space
+indent_size = 4
+
+# Fixtures are replayed verbatim and goldens compared byte for byte, so editors must
+# not trim them.
+[tests/{fixtures,golden}/**]
+trim_trailing_whitespace = false
+
+[*.{yml,yaml}]
+indent_style = space
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false

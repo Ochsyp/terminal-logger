@@ -1,0 +1,41 @@
+# Session recordings, transcripts, logs and shell histories. They hold everything typed, passwords
+# included; never commit one.
+*.log
+logs/
+typescript
+*.timing
+*.raw
+*.cast
+*.transcript
+commands.tsv
+*_history
+.histfile
+# A state folder such as ~/.local/state/tlogger, when HOME points into the work tree.
+/.local/
+
+# Shell start-up files, which hold aliases, paths and host names.
+.zshrc
+.zshenv
+.zprofile
+.bashrc
+.profile
+
+# VPN profiles and environment files, which hold credentials and host details.
+*.ovpn
+wg*.conf
+.env*
+
+# Screenshots, which show hosts, users and targets.
+Screenshot*
+
+# Editor, OS and tool files.
+.vscode/
+.idea/
+*.code-workspace
+*.swp
+*.swo
+*~
+Thumbs.db
+desktop.ini
+.DS_Store
+.claude/settings.local.json
