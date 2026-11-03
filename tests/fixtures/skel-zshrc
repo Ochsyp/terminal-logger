@@ -1,0 +1,4 @@
+# Synthetic stand-in for /etc/skel/.zshrc, which the installer tests seed a missing rc from.
+setopt autocd
+alias ll='ls -l'
+PROMPT='%n@%m:%~%# '
