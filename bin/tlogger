@@ -1,0 +1,1792 @@
+#!/usr/bin/env bash
+# tlogger: install, remove and report the zsh plugin that will record terminal sessions as
+# evidence for penetration tests. This version manages a 4-line block at the top of the zsh rc,
+# the plugin files, the config and the state folders, and records nothing yet.
+
+# Exit status: 0 done or nothing to change; 1 error or refusal, and for status an install in part;
+# 2 usage error, or --mode or --yes missing where no terminal can answer; 3 not installed or
+# nothing to remove. Executing the file runs main; sourcing it only sets the globals and defines
+# the functions, for tests.
+# TLOGGER_SKEL, the file a missing rc is seeded from, exists for tests; production never sets it.
+
+# =======================================================
+#                    GLOBAL SETTINGS
+# =======================================================
+
+# The source tree: the folder above the bin/ that holds this file, with every symlink resolved,
+# so that current/bin/tlogger names the release folder it belongs to.
+SRC_ROOT=$(readlink -f -- "${BASH_SOURCE[0]}" 2> /dev/null) || SRC_ROOT=
+SRC_ROOT=${SRC_ROOT%/*}
+SRC_ROOT=${SRC_ROOT%/*}
+
+# The files of a release, relative to the source tree. bin/tlogger is the only executable one.
+RELEASE_FILES=(bin/tlogger lib/tlogger.zsh libexec/rcblock.awk VERSION)
+
+# The marker lines around the block; libexec/rcblock.awk holds the same two lines.
+START_MARK='# >>> tlogger >>>'
+END_MARK='# <<< tlogger <<<'
+
+# A version names a release folder, so it is X.Y.Z with an optional suffix of letters, digits and
+# dots, and nothing that can act as a path.
+VERSION_RE='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+
+# One MANIFEST line as sha256sum writes it, with ' ' or '*' before the path. Every name in the
+# path starts with a letter, a digit or _, so no line can name . or .. or an absolute path.
+MANIFEST_RE='^[0-9a-f]{64} [ *]([A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*)$'
+
+# The name backup_rc gives an rc backup: the UTC time, then the 6 characters mktemp picks. Only
+# names of this form are pruned, so a file of the user's own in rc-backups stays.
+BACKUP_NAME_RE='^zshrc\.[0-9]{8}T[0-9]{6}Z\.[A-Za-z0-9]{6}$'
+
+# The zsh code that prints the paths tlogger needs, one 'TLOGGER_Q:' line each. It runs without
+# -f, so the user's .zshenv applies, and the prefix sets its lines apart from anything .zshenv
+# prints; the empty first line ends a line .zshenv leaves open. A value that holds a newline
+# prints empty, and resolve_paths refuses it. As in zsh, ZDOTDIR falls back to HOME only when it
+# is unset, and the XDG folders also when they are empty, as the XDG spec says.
+IFS= read -r -d '' ZSH_PATH_QUERY << 'EOF' || true
+builtin print
+for k v in \
+    ZDOTDIR "${ZDOTDIR-$HOME}" \
+    XDG_DATA_HOME "${XDG_DATA_HOME:-$HOME/.local/share}" \
+    XDG_CONFIG_HOME "${XDG_CONFIG_HOME:-$HOME/.config}" \
+    XDG_STATE_HOME "${XDG_STATE_HOME:-$HOME/.local/state}"
+do
+    if [[ $v == *$'\n'* ]]; then v=; fi
+    builtin print -r -- "TLOGGER_Q:$k=$v"
+done
+EOF
+
+# The zsh code the probe runs in a new interactive shell. It prints its marker line only when
+# the plugin has defined the tlogger function; the empty first line ends a line that the
+# start-up files leave open.
+# shellcheck disable=SC2016 # zsh expands it, not bash.
+ZSH_PROBE='builtin print; if (( ${+functions[tlogger]} )); then builtin print -r -- TLOGGER_PROBE:loaded; fi'
+
+# Options, set by the parse functions.
+OPT_MODE=
+OPT_DRY_RUN=0
+OPT_YES=0
+OPT_PRINT_ONLY=0
+OPT_PURGE_CONFIG=0
+
+# Paths, set by resolve_paths from what zsh reports.
+ZDOT=
+DATA_HOME=
+CONFIG_HOME=
+STATE_HOME=
+RC=
+DATA_DIR=
+RELEASES_DIR=
+CURRENT_LINK=
+PLUGIN=
+CONFIG_DIR=
+CONFIG_FILE=
+STATE_DIR=
+BACKUP_DIR=
+SESSIONS_DIR=
+
+# The version of the source tree, the block, the chosen mode, the backup made, if any, and what
+# install did with the code, for the summary.
+VERSION_STR=
+BLOCK=
+MODE=
+BACKUP=
+CODE_NOTE=
+
+# The rc as found: RC_STATE is regular, missing or foreign (a symlink, a non-regular file or
+# another user's file), RC_WHY says why it is foreign, OLD_RC is a private copy of its bytes,
+# SEED the file a missing rc starts from, SCANNED the file that copy came from, for messages,
+# and RC_CHANGED whether the new rc differs.
+RC_STATE=
+RC_WHY=
+OLD_RC=
+SEED=
+SCANNED=
+RC_CHANGED=0
+
+# What the last scan of an rc found; see libexec/rcblock.awk.
+SCAN_START=0
+SCAN_END=0
+SCAN_FOREIGN=()
+SCAN_ERRORS=()
+
+# What read_config found in the config.
+CONFIG_MODE=
+CONFIG_LOGDIR=
+CONFIG_ERROR=
+
+# Temp state that cleanup removes: the private work folder, which a dry run never creates, single
+# temp files and links, a backup being written, and a release folder being built or replaced,
+# removed through its MANIFEST. ASIDE_RELEASE is an old release that place_release has moved
+# aside from ASIDE_DEST; cleanup moves it back when the swap stops halfway.
+WORK=
+TEMP_PATHS=()
+PENDING_BACKUP=
+DOOMED_RELEASE=
+ASIDE_RELEASE=
+ASIDE_DEST=
+
+# =======================================================
+#                        MESSAGES
+# =======================================================
+
+# Print MESSAGE on stderr after the 'tlogger: ' prefix.
+# Callers pass every path through shown, so that no message names the home folder.
+msg() {
+    printf 'tlogger: %s\n' "$*" >&2
+}
+
+# Print MESSAGE on stderr as a warning; the run goes on.
+warn() {
+    printf 'tlogger: warning: %s\n' "$*" >&2
+}
+
+# Print MESSAGE on stderr and exit with STATUS. Never returns.
+# Exits only the shell it runs in, so call it outside $(...) and pipelines.
+die() {
+    local status=$1
+    shift
+    printf 'tlogger: %s\n' "$*" >&2
+    exit "$status"
+}
+
+# Print PATH with a leading $HOME replaced by ~, the form every message, plan and report uses.
+# A home path usually names the user, so nothing tlogger prints shows it in full. HOME counts
+# without its trailing slashes; a HOME of / replaces nothing.
+shown() {
+    local p=$1 home=${HOME-}
+    while [[ $home == */ && $home != / ]]; do
+        home=${home%/}
+    done
+    if [[ -n $home && $home != / && ( $p == "$home" || $p == "$home"/* ) ]]; then
+        printf '~%s\n' "${p#"$home"}"
+    else
+        printf '%s\n' "$p"
+    fi
+}
+
+# Print PATH without trailing slashes; / stays /.
+# Pure string work: it never looks at the file system.
+strip_slashes() {
+    local p=$1
+    while [[ $p == */ && $p != / ]]; do
+        p=${p%/}
+    done
+    printf '%s\n' "$p"
+}
+
+# =======================================================
+#                     USAGE AND CLEANUP
+# =======================================================
+
+# Print the usage text on stdout.
+# The caller picks the stream and the exit status.
+usage() {
+    cat << 'EOF'
+Usage: tlogger <command> [options]
+
+Commands:
+  install    Put the tlogger block at the top of the zsh rc (${ZDOTDIR-~}/.zshrc) and install
+             the plugin files, the config and the state folders.
+  uninstall  Remove the block and the plugin files. The config stays unless --purge-config is
+             given; logs and rc backups always stay.
+  status     Show whether tlogger is installed and where its files are.
+  version    Print the version.
+  help       Show this help; -h and --help do the same.
+
+Install options:
+  --mode auto|manual  Record every new terminal (auto) or only on request (manual). This
+                      version records nothing yet. Without --mode, the mode in the config is
+                      kept, or a terminal is asked.
+  --dry-run           Show the plan and the change to the rc, and write nothing.
+  --print-only        Print the block to add by hand, and write nothing.
+  --yes               Do not ask for confirmation; needed outside a terminal.
+
+Uninstall options:
+  --dry-run           Show the change to the rc and the files to remove, and write nothing.
+  --yes               Do not ask for confirmation; needed outside a terminal.
+  --purge-config      Remove the config as well.
+
+Exit status: 0 done or nothing to change; 1 error or refusal (status: installed only in part);
+2 usage error, or --mode or --yes missing outside a terminal; 3 not installed or nothing to remove.
+EOF
+}
+
+# Print MESSAGE and the usage text on stderr, then exit 2. Never returns.
+usage_error() {
+    printf 'tlogger: %s\n' "$*" >&2
+    usage >&2
+    exit 2
+}
+
+# Remove what this run made and did not keep: the work folder, temp files and links, a partial
+# backup and a release folder being built or replaced, after moving a release that was set aside
+# back into place. Runs from the EXIT trap, ignores every failure and never changes the exit
+# status.
+cleanup() {
+    local p
+    for p in "${TEMP_PATHS[@]}"; do
+        rm -f -- "$p" 2> /dev/null || true
+    done
+    if [[ -n $PENDING_BACKUP ]]; then
+        rm -f -- "$PENDING_BACKUP" 2> /dev/null || true
+    fi
+    if [[ -n $ASIDE_RELEASE && ! -e $ASIDE_DEST && ! -L $ASIDE_DEST ]]; then
+        mv -T -- "$ASIDE_RELEASE" "$ASIDE_DEST" 2> /dev/null || true
+    fi
+    if [[ -n $DOOMED_RELEASE ]]; then
+        remove_release_dir "$DOOMED_RELEASE" 2> /dev/null || true
+    fi
+    if [[ -n $WORK && -d $WORK ]]; then
+        rm -f -- "$WORK"/* 2> /dev/null || true
+        rmdir -- "$WORK" 2> /dev/null || true
+    fi
+}
+
+# Set the traps that turn HUP, INT and TERM into an exit with status 128+n, so that the EXIT trap
+# cleans up. main sets them; write_rc sets them again after a write that ignores those signals.
+set_signal_traps() {
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+}
+
+# Create the private work folder WORK under TMPDIR, where copies of the rc and the plans are built.
+# mktemp makes it mode 0700; cleanup removes it with the plain files in it. A dry run never calls
+# it, so that it writes nothing anywhere.
+make_work() {
+    WORK=$(mktemp -d "${TMPDIR:-/tmp}/tlogger.XXXXXX" 2> /dev/null) ||
+        die 1 "cannot create a temp folder in $(shown "${TMPDIR:-/tmp}")"
+}
+
+# =======================================================
+#                     CHECKS AND PROMPTS
+# =======================================================
+
+# Succeed when stdin and stderr are both terminals, so that a question can be asked and answered.
+on_tty() {
+    [[ -t 0 && -t 2 ]]
+}
+
+# Ask QUESTION on the terminal and return when the answer is y or yes; --yes skips the question.
+# Exits 1 on any other answer, which leaves everything as it was.
+confirm() {
+    local answer
+    if (( OPT_YES )); then
+        return 0
+    fi
+    printf 'tlogger: %s [y/N] ' "$1" >&2
+    IFS= read -r answer || answer=
+    case ${answer,,} in
+        y | yes) return 0 ;;
+    esac
+    die 1 "nothing changed"
+}
+
+# Print the home folder of user 0 from the passwd database, or /root when getent cannot tell.
+print_root_home() {
+    local entry home=
+    entry=$(getent passwd 0 2> /dev/null) || entry=
+    IFS=: read -r _ _ _ _ _ home _ <<< "$entry" || true
+    printf '%s\n' "${home:-/root}"
+}
+
+# Succeed when the path PATH is the folder DIR or lies under it, once readlink -m has made both
+# canonical: every symlink that exists resolved and every . and .. part gone.
+under_dir() {
+    local path dir
+    path=$(readlink -m -- "$1" 2> /dev/null) || return 1
+    dir=$(readlink -m -- "$2" 2> /dev/null) || return 1
+    [[ -n $path && -n $dir && ( $path == "$dir" || $path == "${dir%/}"/* ) ]]
+}
+
+# Exit 1 when running as root with a HOME that is not root's own: root must never write into
+# another user's rc, config or evidence, as 'sudo tlogger' with a kept HOME would. A ZDOTDIR
+# from the environment must lie in root's home too, since the zsh query runs the .zshenv there.
+refuse_foreign_root() {
+    local root_home
+    if (( EUID != 0 )); then
+        return 0
+    fi
+    root_home=$(print_root_home)
+    if [[ $(strip_slashes "${HOME-}") != "$(strip_slashes "$root_home")" ]]; then
+        die 1 "refusing to run as root for a home folder that is not root's; run tlogger as that user, without sudo"
+    fi
+    if [[ -n ${ZDOTDIR+set} ]] && ! under_dir "$ZDOTDIR" "$root_home"; then
+        die 1 "refusing to run as root with a ZDOTDIR outside root's home; unset it, or run tlogger as the user it belongs to"
+    fi
+}
+
+# Exit 1 when running as root and the zsh start-up folder or an XDG base folder that zsh reports
+# lies outside root's home: root's rc would then source a plugin that another user can replace.
+# Called by resolve_paths once the paths are known.
+refuse_foreign_root_paths() {
+    local root_home path
+    if (( EUID != 0 )); then
+        return 0
+    fi
+    root_home=$(print_root_home)
+    for path in "$ZDOT" "$DATA_HOME" "$CONFIG_HOME" "$STATE_HOME"; do
+        if ! under_dir "$path" "$root_home"; then
+            die 1 "refusing to run as root with $(shown "$path") outside root's home; unset the ZDOTDIR or XDG variable that points there, or run tlogger as the user it belongs to"
+        fi
+    done
+}
+
+# Set VERSION_STR from the first line of the source tree's VERSION file.
+# Exits 1 when the file is missing or that line is not a version.
+read_version() {
+    VERSION_STR=
+    if [[ -f $SRC_ROOT/VERSION && -r $SRC_ROOT/VERSION ]]; then
+        { IFS= read -r VERSION_STR < "$SRC_ROOT/VERSION"; } 2> /dev/null || true
+    fi
+    if [[ ! $VERSION_STR =~ $VERSION_RE ]]; then
+        die 1 "cannot read a version from $(shown "$SRC_ROOT/VERSION")"
+    fi
+}
+
+# Exit 1 unless the source tree holds every release file, readable.
+check_source_tree() {
+    local f
+    for f in "${RELEASE_FILES[@]}"; do
+        if [[ ! -f $SRC_ROOT/$f || ! -r $SRC_ROOT/$f ]]; then
+            die 1 "the source tree $(shown "$SRC_ROOT") lacks $f"
+        fi
+    done
+}
+
+# Warn when /usr/bin/script lacks --logging-format, which recording needs from a later version
+# on (util-linux 2.35 or newer). Only warns: this version records nothing.
+check_recorder() {
+    local help
+    help=$(/usr/bin/script --help 2> /dev/null) || help=
+    if [[ $help != *--logging-format* ]]; then
+        warn "/usr/bin/script lacks --logging-format; recording, which arrives in a later version, needs util-linux 2.35 or newer"
+    fi
+}
+
+# =======================================================
+#                          PATHS
+# =======================================================
+
+# Ask zsh, with the user's .zshenv applied, for ZDOTDIR and the XDG base folders, and set every
+# path global from the answer. Exits 1 when zsh is missing, gives no answer within 10 seconds,
+# reports no value for a key, or reports one that is not an absolute path without a newline.
+# The query's stderr is dropped, since start-up file errors name the home folder in full.
+resolve_paths() {
+    local out line key value status=0
+    local -A found=()
+    if [[ -z ${HOME:-} || $HOME != /* ]]; then
+        die 1 "HOME is not set to an absolute path"
+    fi
+    if ! command -v zsh > /dev/null 2>&1; then
+        die 1 "zsh is not installed, and tlogger works only with zsh; install it first"
+    fi
+    # TERM ends a non-interactive zsh; -k 2 follows with KILL when .zshenv traps TERM.
+    out=$(timeout -k 2 10 zsh -c "$ZSH_PATH_QUERY" < /dev/null 2> /dev/null) || status=$?
+    if (( status == 124 || status == 137 )); then
+        die 1 "zsh did not answer within 10 seconds; check the zsh start-up files, such as .zshenv"
+    fi
+    while IFS= read -r line; do
+        if [[ $line != TLOGGER_Q:*=* ]]; then
+            continue
+        fi
+        line=${line#TLOGGER_Q:}
+        case ${line%%=*} in
+            ZDOTDIR | XDG_DATA_HOME | XDG_CONFIG_HOME | XDG_STATE_HOME)
+                found[${line%%=*}]=${line#*=}
+                ;;
+        esac
+    done <<< "$out"
+    for key in ZDOTDIR XDG_DATA_HOME XDG_CONFIG_HOME XDG_STATE_HOME; do
+        if [[ -z ${found[$key]+set} ]]; then
+            die 1 "zsh reported no $key (exit status $status); check the zsh start-up files, such as .zshenv"
+        fi
+        value=${found[$key]}
+        if [[ $value != /* ]]; then
+            die 1 "zsh reports $key as a value that is not an absolute path without a newline"
+        fi
+        found[$key]=$(strip_slashes "$value")
+    done
+    ZDOT=${found[ZDOTDIR]}
+    DATA_HOME=${found[XDG_DATA_HOME]}
+    CONFIG_HOME=${found[XDG_CONFIG_HOME]}
+    STATE_HOME=${found[XDG_STATE_HOME]}
+    RC=$ZDOT/.zshrc
+    DATA_DIR=$DATA_HOME/tlogger
+    RELEASES_DIR=$DATA_DIR/releases
+    CURRENT_LINK=$DATA_DIR/current
+    PLUGIN=$CURRENT_LINK/lib/tlogger.zsh
+    CONFIG_DIR=$CONFIG_HOME/tlogger
+    CONFIG_FILE=$CONFIG_DIR/config
+    STATE_DIR=$STATE_HOME/tlogger
+    BACKUP_DIR=$STATE_DIR/rc-backups
+    SESSIONS_DIR=$STATE_DIR/sessions
+    refuse_foreign_root_paths
+}
+
+# Set BLOCK to the 4 lines install puts at the top of the rc, each ending in LF. The plugin path
+# is written as $HOME/... when it lies under HOME, else in full. Exits 1 when the part written
+# literally holds a character that zsh treats specially inside double quotes.
+build_block() {
+    local home written literal
+    home=$(strip_slashes "$HOME")
+    if [[ $home != / && $PLUGIN == "$home"/* ]]; then
+        literal=${PLUGIN#"$home"}
+        written="\$HOME$literal"
+    else
+        literal=$PLUGIN
+        written=$PLUGIN
+    fi
+    case $literal in
+        *[\"\$\`\\]* | *$'\n'*)
+            die 1 "the plugin path $(shown "$PLUGIN") holds a double quote, dollar sign, backquote, backslash or newline, which tlogger cannot write into the rc safely"
+            ;;
+    esac
+    printf -v BLOCK '%s\n' "$START_MARK" \
+        '# Managed by tlogger; remove it with tlogger uninstall.' \
+        "if [[ -r \"$written\" ]]; then source \"$written\"; elif [[ -o interactive ]]; then print -u2 \"tlogger: plugin missing, this terminal is NOT recorded\"; fi" \
+        "$END_MARK"
+}
+
+# =======================================================
+#                          THE RC
+# =======================================================
+
+# Set RC_STATE to regular, missing or foreign (a symlink, a non-regular file, another user's file
+# or one without write permission, which marks it as not to be edited) and RC_WHY to why a
+# foreign rc is foreign. Looks at the rc without reading it.
+classify_rc() {
+    RC_WHY=
+    if [[ -L $RC ]]; then
+        RC_STATE=foreign RC_WHY="is a symlink"
+    elif [[ ! -e $RC ]]; then
+        RC_STATE=missing
+    elif [[ ! -f $RC ]]; then
+        RC_STATE=foreign RC_WHY="is not a regular file"
+    elif [[ ! -O $RC ]]; then
+        RC_STATE=foreign RC_WHY="belongs to another user"
+    elif [[ ! -w $RC ]]; then
+        RC_STATE=foreign RC_WHY="is not writable"
+    else
+        RC_STATE=regular
+    fi
+}
+
+# Set OLD_RC to a snapshot of the file SOURCE, so that every later step reads the same bytes: a
+# copy in WORK, or SOURCE itself in a dry run, which writes nothing.
+# Exits 1 when SOURCE cannot be read or copied.
+snapshot_rc() {
+    local source=$1
+    if [[ ! -r $source ]]; then
+        die 1 "cannot read $(shown "$source")"
+    fi
+    if [[ -z $WORK ]]; then
+        OLD_RC=$source
+        return 0
+    fi
+    OLD_RC=$WORK/old-rc
+    { cat -- "$source" > "$OLD_RC"; } 2> /dev/null ||
+        die 1 "cannot copy $(shown "$source") to the temp folder"
+}
+
+# Take the snapshot of an existing rc and set SCANNED to the rc. A foreign rc counts only when it
+# reads as a regular file, as the target of a symlink can; otherwise OLD_RC stays empty.
+copy_rc() {
+    OLD_RC=''
+    SCANNED=$RC
+    if [[ $RC_STATE == regular || ( $RC_STATE == foreign && -f $RC && -r $RC ) ]]; then
+        snapshot_rc "$RC"
+    fi
+}
+
+# Take the snapshot of what a missing rc starts from, ${TLOGGER_SKEL:-/etc/skel/.zshrc} when that
+# is readable, else nothing (/dev/null), and set SEED and SCANNED to the file used. TLOGGER_SKEL
+# exists for tests. Exits 1 when the zsh start-up folder itself is missing.
+seed_rc() {
+    local skel=${TLOGGER_SKEL:-/etc/skel/.zshrc}
+    SEED=''
+    SCANNED=$RC
+    if [[ ! -d $ZDOT ]]; then
+        die 1 "the zsh start-up folder $(shown "$ZDOT") does not exist"
+    fi
+    if [[ -f $skel && -r $skel ]]; then
+        SEED=$skel SCANNED=$skel
+        snapshot_rc "$skel"
+    else
+        snapshot_rc /dev/null
+    fi
+}
+
+# Scan FILE with rcblock.awk and set SCAN_START and SCAN_END (0 when there is no block),
+# SCAN_FOREIGN (line numbers) and SCAN_ERRORS ('kind line' items). Messages name SCANNED, else
+# the rc. Exits 1 when the scan fails for any reason other than malformed markers.
+scan_file() {
+    local file=$1 name out line status=0
+    name=$(shown "${SCANNED:-$RC}")
+    SCAN_START=0 SCAN_END=0
+    SCAN_FOREIGN=() SCAN_ERRORS=()
+    out=$({ LC_ALL=C awk -f "$SRC_ROOT/libexec/rcblock.awk" < "$file"; } 2> /dev/null) || status=$?
+    while IFS= read -r line; do
+        case $line in
+            '' | none) ;;
+            'block '*) read -r _ SCAN_START SCAN_END <<< "$line" ;;
+            'foreign '*) SCAN_FOREIGN+=("${line#foreign }") ;;
+            'error '*) SCAN_ERRORS+=("${line#error }") ;;
+            *) die 1 "rcblock.awk printed an unexpected line for $name" ;;
+        esac
+    done <<< "$out"
+    if [[ ! $SCAN_START =~ ^[0-9]+$ || ! $SCAN_END =~ ^[0-9]+$ ]]; then
+        die 1 "rcblock.awk printed an unexpected block line for $name"
+    fi
+    if (( status != 0 && ${#SCAN_ERRORS[@]} == 0 )); then
+        die 1 "cannot scan $name (awk exit status $status)"
+    fi
+}
+
+# Exit 1 when the last scan found malformed markers, naming each problem and its line number.
+# The rc stays as it is: only a person can tell which marker lines are meant.
+refuse_bad_markers() {
+    local item kind what
+    if (( ${#SCAN_ERRORS[@]} == 0 )); then
+        return 0
+    fi
+    msg "$(shown "${SCANNED:-$RC}") holds malformed tlogger markers:"
+    for item in "${SCAN_ERRORS[@]}"; do
+        kind=${item% *}
+        case $kind in
+            unpaired) what="a marker without its partner" ;;
+            duplicate) what="a marker that appears more than once" ;;
+            reversed) what="the end marker comes before the start marker" ;;
+            altered) what="a marker line with changed or extra text" ;;
+            *) what="a marker problem" ;;
+        esac
+        msg "  line ${item##* }: $kind, $what"
+    done
+    die 1 "fix or remove those lines by hand, then run tlogger again; nothing changed"
+}
+
+# Exit 1 when a line outside the block runs util-linux script, the sign of another session
+# recorder: two recorders in one rc would wrap every terminal twice.
+refuse_foreign_recorder() {
+    local count=${#SCAN_FOREIGN[@]} lines name
+    if (( count == 0 )); then
+        return 0
+    fi
+    lines=${SCAN_FOREIGN[*]}
+    name=$(shown "${SCANNED:-$RC}")
+    if (( count == 1 )); then
+        die 1 "another session recorder appears to be set up in $name at line $lines; remove it first"
+    fi
+    die 1 "another session recorder appears to be set up in $name at lines ${lines// /, }; remove it first"
+}
+
+# Print to stdout the rc built from SOURCE for ACTION: put adds the block first when there is
+# none and swaps it in place when there is one; strip cuts it out. Uses the last scan of SOURCE.
+# head and tail copy every byte outside the block, CR bytes and a missing final newline included.
+emit_rc() {
+    local action=$1 source=$2
+    if (( SCAN_START == 0 )); then
+        if [[ $action == put ]]; then
+            printf '%s' "$BLOCK" || return 1
+        fi
+        cat -- "$source" || return 1
+        return 0
+    fi
+    head -n "$(( SCAN_START - 1 ))" -- "$source" || return 1
+    if [[ $action == put ]]; then
+        printf '%s' "$BLOCK" || return 1
+    fi
+    tail -n "+$(( SCAN_END + 1 ))" -- "$source" || return 1
+}
+
+# Write the rc built from OLD_RC for ACTION (put or strip) to WORK/new-rc, the file write_rc
+# installs. Exits 1 when it cannot be written. A dry run never calls it.
+build_rc() {
+    { emit_rc "$1" "$OLD_RC" > "$WORK/new-rc"; } 2> /dev/null ||
+        die 1 "cannot build the new rc in the temp folder"
+}
+
+# Run COMMAND with its arguments and the rc built from OLD_RC for ACTION on stdin: WORK/new-rc
+# after build_rc, or straight from emit_rc in a dry run, which keeps no copy. Returns the status
+# of COMMAND, or of emit_rc when that fails and COMMAND does not.
+with_new_rc() {
+    local action=$1
+    shift
+    if [[ -n $WORK ]]; then
+        "$@" < "$WORK/new-rc"
+    else
+        emit_rc "$action" "$OLD_RC" 2> /dev/null | "$@"
+    fi
+}
+
+# Succeed when the rc built from OLD_RC for ACTION differs from OLD_RC by any byte, or when the
+# two cannot be compared. cmp's errors name the full path, so they are dropped.
+new_rc_differs() {
+    ! with_new_rc "$1" cmp -s -- "$OLD_RC" - 2> /dev/null
+}
+
+# Check that the rc built for ACTION parses wherever OLD_RC does: exit 1 when OLD_RC passes
+# zsh -n and the new rc fails. When OLD_RC already fails, warn and go on.
+check_syntax() {
+    if zsh -n -f -- "$OLD_RC" > /dev/null 2>&1; then
+        if ! with_new_rc "$1" zsh -n -f -- /dev/stdin > /dev/null 2>&1; then
+            die 1 "the new rc would fail a zsh -n syntax check that the current one passes; nothing changed"
+        fi
+    else
+        warn "$(shown "$RC") already fails a zsh -n syntax check; tlogger leaves the rest of it as it is"
+    fi
+}
+
+# Print on stdout a unified diff from OLD_RC to the rc built for ACTION, labelled OLD_LABEL and
+# NEW_LABEL, which callers give in the ~ form. Exits 1 when diff itself fails.
+show_diff() {
+    with_new_rc "$1" diff -u --label "$2" --label "$3" -- "$OLD_RC" - 2> /dev/null ||
+        [[ $? -eq 1 ]] || die 1 "cannot compare the current and the new rc"
+}
+
+# Print how to add the block by hand to a foreign rc, which tlogger never edits, with the block
+# itself on stdout. Uses the last scan of the rc for the lines of an outdated block.
+print_by_hand() {
+    msg "$(shown "$RC") $RC_WHY, so tlogger does not edit it."
+    if (( SCAN_START )); then
+        msg "Replace lines $SCAN_START-$SCAN_END of the file (for a symlink, the file it points to) with these 4 lines,"
+    else
+        msg "Add these 4 lines at the very top of the file (for a symlink, the file it points to),"
+    fi
+    msg "then run tlogger install again; with the block in place it sets up the rest without editing the file."
+    printf '%s' "$BLOCK"
+}
+
+# Copy the rc to rc-backups/zshrc.<UTC time>.<random> with mode 0600, and set BACKUP to it. With
+# PRUNE set to prune, keep the five newest backups; uninstall passes keep and deletes none.
+backup_rc() {
+    local prune=$1 stamp
+    stamp=$(date -u +%Y%m%dT%H%M%SZ 2> /dev/null) || die 1 "cannot read the clock"
+    PENDING_BACKUP=$(mktemp "$BACKUP_DIR/zshrc.$stamp.XXXXXX" 2> /dev/null) ||
+        die 1 "cannot create a backup in $(shown "$BACKUP_DIR")"
+    chmod 600 -- "$PENDING_BACKUP" 2> /dev/null ||
+        die 1 "cannot set mode 0600 on $(shown "$PENDING_BACKUP")"
+    { cat -- "$RC" > "$PENDING_BACKUP"; } 2> /dev/null || die 1 "cannot back up $(shown "$RC")"
+    BACKUP=$PENDING_BACKUP
+    PENDING_BACKUP=
+    if [[ $prune == prune ]]; then
+        prune_backups
+    fi
+}
+
+# Delete all but the four newest backups other than BACKUP, so that five remain. Counts only
+# regular files named as backup_rc names them (BACKUP_NAME_RE); symlinks and every other file
+# stay. The UTC time in the name orders them to the second: backups made within one second keep
+# no order among themselves.
+prune_backups() {
+    local f excess
+    local -a old=()
+    while IFS= read -r f; do
+        old+=("$f")
+    done < <(
+        for f in "$BACKUP_DIR"/zshrc.*; do
+            if [[ -f $f && ! -L $f && $f != "$BACKUP" && ${f##*/} =~ $BACKUP_NAME_RE ]]; then
+                printf '%s\n' "$f"
+            fi
+        done | LC_ALL=C sort
+    )
+    excess=$(( ${#old[@]} - 4 ))
+    if (( excess <= 0 )); then
+        return 0
+    fi
+    for f in "${old[@]:0:excess}"; do
+        rm -f -- "$f" 2> /dev/null || warn "cannot delete the old backup $(shown "$f")"
+    done
+}
+
+# Replace the rc with the file NEW, backing it up first (PRUNE as for backup_rc). Keeps the mode
+# through chmod --reference and a hard-linked rc's inode by writing in place; a missing rc is
+# created with mode 0644 and nothing to back up. Exits 1 when the rc changed since it was read,
+# and when it does not hold NEW afterwards.
+write_rc() {
+    local new=$1 prune=$2 tmp links
+    if [[ $RC_STATE == missing ]]; then
+        tmp=$(mktemp "$ZDOT/.zshrc.tlogger.XXXXXX" 2> /dev/null) ||
+            die 1 "cannot create a temp file in $(shown "$ZDOT")"
+        TEMP_PATHS+=("$tmp")
+        { cat -- "$new" > "$tmp"; } 2> /dev/null || die 1 "cannot write a temp file in $(shown "$ZDOT")"
+        chmod 644 -- "$tmp" 2> /dev/null || die 1 "cannot set mode 0644 on a temp file in $(shown "$ZDOT")"
+        # link(2) fails when the name exists, so an rc made meanwhile is never overwritten. On a
+        # file system without hard links, mv -n renames only while the name is still free.
+        if ln -- "$tmp" "$RC" 2> /dev/null; then
+            rm -f -- "$tmp" 2> /dev/null || true
+        else
+            if [[ ! -e $RC && ! -L $RC ]]; then
+                mv -n -T -- "$tmp" "$RC" 2> /dev/null || true
+            fi
+            if [[ -e $tmp ]]; then
+                die 1 "cannot create $(shown "$RC"), or it appeared while tlogger was working; nothing changed, run it again"
+            fi
+        fi
+        check_written "$new"
+        return 0
+    fi
+    if [[ -L $RC || ! -f $RC ]] || ! cmp -s -- "$OLD_RC" "$RC" 2> /dev/null; then
+        die 1 "$(shown "$RC") changed while tlogger was working; nothing changed, run it again"
+    fi
+    backup_rc "$prune"
+    links=$(stat -c %h -- "$RC" 2> /dev/null) || die 1 "cannot read the link count of $(shown "$RC")"
+    if (( links > 1 )); then
+        # A rename would split the hard links, so the bytes go into the same inode. HUP, INT and
+        # TERM are ignored meanwhile, so that no signal leaves the rc cut short.
+        trap '' HUP INT TERM
+        if ! { cat -- "$new" > "$RC"; } 2> /dev/null; then
+            set_signal_traps
+            die 1 "cannot write $(shown "$RC"); the backup is $(shown "$BACKUP")"
+        fi
+        set_signal_traps
+        check_written "$new"
+        return 0
+    fi
+    # The temp file sits in the rc's own folder, so that the rename is atomic.
+    tmp=$(mktemp "$ZDOT/.zshrc.tlogger.XXXXXX" 2> /dev/null) ||
+        die 1 "cannot create a temp file in $(shown "$ZDOT")"
+    TEMP_PATHS+=("$tmp")
+    { cat -- "$new" > "$tmp"; } 2> /dev/null || die 1 "cannot write a temp file in $(shown "$ZDOT")"
+    chmod --reference="$RC" -- "$tmp" 2> /dev/null || die 1 "cannot copy the mode of $(shown "$RC")"
+    mv -T -f -- "$tmp" "$RC" 2> /dev/null ||
+        die 1 "cannot replace $(shown "$RC"); the backup is $(shown "$BACKUP")"
+    check_written "$new"
+}
+
+# Exit 1 unless the rc now holds exactly the bytes of the file NEW, naming the backup to restore
+# from when there is one. Called by write_rc after each write.
+check_written() {
+    if cmp -s -- "$1" "$RC" 2> /dev/null; then
+        return 0
+    fi
+    if [[ -n $BACKUP ]]; then
+        die 1 "$(shown "$RC") does not hold what tlogger wrote; restore it from $(shown "$BACKUP")"
+    fi
+    die 1 "$(shown "$RC") does not hold what tlogger wrote; check it by hand"
+}
+
+# =======================================================
+#                         THE CODE
+# =======================================================
+
+# Write the MANIFEST of the source tree to WORK: one sha256sum line per release file.
+# Exits 1 when a source file cannot be read. A dry run never calls it.
+make_manifest() {
+    { (cd -- "$SRC_ROOT" && sha256sum -- "${RELEASE_FILES[@]}") > "$WORK/MANIFEST"; } 2> /dev/null ||
+        die 1 "cannot read the files of the source tree $(shown "$SRC_ROOT")"
+}
+
+# Succeed when the folder DEST already holds this source tree's release: a real folder whose
+# MANIFEST equals the one in WORK, whose files still match it and whose bin/tlogger runs.
+release_matches() {
+    local dest=$1
+    [[ -d $dest && ! -L $dest && -f $dest/MANIFEST && ! -L $dest/MANIFEST ]] || return 1
+    [[ -x $dest/bin/tlogger ]] || return 1
+    cmp -s -- "$WORK/MANIFEST" "$dest/MANIFEST" || return 1
+    (cd -- "$dest" && sha256sum --quiet --check MANIFEST) > /dev/null 2>&1
+}
+
+# Print the name of the release the current link points at, or nothing when there is no link
+# or it points anywhere other than releases/<name>.
+current_release() {
+    local target
+    [[ -L $CURRENT_LINK ]] || return 0
+    target=$(readlink -- "$CURRENT_LINK" 2> /dev/null) || return 0
+    if [[ $target == releases/* && ${target#releases/} != */* ]]; then
+        printf '%s\n' "${target#releases/}"
+    fi
+}
+
+# Succeed when the version A ranks above the version B, both of the VERSION_RE form. X.Y.Z
+# compare number by number; at equal numbers a version with a suffix ranks below the one without,
+# as 0.1.0-dev below 0.1.0, and two suffixes compare as sort -V orders them.
+version_newer() {
+    local a=$1 b=$2 top
+    if [[ $a == "$b" ]]; then
+        return 1
+    fi
+    if [[ ${a%%-*} != "${b%%-*}" ]]; then
+        top=$(printf '%s\n' "${a%%-*}" "${b%%-*}" | LC_ALL=C sort -V | tail -n 1)
+        [[ $top == "${a%%-*}" ]]
+        return
+    fi
+    if [[ $a != *-* ]]; then
+        return 0
+    fi
+    if [[ $b != *-* ]]; then
+        return 1
+    fi
+    top=$(printf '%s\n' "$a" "$b" | LC_ALL=C sort -V | tail -n 1)
+    [[ $top == "$a" ]]
+}
+
+# Exit 1 when the current link points at a working release newer than this source tree. An older
+# copy of tlogger, such as the bin/tlogger that a terminal opened before an upgrade still runs,
+# would otherwise switch every new terminal back to old code.
+refuse_downgrade() {
+    local current
+    current=$(current_release)
+    if [[ $current =~ $VERSION_RE && -x $RELEASES_DIR/$current/bin/tlogger ]] &&
+        version_newer "$current" "$VERSION_STR"; then
+        die 1 "$(shown "$CURRENT_LINK") is $current, newer than this tlogger ($VERSION_STR); run $(shown "$CURRENT_LINK/bin/tlogger") install instead, or tlogger uninstall first to go back to $VERSION_STR on purpose"
+    fi
+}
+
+# Build this source tree's release in a temp folder under releases/, set DOOMED_RELEASE to it
+# and check the copies against the MANIFEST. The MANIFEST goes in first, so that cleanup can
+# remove a half-built folder through it.
+build_release() {
+    local f mode
+    DOOMED_RELEASE=$(mktemp -d "$RELEASES_DIR/.build.XXXXXX" 2> /dev/null) ||
+        die 1 "cannot create a temp folder in $(shown "$RELEASES_DIR")"
+    install -m 0644 -- "$WORK/MANIFEST" "$DOOMED_RELEASE/MANIFEST" 2> /dev/null ||
+        die 1 "cannot write the MANIFEST in $(shown "$RELEASES_DIR")"
+    for f in "${RELEASE_FILES[@]}"; do
+        if [[ $f == */* ]]; then
+            install -d -m 0755 -- "$DOOMED_RELEASE/${f%/*}" 2> /dev/null ||
+                die 1 "cannot create a folder in $(shown "$RELEASES_DIR")"
+        fi
+        mode=0644
+        if [[ $f == bin/tlogger ]]; then
+            mode=0755
+        fi
+        install -m "$mode" -- "$SRC_ROOT/$f" "$DOOMED_RELEASE/$f" 2> /dev/null ||
+            die 1 "cannot copy $f into $(shown "$RELEASES_DIR")"
+    done
+    if ! (cd -- "$DOOMED_RELEASE" && sha256sum --quiet --check MANIFEST) > /dev/null 2>&1; then
+        die 1 "the copied files do not match their MANIFEST; nothing was switched"
+    fi
+    chmod 755 -- "$DOOMED_RELEASE" 2> /dev/null || die 1 "cannot set the mode of the new release folder"
+}
+
+# Move the release built in DOOMED_RELEASE to the folder DEST. An existing DEST, the same version
+# with other content, is swapped out in one exchange where mv supports it, else by two renames,
+# and then removed through its MANIFEST.
+place_release() {
+    local dest=$1 old
+    if [[ ! -e $dest && ! -L $dest ]]; then
+        mv -T -- "$DOOMED_RELEASE" "$dest" 2> /dev/null ||
+            die 1 "cannot move the new release to $(shown "$dest")"
+        DOOMED_RELEASE=
+        return 0
+    fi
+    if [[ -L $dest || ! -d $dest ]]; then
+        die 1 "$(shown "$dest") is not a release folder; remove it by hand"
+    fi
+    # With an mv that lacks --exchange, or a file system that cannot exchange, nothing moves.
+    if ! mv --exchange -T -- "$DOOMED_RELEASE" "$dest" 2> /dev/null; then
+        old=$RELEASES_DIR/.old.$$
+        if [[ -e $old || -L $old ]]; then
+            die 1 "$(shown "$old") is in the way; remove it by hand"
+        fi
+        # Between the two renames DEST is missing; cleanup then moves the old release back.
+        ASIDE_RELEASE=$old ASIDE_DEST=$dest
+        mv -T -- "$dest" "$old" 2> /dev/null || die 1 "cannot move the old release $(shown "$dest") aside"
+        mv -T -- "$DOOMED_RELEASE" "$dest" 2> /dev/null ||
+            die 1 "cannot move the new release to $(shown "$dest")"
+        DOOMED_RELEASE=$old
+        ASIDE_RELEASE='' ASIDE_DEST=''
+    fi
+    # DOOMED_RELEASE now names the old release.
+    remove_release_dir "$DOOMED_RELEASE" || true
+    DOOMED_RELEASE=
+}
+
+# Point the current link at releases/<version>: a relative symlink made under a temp name and
+# renamed over the old link, so that a starting shell always finds one or the other.
+switch_current() {
+    local target=releases/$VERSION_STR tmp
+    if [[ -e $CURRENT_LINK && ! -L $CURRENT_LINK ]]; then
+        die 1 "$(shown "$CURRENT_LINK") is not a symlink; remove it by hand"
+    fi
+    if [[ -L $CURRENT_LINK && $(readlink -- "$CURRENT_LINK" 2> /dev/null) == "$target" ]]; then
+        return 0
+    fi
+    tmp=$DATA_DIR/.current.$$
+    TEMP_PATHS+=("$tmp")
+    rm -f -- "$tmp" 2> /dev/null || true
+    ln -s -- "$target" "$tmp" 2> /dev/null || die 1 "cannot create a symlink in $(shown "$DATA_DIR")"
+    if [[ ! -L $tmp ]]; then
+        die 1 "cannot create a symlink in $(shown "$DATA_DIR"); its file system may not support them"
+    fi
+    mv -T -f -- "$tmp" "$CURRENT_LINK" 2> /dev/null || die 1 "cannot switch $(shown "$CURRENT_LINK")"
+}
+
+# Keep the current release and one older one, the release current pointed at before (PREVIOUS)
+# or else the highest other version by version_newer, and remove every other release folder
+# through its MANIFEST.
+prune_releases() {
+    local previous=$1 dir name keep=
+    local -a others=()
+    for dir in "$RELEASES_DIR"/*; do
+        name=${dir##*/}
+        if [[ -d $dir && ! -L $dir && $name =~ $VERSION_RE && $name != "$VERSION_STR" ]]; then
+            others+=("$name")
+        fi
+    done
+    if (( ${#others[@]} == 0 )); then
+        return 0
+    fi
+    for name in "${others[@]}"; do
+        if [[ $name == "$previous" ]]; then
+            keep=$name
+        fi
+    done
+    if [[ -z $keep ]]; then
+        for name in "${others[@]}"; do
+            if [[ -z $keep ]] || version_newer "$name" "$keep"; then
+                keep=$name
+            fi
+        done
+    fi
+    for name in "${others[@]}"; do
+        if [[ $name != "$keep" ]]; then
+            remove_release_dir "$RELEASES_DIR/$name" || true
+        fi
+    done
+}
+
+# Succeed when the path REL inside the folder DIR is a symlink or passes through one.
+path_has_link() {
+    local dir=$1 part='' name
+    local -a names=()
+    IFS=/ read -r -a names <<< "$2"
+    for name in "${names[@]}"; do
+        part=${part:+$part/}$name
+        if [[ -L $dir/$part ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Remove the release folder DIR, a direct child of the releases folder, through its MANIFEST:
+# the files it lists, the MANIFEST, then the folders left empty. Follows no symlink and removes
+# nothing else; warns and returns 1 when DIR stays in place.
+remove_release_dir() {
+    local dir=$1 line rel parent
+    local -a rels=() parents=()
+    if [[ ${dir%/*} != "$RELEASES_DIR" || -L $dir || ! -d $dir ]]; then
+        warn "left $(shown "$dir") in place: it is not a release folder"
+        return 1
+    fi
+    if [[ -L $dir/MANIFEST || ! -f $dir/MANIFEST || ! -r $dir/MANIFEST ]]; then
+        # A build that stopped before its MANIFEST was written leaves an empty folder.
+        if rmdir -- "$dir" 2> /dev/null; then
+            return 0
+        fi
+        warn "left $(shown "$dir") in place: it has no readable MANIFEST"
+        return 1
+    fi
+    while IFS= read -r line || [[ -n $line ]]; do
+        if [[ ! $line =~ $MANIFEST_RE ]]; then
+            warn "left $(shown "$dir") in place: its MANIFEST holds a line tlogger cannot read"
+            return 1
+        fi
+        rels+=("${BASH_REMATCH[1]}")
+    done < "$dir/MANIFEST"
+    for rel in "${rels[@]}"; do
+        if path_has_link "$dir" "$rel"; then
+            warn "left $(shown "$dir/$rel") in place: a symlink is in its path"
+            continue
+        fi
+        if [[ -f $dir/$rel ]]; then
+            rm -f -- "$dir/$rel" 2> /dev/null || warn "cannot delete $(shown "$dir/$rel")"
+        fi
+        parent=$rel
+        while [[ $parent == */* ]]; do
+            parent=${parent%/*}
+            parents+=("$parent")
+        done
+    done
+    rm -f -- "$dir/MANIFEST" 2> /dev/null || warn "cannot delete $(shown "$dir/MANIFEST")"
+    # A reverse sort puts a/b before a, so the deepest folders go first.
+    if (( ${#parents[@]} )); then
+        while IFS= read -r parent; do
+            if [[ ! -L $dir/$parent ]]; then
+                rmdir -- "$dir/$parent" 2> /dev/null || true
+            fi
+        done < <(printf '%s\n' "${parents[@]}" | LC_ALL=C sort -r -u)
+    fi
+    if ! rmdir -- "$dir" 2> /dev/null; then
+        warn "left $(shown "$dir") in place: it holds files tlogger did not install"
+        return 1
+    fi
+}
+
+# Succeed when any code is installed: the current link or the releases folder exists.
+code_present() {
+    [[ -L $CURRENT_LINK || -e $CURRENT_LINK || -e $RELEASES_DIR || -L $RELEASES_DIR ]]
+}
+
+# Install this source tree's release, point current at it and prune old releases. Skips the
+# copy when the source tree is that release or the release already matches its MANIFEST. Sets
+# CODE_NOTE for the summary.
+install_code() {
+    local dest=$RELEASES_DIR/$VERSION_STR previous
+    make_parent "$DATA_HOME"
+    ensure_dir "$DATA_DIR" 755
+    ensure_dir "$RELEASES_DIR" 755
+    previous=$(current_release)
+    if [[ -d $dest && ! -L $dest && $(readlink -f -- "$dest") == "$SRC_ROOT" ]]; then
+        CODE_NOTE="kept: tlogger runs from this release"
+    elif release_matches "$dest"; then
+        CODE_NOTE="already up to date"
+    else
+        build_release
+        place_release "$dest"
+        CODE_NOTE="installed"
+    fi
+    switch_current
+    prune_releases "$previous"
+}
+
+# Remove the code: the current link, every entry of the releases folder that is a release
+# folder, through its MANIFEST, then the releases and data folders when they are empty. Warns
+# about each thing it leaves in place.
+remove_code() {
+    local entry
+    if [[ -L $CURRENT_LINK ]]; then
+        rm -f -- "$CURRENT_LINK" 2> /dev/null || die 1 "cannot remove $(shown "$CURRENT_LINK")"
+    fi
+    if [[ -d $RELEASES_DIR && ! -L $RELEASES_DIR ]]; then
+        while IFS= read -r -d '' entry; do
+            remove_release_dir "$entry" || true
+        done < <(find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -print0 2> /dev/null)
+        rmdir -- "$RELEASES_DIR" 2> /dev/null ||
+            warn "left $(shown "$RELEASES_DIR") in place: it is not empty"
+    fi
+    if [[ -d $DATA_DIR && ! -L $DATA_DIR ]]; then
+        rmdir -- "$DATA_DIR" 2> /dev/null ||
+            warn "left $(shown "$DATA_DIR") in place: it holds files tlogger did not install"
+    fi
+}
+
+# Print on stdout, indented and in the ~ form, what remove_code and --purge-config remove: the
+# current link, the files each release's MANIFEST lists with the MANIFEST, and the config. Marks
+# what remove_release_dir leaves in place: a folder without a readable MANIFEST, and a file with
+# a symlink in its path.
+print_removals() {
+    local entry line rel bad
+    local -a rels
+    if [[ -L $CURRENT_LINK ]]; then
+        printf '  %s\n' "$(shown "$CURRENT_LINK")"
+    fi
+    if [[ -d $RELEASES_DIR && ! -L $RELEASES_DIR ]]; then
+        while IFS= read -r -d '' entry; do
+            if [[ -L $entry || ! -d $entry || -L $entry/MANIFEST || ! -f $entry/MANIFEST ||
+                ! -r $entry/MANIFEST ]]; then
+                printf '  (left in place: %s)\n' "$(shown "$entry")"
+                continue
+            fi
+            rels=() bad=0
+            while IFS= read -r line || [[ -n $line ]]; do
+                if [[ ! $line =~ $MANIFEST_RE ]]; then
+                    bad=1
+                    break
+                fi
+                rels+=("${BASH_REMATCH[1]}")
+            done < "$entry/MANIFEST"
+            if (( bad )); then
+                printf '  (left in place: %s)\n' "$(shown "$entry")"
+                continue
+            fi
+            for rel in "${rels[@]}"; do
+                if path_has_link "$entry" "$rel"; then
+                    printf '  (left in place: %s, a symlink is in its path)\n' "$(shown "$entry/$rel")"
+                else
+                    printf '  %s\n' "$(shown "$entry/$rel")"
+                fi
+            done
+            printf '  %s\n' "$(shown "$entry/MANIFEST")"
+        done < <(find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -print0 2> /dev/null | LC_ALL=C sort -z)
+    fi
+    if (( OPT_PURGE_CONFIG )) && [[ -f $CONFIG_FILE && ! -L $CONFIG_FILE ]]; then
+        printf '  %s\n' "$(shown "$CONFIG_FILE")"
+    fi
+    printf '  and the folders these leave empty\n'
+}
+
+# =======================================================
+#                   CONFIG AND STATE
+# =======================================================
+
+# Exit 1 when the folder DIR exists and is a symlink, not a folder, or another user's.
+# A missing DIR passes; nothing is created.
+check_dir_safe() {
+    local dir=$1
+    if [[ -L $dir ]]; then
+        die 1 "$(shown "$dir") is a symlink, which tlogger does not follow; remove it or replace it with a folder"
+    fi
+    if [[ ! -e $dir ]]; then
+        return 0
+    fi
+    if [[ ! -d $dir ]]; then
+        die 1 "$(shown "$dir") is not a folder"
+    fi
+    if [[ ! -O $dir ]]; then
+        die 1 "$(shown "$dir") belongs to another user"
+    fi
+}
+
+# Create FOLDER and its missing parents with mode 0700, as the XDG base directory spec asks: the
+# umask of the subshell gives every level that mode. An existing FOLDER is left as it is.
+make_parent() {
+    if [[ ! -d $1 ]]; then
+        (umask 077 && mkdir -p -- "$1") 2> /dev/null || die 1 "cannot create $(shown "$1")"
+    fi
+}
+
+# Exit 1 unless install can create the folder DIR or write in it: DIR, or else the nearest folder
+# above it that exists, must be a folder this user can write in. Checks only; creates nothing.
+check_writable() {
+    local dir=$1
+    while [[ ! -e $dir && ! -L $dir ]]; do
+        dir=${dir%/*}
+        dir=${dir:-/}
+    done
+    if [[ ! -d $dir ]]; then
+        die 1 "cannot create $(shown "$1"): $(shown "$dir") is not a folder"
+    fi
+    if [[ ! -w $dir || ! -x $dir ]]; then
+        die 1 "cannot write in $(shown "$dir"), which install needs for $(shown "$1")"
+    fi
+}
+
+# Create the folder DIR with mode MODE (755 or 700) when it is missing, else check it with
+# check_dir_safe; an existing folder of mode 700 is tightened to 0700. A private folder is made
+# with mkdir -m 700; a code folder goes through install -d, as the release folders do.
+ensure_dir() {
+    local dir=$1 mode=$2
+    check_dir_safe "$dir"
+    if [[ -d $dir ]]; then
+        if [[ $mode == 700 ]]; then
+            chmod 700 -- "$dir" 2> /dev/null || die 1 "cannot set mode 0700 on $(shown "$dir")"
+        fi
+    elif [[ $mode == 700 ]]; then
+        mkdir -m 700 -- "$dir" 2> /dev/null || die 1 "cannot create $(shown "$dir")"
+    else
+        install -d -m "$mode" -- "$dir" 2> /dev/null || die 1 "cannot create $(shown "$dir")"
+    fi
+}
+
+# Read the config into CONFIG_MODE and CONFIG_LOGDIR without running it: key=value lines, blank
+# lines and '#' comments; unknown keys are kept and ignored. Sets CONFIG_ERROR, instead of
+# exiting, for an unsafe file, a bad line, a repeated key or an invalid value.
+read_config() {
+    local line key value n=0
+    local -A seen=()
+    CONFIG_MODE='' CONFIG_LOGDIR='' CONFIG_ERROR=''
+    if [[ ! -e $CONFIG_FILE && ! -L $CONFIG_FILE ]]; then
+        return 0
+    fi
+    if [[ -L $CONFIG_FILE || ! -f $CONFIG_FILE ]]; then
+        CONFIG_ERROR="is a symlink or not a regular file"
+        return 0
+    fi
+    if [[ ! -O $CONFIG_FILE ]]; then
+        CONFIG_ERROR="belongs to another user"
+        return 0
+    fi
+    if [[ ! -r $CONFIG_FILE ]]; then
+        CONFIG_ERROR="is not readable"
+        return 0
+    fi
+    while IFS= read -r line || [[ -n $line ]]; do
+        n=$(( n + 1 ))
+        if [[ -z $line || $line == '#'* ]]; then
+            continue
+        fi
+        if [[ ! $line =~ ^[a-z][a-z0-9_]*= ]]; then
+            CONFIG_ERROR="has line $n, which is not a key=value line"
+            return 0
+        fi
+        key=${line%%=*}
+        value=${line#*=}
+        if [[ -n ${seen[$key]+set} ]]; then
+            CONFIG_ERROR="repeats the key $key on line $n"
+            return 0
+        fi
+        seen[$key]=1
+        case $key in
+            mode)
+                if [[ $value != auto && $value != manual ]]; then
+                    CONFIG_ERROR="has a mode on line $n that is neither auto nor manual"
+                    return 0
+                fi
+                CONFIG_MODE=$value
+                ;;
+            logdir)
+                if [[ $value != /* ]]; then
+                    CONFIG_ERROR="has a logdir on line $n that is not an absolute path"
+                    return 0
+                fi
+                CONFIG_LOGDIR=$value
+                ;;
+        esac
+    done < "$CONFIG_FILE"
+}
+
+# Write the config CONTENT read from stdin to a temp file in the config folder, mode 0600, and
+# rename it over the config. Exits 1 when it cannot be written.
+replace_config() {
+    local tmp
+    tmp=$(mktemp "$CONFIG_DIR/.config.XXXXXX" 2> /dev/null) ||
+        die 1 "cannot create a temp file in $(shown "$CONFIG_DIR")"
+    TEMP_PATHS+=("$tmp")
+    { cat > "$tmp"; } 2> /dev/null || die 1 "cannot write a temp file in $(shown "$CONFIG_DIR")"
+    chmod 600 -- "$tmp" 2> /dev/null || die 1 "cannot set mode 0600 on a temp file in $(shown "$CONFIG_DIR")"
+    mv -T -f -- "$tmp" "$CONFIG_FILE" 2> /dev/null || die 1 "cannot write $(shown "$CONFIG_FILE")"
+}
+
+# Print the config with the line of KEY set to VALUE, or VALUE appended as a new line when KEY is
+# missing. Every other line is copied as it is.
+config_with() {
+    local key=$1 value=$2 line done=0
+    while IFS= read -r line || [[ -n $line ]]; do
+        if (( ! done )) && [[ $line == "$key="* ]]; then
+            printf '%s=%s\n' "$key" "$value"
+            done=1
+        else
+            printf '%s\n' "$line"
+        fi
+    done < "$CONFIG_FILE"
+    if (( ! done )); then
+        printf '%s=%s\n' "$key" "$value"
+    fi
+}
+
+# Create the config folder (0700) and the config (0600) with mode and logdir, or change only the
+# mode in an existing config when --mode asks for another one. Tightens an existing config to
+# 0600. Exits 1 for an unsafe or invalid config, which check_targets has already refused.
+install_config() {
+    make_parent "$CONFIG_HOME"
+    ensure_dir "$CONFIG_DIR" 700
+    read_config
+    if [[ -n $CONFIG_ERROR ]]; then
+        die 1 "the config $(shown "$CONFIG_FILE") $CONFIG_ERROR; fix it by hand"
+    fi
+    if [[ ! -e $CONFIG_FILE ]]; then
+        replace_config << EOF
+# tlogger settings: key=value lines and # comments. tlogger reads this file as data and never runs it.
+# mode: auto records every new terminal, manual only on request (recording arrives in a later version).
+mode=$MODE
+logdir=$SESSIONS_DIR
+EOF
+    elif [[ $MODE != "$CONFIG_MODE" ]]; then
+        # Through a file, not a pipe, so that replace_config runs in this shell and cleanup
+        # knows its temp file.
+        { config_with mode "$MODE" > "$WORK/config"; } 2> /dev/null ||
+            die 1 "cannot write in the temp folder"
+        replace_config < "$WORK/config"
+    fi
+    chmod 600 -- "$CONFIG_FILE" 2> /dev/null || die 1 "cannot set mode 0600 on $(shown "$CONFIG_FILE")"
+    read_config
+}
+
+# Remove the config and, when nothing else is in it, the config folder.
+# Leaves a symlink in place, as everything tlogger removes.
+purge_config() {
+    if [[ -f $CONFIG_FILE && ! -L $CONFIG_FILE ]]; then
+        rm -f -- "$CONFIG_FILE" 2> /dev/null || die 1 "cannot delete $(shown "$CONFIG_FILE")"
+    fi
+    if [[ -d $CONFIG_DIR && ! -L $CONFIG_DIR ]]; then
+        rmdir -- "$CONFIG_DIR" 2> /dev/null ||
+            warn "left $(shown "$CONFIG_DIR") in place: it holds other files"
+    fi
+}
+
+# Create the state folder with its rc-backups and sessions folders, all mode 0700, or check and
+# tighten existing ones to 0700.
+install_state() {
+    make_parent "$STATE_HOME"
+    ensure_dir "$STATE_DIR" 700
+    ensure_dir "$BACKUP_DIR" 700
+    ensure_dir "$SESSIONS_DIR" 700
+}
+
+# Refuse, before anything is written, existing tlogger folders that are symlinks, not folders or
+# another user's, a current entry that is not a symlink, a current release newer than this one,
+# an unsafe or invalid config, and a folder that install could not create or write in: the code,
+# config and state folders, and the rc's folder when the rc is created or renamed into place.
+# Call once RC_CHANGED is known. Failures it cannot foresee, such as a full disk, still stop
+# install part way, and a later install completes it.
+check_targets() {
+    local dir links
+    for dir in "$DATA_DIR" "$RELEASES_DIR" "$CONFIG_DIR" "$STATE_DIR" "$BACKUP_DIR" "$SESSIONS_DIR"; do
+        check_dir_safe "$dir"
+    done
+    if [[ -e $CURRENT_LINK && ! -L $CURRENT_LINK ]]; then
+        die 1 "$(shown "$CURRENT_LINK") is not a symlink; remove it by hand"
+    fi
+    refuse_downgrade
+    read_config
+    if [[ -n $CONFIG_ERROR ]]; then
+        die 1 "the config $(shown "$CONFIG_FILE") $CONFIG_ERROR; fix it by hand"
+    fi
+    for dir in "$DATA_DIR" "$RELEASES_DIR" "$CONFIG_DIR" "$BACKUP_DIR" "$SESSIONS_DIR"; do
+        check_writable "$dir"
+    done
+    if (( RC_CHANGED )) && [[ $RC_STATE != foreign ]]; then
+        # classify_rc has made sure that an existing rc is writable; a hard-linked one is written
+        # in place, any other one goes through a temp file in its folder.
+        links=1
+        if [[ $RC_STATE == regular ]]; then
+            links=$(stat -c %h -- "$RC" 2> /dev/null) || links=1
+        fi
+        if (( links == 1 )); then
+            check_writable "$ZDOT"
+        fi
+    fi
+}
+
+# =======================================================
+#                     MODE AND PROBE
+# =======================================================
+
+# Set MODE from --mode, else from the existing config, else from a question on the terminal.
+# Exits 2 when none of them gives one. Call after check_targets, which reads the config.
+choose_mode() {
+    local answer tries
+    if [[ -n $OPT_MODE ]]; then
+        MODE=$OPT_MODE
+        return 0
+    fi
+    if [[ -n $CONFIG_MODE ]]; then
+        MODE=$CONFIG_MODE
+        return 0
+    fi
+    if ! on_tty; then
+        die 2 "--mode is required when not run from a terminal"
+    fi
+    for tries in 1 2 3; do
+        printf 'tlogger: record every new terminal (auto) or only on request (manual)? [auto/manual] ' >&2
+        IFS= read -r answer || die 2 "no mode given; pass --mode auto or --mode manual"
+        case $answer in
+            auto | manual)
+                MODE=$answer
+                return 0
+                ;;
+        esac
+        msg "answer auto or manual (attempt $tries of 3)"
+    done
+    die 2 "no mode given; pass --mode auto or --mode manual"
+}
+
+# Start an interactive zsh, as a new terminal does but with stdin from /dev/null, and report
+# whether the plugin loaded. Only reports: the exit status does not depend on it. setsid, where it
+# exists, leaves the zsh without a controlling terminal, so that the rc can neither prompt nor
+# take the terminal over. An interactive zsh ignores TERM, so -k 2 follows with KILL, and the
+# answer goes to a file, which a job the rc leaves running cannot hold open as it can a pipe.
+probe_plugin() {
+    local -a detach=()
+    if command -v setsid > /dev/null 2>&1; then
+        detach=(setsid)
+    fi
+    timeout -k 2 10 "${detach[@]}" zsh -i -c "$ZSH_PROBE" < /dev/null > "$WORK/probe" 2> /dev/null || true
+    if grep -qx 'TLOGGER_PROBE:loaded' "$WORK/probe" 2> /dev/null; then
+        msg "plugin loaded: a new zsh terminal defines the tlogger command"
+    else
+        warn "a new interactive zsh did not load the plugin; open a new terminal and run 'tlogger status' there"
+    fi
+}
+
+# =======================================================
+#                         INSTALL
+# =======================================================
+
+# Parse the install options into OPT_MODE, OPT_DRY_RUN, OPT_YES and OPT_PRINT_ONLY.
+# Exits 2 on an unknown option or a bad value; -h and --help print the usage and exit 0.
+parse_install_options() {
+    local value
+    while (( $# )); do
+        case $1 in
+            --mode | --mode=*)
+                if [[ $1 == --mode=* ]]; then
+                    value=${1#--mode=}
+                    shift
+                else
+                    (( $# >= 2 )) || usage_error "--mode needs a value: auto or manual"
+                    value=$2
+                    shift 2
+                fi
+                if [[ $value != auto && $value != manual ]]; then
+                    usage_error "--mode takes auto or manual, not '$value'"
+                fi
+                OPT_MODE=$value
+                ;;
+            --dry-run) OPT_DRY_RUN=1; shift ;;
+            --yes) OPT_YES=1; shift ;;
+            --print-only) OPT_PRINT_ONLY=1; shift ;;
+            -h | --help) usage; exit 0 ;;
+            *) usage_error "unknown option for install: $1" ;;
+        esac
+    done
+    if (( OPT_DRY_RUN && OPT_PRINT_ONLY )); then
+        usage_error "--dry-run and --print-only do not go together"
+    fi
+}
+
+# Print the install plan on stdout: the rc and what happens to it, the mode, the version and the
+# code, config and state paths, then the diff of the rc when it changes.
+print_install_plan() {
+    local note old_label
+    old_label=$(shown "$RC")
+    if [[ $RC_STATE == missing ]]; then
+        if [[ -n $SEED ]]; then
+            note="missing; created from $(shown "$SEED") with the block at lines 1-4"
+            old_label=$(shown "$SEED")
+        else
+            note="missing; created with the block at lines 1-4"
+            old_label="$old_label (missing)"
+        fi
+    elif (( SCAN_START == 0 )); then
+        note="the block is added at lines 1-4"
+    elif (( RC_CHANGED )); then
+        note="the block at lines $SCAN_START-$SCAN_END is replaced"
+    else
+        note="the block at lines $SCAN_START-$SCAN_END is up to date; no change"
+    fi
+    printf 'tlogger install plan\n'
+    printf '  %-9s %s\n' \
+        rc: "$(shown "$RC") ($note)" \
+        mode: "$MODE" \
+        version: "$VERSION_STR" \
+        code: "$(shown "$RELEASES_DIR/$VERSION_STR"), linked from $(shown "$CURRENT_LINK")" \
+        config: "$(shown "$CONFIG_FILE")" \
+        state: "$(shown "$STATE_DIR")"
+    if (( RC_CHANGED )); then
+        show_diff put "$old_label" "$(shown "$RC") (new)"
+    fi
+}
+
+# Print the install summary on stdout: rc, mode, version, logdir, backup and how to uninstall.
+print_install_summary() {
+    local backup_note="none: the rc did not change"
+    if [[ -n $BACKUP ]]; then
+        backup_note=$(shown "$BACKUP")
+    elif [[ $RC_STATE == missing ]]; then
+        backup_note="none: there was no rc"
+    fi
+    printf 'tlogger %s is installed. It records nothing yet; recording arrives in a later version.\n' "$VERSION_STR"
+    printf '  %-10s %s\n' \
+        rc: "$(shown "$RC")" \
+        mode: "$MODE" \
+        version: "$VERSION_STR" \
+        code: "$(shown "$RELEASES_DIR/$VERSION_STR") ($CODE_NOTE)" \
+        logdir: "$(shown "${CONFIG_LOGDIR:-$SESSIONS_DIR}")" \
+        backup: "$backup_note" \
+        uninstall: "tlogger uninstall, in a new terminal; or $(shown "$CURRENT_LINK/bin/tlogger") uninstall"
+}
+
+# tlogger install: put the block at the top of the rc and install the code, config and state.
+# Writes nothing anywhere with --dry-run or --print-only, no temp folder either, and nothing
+# outside its private temp folder before the checks in check_targets and check_syntax pass.
+cmd_install() {
+    local question
+    parse_install_options "$@"
+    refuse_foreign_root
+    read_version
+    check_source_tree
+    resolve_paths
+    build_block
+    if (( OPT_PRINT_ONLY )); then
+        printf '%s' "$BLOCK"
+        return 0
+    fi
+    if (( ! OPT_DRY_RUN )); then
+        make_work
+    fi
+    check_recorder
+    classify_rc
+    if [[ $RC_STATE == missing ]]; then
+        seed_rc
+    else
+        copy_rc
+    fi
+    if [[ -z $OLD_RC ]]; then
+        SCAN_START=0 SCAN_END=0
+        print_by_hand
+        exit 1
+    fi
+    scan_file "$OLD_RC"
+    refuse_bad_markers
+    refuse_foreign_recorder
+    if (( ! OPT_DRY_RUN )); then
+        build_rc put
+    fi
+    RC_CHANGED=1
+    if [[ $RC_STATE != missing ]] && ! new_rc_differs put; then
+        RC_CHANGED=0
+    fi
+    if [[ $RC_STATE == foreign ]] && (( RC_CHANGED )); then
+        print_by_hand
+        exit 1
+    fi
+    check_targets
+    choose_mode
+    if (( ! OPT_DRY_RUN && ! OPT_YES )) && ! on_tty; then
+        die 2 "--yes is required when not run from a terminal"
+    fi
+    if (( RC_CHANGED )); then
+        check_syntax put
+    fi
+    if (( ! OPT_DRY_RUN )); then
+        make_manifest
+    fi
+    print_install_plan
+    if (( ! RC_CHANGED )); then
+        msg "already installed, block up to date"
+    fi
+    if (( OPT_DRY_RUN )); then
+        msg "dry run: nothing was written"
+        return 0
+    fi
+    if (( ! RC_CHANGED )); then
+        question="Refresh the tlogger code and config?"
+    elif (( SCAN_START )); then
+        question="Update the tlogger block in $(shown "$RC")?"
+    else
+        question="Add the tlogger block to $(shown "$RC")?"
+    fi
+    confirm "$question"
+    install_code
+    install_config
+    install_state
+    if (( RC_CHANGED )); then
+        write_rc "$WORK/new-rc" prune
+    fi
+    probe_plugin
+    print_install_summary
+}
+
+# =======================================================
+#                        UNINSTALL
+# =======================================================
+
+# Parse the uninstall options into OPT_DRY_RUN, OPT_YES and OPT_PURGE_CONFIG.
+# Exits 2 on an unknown option; -h and --help print the usage and exit 0.
+parse_uninstall_options() {
+    while (( $# )); do
+        case $1 in
+            --dry-run) OPT_DRY_RUN=1; shift ;;
+            --yes) OPT_YES=1; shift ;;
+            --purge-config) OPT_PURGE_CONFIG=1; shift ;;
+            -h | --help) usage; exit 0 ;;
+            *) usage_error "unknown option for uninstall: $1" ;;
+        esac
+    done
+}
+
+# Print the uninstall plan on stdout: the change to the rc, what is removed and what stays, then
+# the diff of the rc when the block is in it.
+print_uninstall_plan() {
+    printf 'tlogger uninstall plan\n'
+    if (( SCAN_START )); then
+        printf '  %-8s %s\n' rc: "$(shown "$RC") (the block at lines $SCAN_START-$SCAN_END is removed)"
+    else
+        printf '  %-8s %s\n' rc: "$(shown "$RC") (no tlogger block; no change)"
+    fi
+    printf '  remove:\n'
+    print_removals
+    if (( ! OPT_PURGE_CONFIG )) && [[ -e $CONFIG_FILE ]]; then
+        printf '  %-8s %s\n' keep: "$(shown "$CONFIG_FILE") (pass --purge-config to remove it)"
+    fi
+    printf '  %-8s %s\n' keep: "$(shown "$STATE_DIR") (logs and rc backups; tlogger never deletes them)"
+    if (( SCAN_START )); then
+        show_diff strip "$(shown "$RC")" "$(shown "$RC") (new)"
+    fi
+}
+
+# tlogger uninstall: cut the block out of the rc and remove the code, and with --purge-config
+# the config. Never deletes anything in the state folder, and writes nothing anywhere with
+# --dry-run. Exits 3 when nothing is installed.
+cmd_uninstall() {
+    local has_config=0
+    parse_uninstall_options "$@"
+    refuse_foreign_root
+    if (( ! OPT_DRY_RUN )); then
+        make_work
+    fi
+    resolve_paths
+    classify_rc
+    OLD_RC=
+    if [[ $RC_STATE != missing ]]; then
+        copy_rc
+    fi
+    SCAN_START=0 SCAN_END=0
+    if [[ -n $OLD_RC ]]; then
+        scan_file "$OLD_RC"
+        refuse_bad_markers
+    fi
+    if [[ -f $CONFIG_FILE && ! -L $CONFIG_FILE ]]; then
+        has_config=1
+    fi
+    if (( SCAN_START == 0 )) && ! code_present && ! (( OPT_PURGE_CONFIG && has_config )); then
+        msg "not installed: there is no tlogger block in $(shown "$RC") and no tlogger code; nothing to remove"
+        exit 3
+    fi
+    if (( SCAN_START )) && [[ $RC_STATE == foreign ]]; then
+        msg "$(shown "$RC") $RC_WHY, so tlogger does not edit it."
+        die 1 "remove lines $SCAN_START-$SCAN_END, the tlogger block, from the file by hand (for a symlink, the file it points to), then run tlogger uninstall again; nothing changed"
+    fi
+    if (( ! OPT_DRY_RUN && ! OPT_YES )) && ! on_tty; then
+        die 2 "--yes is required when not run from a terminal"
+    fi
+    # A symlinked data folder would lead the MANIFEST removals outside it.
+    check_dir_safe "$DATA_DIR"
+    check_dir_safe "$RELEASES_DIR"
+    check_dir_safe "$STATE_DIR"
+    check_dir_safe "$BACKUP_DIR"
+    if (( OPT_PURGE_CONFIG )); then
+        check_dir_safe "$CONFIG_DIR"
+    fi
+    if (( SCAN_START )); then
+        if (( ! OPT_DRY_RUN )); then
+            build_rc strip
+        fi
+        check_syntax strip
+    fi
+    print_uninstall_plan
+    if (( OPT_DRY_RUN )); then
+        msg "dry run: nothing was written"
+        return 0
+    fi
+    confirm "Remove tlogger from $(shown "$RC") and delete its code?"
+    if (( SCAN_START )); then
+        make_parent "$STATE_HOME"
+        ensure_dir "$STATE_DIR" 700
+        ensure_dir "$BACKUP_DIR" 700
+        write_rc "$WORK/new-rc" keep
+    fi
+    remove_code
+    if (( OPT_PURGE_CONFIG )); then
+        purge_config
+    fi
+    printf 'tlogger is uninstalled.\n'
+    if [[ -n $BACKUP ]]; then
+        printf '  %-8s %s\n' backup: "$(shown "$BACKUP")"
+    fi
+    if (( ! OPT_PURGE_CONFIG )) && [[ -e $CONFIG_FILE ]]; then
+        printf '  %-8s %s\n' kept: "$(shown "$CONFIG_FILE")"
+    fi
+    printf '  %-8s %s\n' kept: "$(shown "$STATE_DIR") (logs and rc backups; delete them by hand when the engagement rules allow it)"
+}
+
+# =======================================================
+#                    STATUS AND VERSION
+# =======================================================
+
+# tlogger status: report whether tlogger is installed and where its files are. Exits 0 when the
+# block and the plugin are both in place, 3 when neither the block nor the code is there, and 1
+# for anything in between, malformed markers or an invalid config. Refuses root on the rule
+# install follows, since the zsh query runs the .zshenv of the home it is given.
+cmd_status() {
+    local block=0 code=0 version=unknown rc_note plugin_note mode_note logdir_note result
+    case ${1-} in
+        -h | --help) usage; exit 0 ;;
+    esac
+    (( $# == 0 )) || usage_error "status takes no options"
+    refuse_foreign_root
+    resolve_paths
+    SCAN_START=0 SCAN_END=0 SCAN_ERRORS=()
+    if [[ -f $RC && -r $RC ]]; then
+        scan_file "$RC"
+        if (( ${#SCAN_ERRORS[@]} )); then
+            rc_note="malformed tlogger markers at lines"
+            for result in "${SCAN_ERRORS[@]}"; do
+                rc_note+=" ${result##* }"
+            done
+        elif (( SCAN_START )); then
+            block=1
+            rc_note="block at lines $SCAN_START-$SCAN_END"
+        else
+            rc_note="no tlogger block"
+        fi
+    elif [[ -e $RC || -L $RC ]]; then
+        rc_note="not readable as a file"
+    else
+        rc_note="missing"
+    fi
+    if code_present; then
+        code=1
+    fi
+    if [[ -f $CURRENT_LINK/VERSION && -r $CURRENT_LINK/VERSION ]]; then
+        IFS= read -r version < "$CURRENT_LINK/VERSION" || true
+    fi
+    plugin_note="not readable"
+    if [[ -r $PLUGIN ]]; then
+        plugin_note="readable"
+    fi
+    read_config
+    mode_note=${CONFIG_MODE:-unset}
+    logdir_note=$(shown "${CONFIG_LOGDIR:-$SESSIONS_DIR}")
+    if [[ -n $CONFIG_ERROR ]]; then
+        mode_note="unknown: the config $CONFIG_ERROR"
+    elif [[ ! -e $CONFIG_FILE ]]; then
+        mode_note="unset: there is no config"
+        logdir_note="$logdir_note (the default)"
+    fi
+    if (( block && code )) && [[ $plugin_note == readable && ${#SCAN_ERRORS[@]} -eq 0 && -z $CONFIG_ERROR ]]; then
+        result=0
+    elif (( ! block && ! code )) && (( ${#SCAN_ERRORS[@]} == 0 )); then
+        result=3
+    else
+        result=1
+    fi
+    case $result in
+        0) printf 'tlogger is installed. This terminal is not recorded: recording arrives in a later version.\n' ;;
+        3) printf 'tlogger is not installed.\n' ;;
+        *) printf 'tlogger is installed only in part; run tlogger install to repair it.\n' ;;
+    esac
+    printf '  %-9s %s\n' \
+        version: "$version" \
+        rc: "$(shown "$RC") ($rc_note)" \
+        plugin: "$(shown "$PLUGIN") ($plugin_note)" \
+        mode: "$mode_note" \
+        logdir: "$logdir_note" \
+        config: "$(shown "$CONFIG_FILE")" \
+        state: "$(shown "$STATE_DIR")"
+    exit "$result"
+}
+
+# tlogger version: print the version of the source tree this file belongs to.
+cmd_version() {
+    (( $# == 0 )) || usage_error "version takes no options"
+    read_version
+    printf 'tlogger %s\n' "$VERSION_STR"
+}
+
+# =======================================================
+#                           MAIN
+# =======================================================
+
+# Run the command named by the first argument. Sets the shell options, a private umask and the
+# traps that clean up at every exit; signals exit 128+n. Exits 2 without a known command.
+main() {
+    local cmd
+    set -euo pipefail
+    umask 077
+    trap cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    (( $# )) || usage_error "no command given"
+    cmd=$1
+    shift
+    case $cmd in
+        install) cmd_install "$@" ;;
+        uninstall) cmd_uninstall "$@" ;;
+        status) cmd_status "$@" ;;
+        version | --version) cmd_version "$@" ;;
+        help | -h | --help) usage ;;
+        *) usage_error "unknown command: $cmd" ;;
+    esac
+}
+
+# Run main only when the file is executed: `return` succeeds only in a sourced file.
+if ! (return 0 2> /dev/null); then
+    main "$@"
+fi
