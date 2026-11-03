@@ -13,7 +13,8 @@ This holds for the maintainer too.
    `feat: show the REC marker in the prompt`.
 3. Add an entry for the change under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md), on the
    same branch.
-4. Run the tests described under Testing: `bats tests/` passes with nothing skipped.
+4. Run the tests described under Testing: `bats tests/` passes. Locally a test may skip only for
+   a reason listed there; CI fails on any skip.
 5. Push the branch and open a pull request against `main`. The secret scan and the tests run on
    it.
 6. Start the next phase only after the pull request is reviewed and merged. Its branch starts from
@@ -72,6 +73,41 @@ bats tests/
 
 - The ShellCheck test uses `shellcheck` from PATH, which should be 0.11.0 as in CI, and is
   skipped when it is not installed.
-- Tests that need zsh arrive in later phases and run in CI.
-- CI runs the suite on every pull request and every push to `main`, and fails when any test is
-  skipped.
+- Tests that need a real zsh, symlinks, POSIX file modes, hard links, mawk, gawk or
+  `/etc/skel/.zshrc` call `need` from `tests/helpers.bash`. They skip on a machine without them,
+  such as Git for Windows, and fail when `TLOGGER_CI=1` is set. Where zsh is missing,
+  `tests/stub-bin/zsh` answers the questions `bin/tlogger` asks zsh; the stub refuses to run under
+  `TLOGGER_CI=1`. On Git for Windows, `MSYS=winsymlinks:sys bats tests/` lets the symlink tests
+  run.
+- Tests tagged `root` (`# bats test_tags=root`) run only as root and skip otherwise. The other
+  tests expect a non-root user: tlogger refuses root with a HOME that is not root's, so a run as
+  root fails them by design.
+- To run the suite as CI does, on Linux with zsh, util-linux, mawk and gawk installed, run the
+  untagged tests as yourself, then the root tests as root:
+
+  ```bash
+  TLOGGER_CI=1 bats --filter-tags '!root' tests/
+  sudo env TLOGGER_CI=1 bats --filter-tags root tests/
+  ```
+
+- `TLOGGER_SKEL` names the file that `bin/tlogger` seeds a missing rc from, in place of
+  `/etc/skel/.zshrc`. It exists for the tests only.
+- CI runs the suite on every pull request and every push to `main`, in a `kalilinux/kali-rolling`
+  container with real zsh and util-linux. There the suite, the zsh-based tests included, runs as
+  a non-root user with `--filter-tags '!root'`, and the tests tagged root run afterwards as root.
+  CI fails when any test fails or is skipped, and when the two runs together do not run every
+  test that `bats --count tests/` counts.
+
+### Moving the Kali image
+
+Dependabot does not update container images in workflow files, so `.github/workflows/tests.yml`
+pins `kalilinux/kali-rolling` by digest and a pull request of its own moves the pin. The current
+digest of the `latest` tag, the index that covers every platform, is the `digest` field of the
+Docker Hub tags API:
+
+```bash
+curl -fsS https://hub.docker.com/v2/repositories/kalilinux/kali-rolling/tags/latest | jq -r .digest
+```
+
+Put the digest after the `@` in `container.image`, and say in the pull request when Docker Hub
+last updated the tag, its `last_updated` field.
