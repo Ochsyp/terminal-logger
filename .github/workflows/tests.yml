@@ -1,6 +1,7 @@
-# Runs the bats suite on every pull request, every push to main and on demand, and fails when a
-# test is skipped. ShellCheck is pinned and its download checked against its SHA-256, so the
-# ShellCheck test always runs. Actions are pinned to commit SHAs; Dependabot proposes updates.
+# Runs the bats suite in a Kali Linux container on every pull request, every push to main and on
+# demand: as a non-root user, then the root-only tests as root. Fails when a test fails, is skipped
+# or runs in neither. The image and the actions are pinned by digest and commit SHA, ShellCheck by
+# version and SHA-256. Dependabot updates the actions; CONTRIBUTING.md tells how to move the image.
 name: tests
 
 on:
@@ -14,41 +15,86 @@ permissions:
 
 jobs:
   bats:
-    # A fixed image, so that a move of ubuntu-latest to a new release cannot change the tools.
     runs-on: ubuntu-24.04
+    container:
+      # kalilinux/kali-rolling:latest, pinned by its multi-platform index digest.
+      image: kalilinux/kali-rolling@sha256:7997e0581c4f5c185cfe6773d5cae8fcc7c6b79798726ccaabf843af4bcd2013
     timeout-minutes: 20
     defaults:
       run:
         # An explicit bash adds -o pipefail, so the tee below cannot hide a failing bats run.
         shell: bash
     env:
-      BATS_VERSION: 1.13.0
       SHELLCHECK_VERSION: 0.11.0
       # SHA-256 of shellcheck-v0.11.0.linux.x86_64.tar.xz, as GitHub lists it for the release asset.
       SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+      # The non-root user that runs the suite; the tests tagged root run as root.
+      TEST_USER: tester
     steps:
+      # git goes in before the checkout, which without it fetches the files but no .git folder,
+      # and the lint tests read the index.
+      - name: Install the test tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl xz-utils git zsh bats \
+            bsdutils util-linux coreutils diffutils gawk mawk
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install bats and ShellCheck
+      - name: Install ShellCheck
         run: |
-          # A global npm install cannot write to /usr/local on the runner, so bats goes into a
-          # temporary prefix that later steps find through GITHUB_PATH.
-          npm install --no-save --ignore-scripts --prefix "$RUNNER_TEMP/bats" "bats@${BATS_VERSION}"
-          echo "$RUNNER_TEMP/bats/node_modules/.bin" >> "$GITHUB_PATH"
           archive="shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
           curl --fail --silent --show-error --location --output "$RUNNER_TEMP/$archive" \
             "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/$archive"
           echo "${SHELLCHECK_SHA256}  $RUNNER_TEMP/$archive" | sha256sum --check --strict
           tar -xJf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP"
-          sudo install -m 0755 "$RUNNER_TEMP/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
-          "$RUNNER_TEMP/bats/node_modules/.bin/bats" --version
+          install -m 0755 "$RUNNER_TEMP/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
           shellcheck --version | grep -qx "version: ${SHELLCHECK_VERSION}"
-      - name: Run the tests
-        run: bats --tap tests/ | tee "$RUNNER_TEMP/bats.tap"
-      - name: Fail on skipped tests
+      - name: Print the tool versions
         run: |
-          if grep -E '^ok [0-9]+ .* # skip' "$RUNNER_TEMP/bats.tap"; then
-            echo "::error::Tests were skipped; every test must run in CI."
-            exit 1
+          # sed reads all of its input, so no command here dies of SIGPIPE under pipefail.
+          sed -n 's/^PRETTY_NAME=//p' /etc/os-release
+          bash --version | sed -n 1p
+          zsh --version
+          bats --version
+          shellcheck --version | sed -n 2p
+          script --version
+          git --version
+          diff --version | sed -n 1p
+          gawk --version | sed -n 1p
+          mawk -W version 2>&1 | sed -n 1p
+      - name: Create the test user
+        run: |
+          useradd -m "$TEST_USER"
+          chown -R "$TEST_USER:" "$GITHUB_WORKSPACE"
+      - name: Run the tests as the test user
+        run: |
+          runuser -u "$TEST_USER" -- env TLOGGER_CI=1 bats --tap --filter-tags '!root' tests/ |
+            tee "$RUNNER_TEMP/user.tap"
+      - name: Run the root-only tests as root
+        run: |
+          # git refuses a repository that another user owns, so root takes the work tree back.
+          chown -R root: "$GITHUB_WORKSPACE"
+          TLOGGER_CI=1 bats --tap --filter-tags root tests/ | tee "$RUNNER_TEMP/root.tap"
+      - name: Fail on skipped, failed or missing tests
+        run: |
+          status=0
+          for tap in "$RUNNER_TEMP/user.tap" "$RUNNER_TEMP/root.tap"; do
+            if grep -E '^ok [0-9]+ .* # skip' "$tap"; then
+              echo "::error::Tests were skipped in ${tap##*/}; every test must run in CI."
+              status=1
+            fi
+            if grep -E '^not ok ' "$tap"; then
+              echo "::error::Tests failed in ${tap##*/}."
+              status=1
+            fi
+          done
+          # A filter that selects too little passes with fewer tests, so the two runs together
+          # must cover the whole suite, and the root run at least one test.
+          total=$(bats --count tests/)
+          ran=$(cat "$RUNNER_TEMP/user.tap" "$RUNNER_TEMP/root.tap" | grep -cE '^(not )?ok [0-9]+ ' || true)
+          if [[ $ran != "$total" ]] || ! grep -qE '^ok [0-9]+ ' "$RUNNER_TEMP/root.tap"; then
+            echo "::error::$ran of $total tests ran, or none of them as root."
+            status=1
           fi
+          exit "$status"

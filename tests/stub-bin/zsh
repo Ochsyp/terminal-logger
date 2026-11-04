@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Stand-in for zsh on a development machine without it, which tests/helpers.bash puts first on
+# PATH there. It answers only what bin/tlogger asks zsh: the path query, zsh -n and the probe.
+# CI runs every test with real zsh, so the stub refuses to run when TLOGGER_CI=1.
+
+set -u
+
+if [[ ${TLOGGER_CI:-} == 1 ]]; then
+    printf 'tests/stub-bin/zsh: TLOGGER_CI=1 is set, and CI must run real zsh; install zsh\n' >&2
+    exit 99
+fi
+
+# Print the answer line 'TLOGGER_Q:KEY=VALUE', with an empty VALUE when it holds a newline, as
+# the query in bin/tlogger prints it.
+answer() {
+    local value=$2
+    if [[ $value == *$'\n'* ]]; then
+        value=
+    fi
+    printf 'TLOGGER_Q:%s=%s\n' "$1" "$value"
+}
+
+syntax_only=0
+command=
+have_command=0
+while (( $# )); do
+    case $1 in
+        -n) syntax_only=1; shift ;;
+        -f | -i) shift ;;
+        -c)
+            if (( $# < 2 )); then
+                printf 'tests/stub-bin/zsh: -c needs an argument\n' >&2
+                exit 98
+            fi
+            command=$2
+            have_command=1
+            shift 2
+            break
+            ;;
+        --) shift; break ;;
+        -*) printf 'tests/stub-bin/zsh: the stub does not know the option %s\n' "$1" >&2; exit 98 ;;
+        *) break ;;
+    esac
+done
+
+# zsh -n [-f] [--] FILE: the stub cannot parse zsh, so it passes every file it can read. It reads
+# the whole file, so that a dry run that pipes the new rc into /dev/stdin never meets a closed pipe.
+if (( syntax_only )); then
+    if [[ $# -ge 1 && -r $1 && ! -d $1 ]]; then
+        cat -- "$1" > /dev/null
+        exit 0
+    fi
+    printf 'tests/stub-bin/zsh: -n needs a file to check\n' >&2
+    exit 1
+fi
+
+if (( have_command )); then
+    case $command in
+        *TLOGGER_Q:*)
+            # The path query, with the defaults zsh applies, read from the environment. As in zsh,
+            # ZDOTDIR falls back to HOME only when it is unset.
+            printf '\n'
+            answer ZDOTDIR "${ZDOTDIR-$HOME}"
+            answer XDG_DATA_HOME "${XDG_DATA_HOME:-$HOME/.local/share}"
+            answer XDG_CONFIG_HOME "${XDG_CONFIG_HOME:-$HOME/.config}"
+            answer XDG_STATE_HOME "${XDG_STATE_HOME:-$HOME/.local/state}"
+            exit 0
+            ;;
+        *TLOGGER_PROBE:*)
+            # The probe: a new shell would load the plugin when the path in the block is readable.
+            if [[ -r ${XDG_DATA_HOME:-$HOME/.local/share}/tlogger/current/lib/tlogger.zsh ]]; then
+                printf 'TLOGGER_PROBE:loaded\n'
+            fi
+            exit 0
+            ;;
+    esac
+fi
+
+printf 'tests/stub-bin/zsh: the stub runs only the calls bin/tlogger makes; this test needs real zsh\n' >&2
+exit 98
