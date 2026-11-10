@@ -89,15 +89,34 @@ write_denylist() {
     printf '%s\n' "$@" > "$DENYLIST"
 }
 
-# Skip the test unless this machine has FEATURE: zsh (a real one), symlinks, modes (POSIX file
-# modes), hardlinks, 'command NAME' or 'file PATH' (readable). With TLOGGER_CI=1 the test fails
-# instead, since CI must run every test. Call it before the test writes anything.
+# Skip the test unless this machine has FEATURE: zsh (a real one), zpty (zsh with the zsh/zpty
+# and zsh/zselect modules), script (util-linux script 2.35 or newer at /usr/bin/script), proc
+# (the Linux /proc), symlinks, modes (POSIX file modes), hardlinks, 'command NAME' or 'file PATH'
+# (readable). With TLOGGER_CI=1 the test fails instead, since CI must run every test. Call it
+# before the test writes anything.
 need() {
-    local why
+    local why help
     case $1 in
         zsh)
             if [[ -n $REAL_ZSH ]]; then return 0; fi
             why="it needs a real zsh"
+            ;;
+        zpty)
+            if [[ -n $REAL_ZSH ]] && "$REAL_ZSH" -f -c 'zmodload zsh/zpty zsh/zselect' < /dev/null 2> /dev/null; then
+                return 0
+            fi
+            why="it needs a real zsh with the zsh/zpty and zsh/zselect modules"
+            ;;
+        script)
+            help=$(/usr/bin/script --help 2> /dev/null) || help=
+            if [[ $help == *--logging-format* ]]; then return 0; fi
+            why="it needs util-linux script 2.35 or newer at /usr/bin/script"
+            ;;
+        proc)
+            if [[ $(uname -s) == Linux && -r /proc/self/stat && -r /proc/sys/kernel/random/boot_id ]]; then
+                return 0
+            fi
+            why="it needs the Linux /proc"
             ;;
         symlinks)
             if has_symlinks; then return 0; fi

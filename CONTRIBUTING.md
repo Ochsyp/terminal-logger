@@ -73,12 +73,33 @@ bats tests/
 
 - The ShellCheck test uses `shellcheck` from PATH, which should be 0.11.0 as in CI, and is
   skipped when it is not installed.
-- Tests that need a real zsh, symlinks, POSIX file modes, hard links, mawk, gawk or
-  `/etc/skel/.zshrc` call `need` from `tests/helpers.bash`. They skip on a machine without them,
-  such as Git for Windows, and fail when `TLOGGER_CI=1` is set. Where zsh is missing,
-  `tests/stub-bin/zsh` answers the questions `bin/tlogger` asks zsh; the stub refuses to run under
-  `TLOGGER_CI=1`. On Git for Windows, `MSYS=winsymlinks:sys bats tests/` lets the symlink tests
-  run.
+- Tests that need a real zsh, zsh's `zsh/zpty` module, util-linux `script` 2.35 or newer, the
+  Linux `/proc`, symlinks, POSIX file modes, hard links, mawk, gawk or `/etc/skel/.zshrc` call
+  `need` from `tests/helpers.bash`. They skip on a machine without them, such as Git for Windows,
+  and fail when `TLOGGER_CI=1` is set. Where zsh is missing, `tests/stub-bin/zsh` answers the
+  questions `bin/tlogger` asks zsh; the stub refuses to run under `TLOGGER_CI=1`. On Git for
+  Windows, `MSYS=winsymlinks:sys bats tests/` lets the symlink tests run.
+- `tests/config.bats` runs `lib/config.zsh` in `zsh -f`, and checks that it reads the same mode and
+  logdir as the `read_config` of `bin/tlogger`. `tests/guard.bats` checks how the plugin sees its
+  terminal over a fake process tree: `tests/helpers/fakeproc.zsh` writes made-up `stat` and
+  `cmdline` files and a boot id into the folder that `TLOGGER_PROC` names. `TLOGGER_PROC`, default
+  `/proc`, exists for the tests only, as do the config key `recorder` and `TLOGGER_RECORDER`, which
+  name the `script` binary.
+- `tests/e2e-manual.bats` records for real, without tmux. It installs tlogger from the work tree
+  into the test's HOME and drives an interactive zsh in a pseudo-terminal through zsh's own
+  `zsh/zpty` module, with the functions in `tests/helpers/pty.zsh`. The driver types lines, waits
+  for output at most 20 seconds a time and runs under `timeout`, and it frames each command with
+  marker commands that give its output and exit status. A wait that gives up, or that sees the
+  shell in the terminal end first, fails the test with the end of the terminal output, control
+  characters shown as `^X`; the whole transcript is the file `screen` in the test's temp folder,
+  which `bats --no-tempdir-cleanup` keeps. The rc is `tests/fixtures/e2e-zshrc`, which turns the
+  line editor off, and in one test the rc built from `/etc/skel/.zshrc`. These tests need Linux,
+  zsh with the `zsh/zpty` and `zsh/zselect` modules, util-linux `script`, symlinks, POSIX modes
+  and a non-root user.
+- git stores the hooks, `bin/tlogger`, `tests/stub-bin/zsh` and every `.bats` file as executable
+  files, and the sourced files as plain ones; a lint test checks the modes in the index. Where
+  `core.filemode` is false, as on Git for Windows, stage a new executable file with
+  `git add --chmod=+x`, and check the modes with `git ls-files -s`.
 - Tests tagged `root` (`# bats test_tags=root`) run only as root and skip otherwise. The other
   tests expect a non-root user: tlogger refuses root with a HOME that is not root's, so a run as
   root fails them by design.

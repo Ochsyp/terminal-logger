@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # Lint checks: no CR byte in any file git tracks or would add, sh -n, bash -n and zsh -n syntax
-# checks, no ShellCheck finding in the shell files, rcblock.awk under each awk, and hooks and
-# scripts that git stores as executable files.
+# checks, no ShellCheck finding in the shell files, rcblock.awk under each awk, and the file modes
+# git stores: executable for hooks, scripts and .bats files, not for the files that are sourced.
 
 load helpers
 
@@ -20,8 +20,9 @@ shellcheck_repo() {
 
 @test "no file that git tracks or would add holds a CR byte" {
     local path
-    local -a files=() required=(bin/tlogger lib/tlogger.zsh libexec/rcblock.awk VERSION
-        tests/stub-bin/zsh tests/golden/rc-block.zsh tests/fixtures/skel-zshrc)
+    local -a files=() required=(bin/tlogger lib/config.zsh lib/tlogger.zsh libexec/rcblock.awk
+        VERSION tests/stub-bin/zsh tests/golden/rc-block.zsh tests/fixtures/skel-zshrc
+        tests/fixtures/e2e-zshrc tests/helpers/pty.zsh tests/helpers/fakeproc.zsh)
     while IFS= read -r -d '' path; do
         if [[ -f "$REPO_ROOT/$path" ]]; then
             files+=("$REPO_ROOT/$path")
@@ -57,9 +58,13 @@ shellcheck_repo() {
     bash -n "$REPO_ROOT/tests/helpers.bash"
 }
 
-@test "lib/tlogger.zsh passes a zsh -n syntax check" {
+@test "lib/tlogger.zsh, lib/config.zsh and the zsh test helpers pass a zsh -n syntax check" {
     need zsh
-    zsh -n "$REPO_ROOT/lib/tlogger.zsh"
+    local file
+    for file in "$REPO_ROOT/lib/tlogger.zsh" "$REPO_ROOT/lib/config.zsh" \
+        "$REPO_ROOT/tests/helpers/pty.zsh" "$REPO_ROOT/tests/helpers/fakeproc.zsh"; do
+        zsh -n "$file"
+    done
 }
 
 @test "rcblock.awk prints none for empty input under each awk on PATH" {
@@ -86,30 +91,36 @@ shellcheck_repo() {
     [ -z "$output" ]
 }
 
-@test "git stores every hook in .githooks, bin/tlogger and the zsh stub as executable files" {
-    local mode path listing file
-    local -i checked=0 expected=0
+@test "git stores the hooks, the scripts and the .bats files as executable, and the sourced files not" {
+    local mode path listing file want
+    local -i hooks=0 indexed_hooks=0
     # The two scripts must be in the index at all; git add --chmod=+x stages one executable.
     for path in bin/tlogger tests/stub-bin/zsh; do
         if [[ -z $(git -C "$REPO_ROOT" ls-files -- "$path") ]]; then
             printf '%s is not in the index; stage it with git add --chmod=+x\n' "$path" >&2
             return 1
         fi
-        expected+=1
     done
-    # git runs a hook only when it is executable; denylist.sh is sourced, never run.
-    listing=$(git -C "$REPO_ROOT" ls-files -s -- .githooks bin/tlogger tests/stub-bin/zsh)
+    # git runs a hook only when it is executable. denylist.sh, the plugin files, rcblock.awk and
+    # the test helpers are sourced or read, never run, so none of them is executable.
+    listing=$(git -C "$REPO_ROOT" ls-files -s -- .githooks bin lib libexec tests)
     while read -r mode _ _ path; do
-        [[ "$path" == .githooks/denylist.sh ]] && continue
-        if [[ "$mode" != 100755 ]]; then
-            printf '%s is stored with mode %s, not 100755\n' "$path" "$mode" >&2
+        case $path in
+            .githooks/denylist.sh | lib/* | libexec/* | tests/*.bash | tests/helpers/*) want=100644 ;;
+            .githooks/* | bin/* | tests/stub-bin/* | tests/*.bats) want=100755 ;;
+            *) continue ;;
+        esac
+        if [[ $mode != "$want" ]]; then
+            printf '%s is stored with mode %s, not %s\n' "$path" "$mode" "$want" >&2
             return 1
         fi
-        checked+=1
+        if [[ $path == .githooks/* && $path != .githooks/denylist.sh ]]; then
+            indexed_hooks+=1
+        fi
     done <<< "$listing"
     for file in "$REPO_ROOT"/.githooks/*; do
-        [[ "$file" == */denylist.sh ]] || expected+=1
+        [[ "$file" == */denylist.sh ]] || hooks+=1
     done
     # Every hook in the work tree must be in the index, so an empty or failed listing fails here.
-    (( expected > 2 && checked == expected ))
+    (( hooks > 0 && indexed_hooks == hooks ))
 }
