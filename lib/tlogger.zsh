@@ -441,9 +441,9 @@ _tlogger_start() {
 }
 
 # tlogger stop: pause the recording. Works only in the main recorded shell, outside a subshell
-# and with no running or suspended job: writes stop-requested and exits that shell, which ends
-# script and hands the terminal back to the shell that ran tlogger start. Elsewhere it says why
-# and returns 1; it returns at all only then.
+# and with no running or suspended job: writes stop-requested and returns 0, and tlogger then
+# exits that shell, which ends script and hands the terminal back to the shell that ran tlogger
+# start. Elsewhere it says why and returns 1.
 _tlogger_stop() {
     emulate -L zsh
     local stamp
@@ -475,7 +475,6 @@ _tlogger_stop() {
         _tlogger_say red "cannot write the stop marker in session ${_tlogger_main:t}; the recording goes on"
         return 1
     fi
-    builtin exit 0
 }
 
 # tlogger status: print on stdout the plugin version, this terminal's state, its session and the
@@ -504,20 +503,40 @@ _tlogger_status() {
 # this shell's parent and the recorded terminal still its own: zsh runs the hook on a hangup too,
 # and a hangup, such as the death of the recorder, takes the terminal away, so that stat then
 # shows tty_nr 0 and the session counts as ended unexpectedly. Does nothing in any other shell.
+# It calls no shell function, only builtins, and so repeats what _tlogger_stat, _tlogger_utc and
+# _tlogger_write_new do: after an exit from inside nested functions, zsh runs the hook with that
+# exit still pending, and the first function the hook called would make the hook return early.
 _tlogger_zshexit() {
     emulate -L zsh
-    local stamp
-    local -a reply rec
+    local line stamp fd
+    local -a rec f
+    local -i rc
     if [[ -z ${_tlogger_main-} ]] || (( ZSH_SUBSHELL )); then
         return 0
     fi
     { rec=(${(s: :)"$(<$_tlogger_main/recorder)"}); } 2> /dev/null
-    if ! _tlogger_stat $$ ||
-        [[ $#rec != 4 || $reply[2] != "$rec[1]" || $reply[3] != "$rec[4]" ]]; then
+    { line=$(<${TLOGGER_PROC:-/proc}/$$/stat); } 2> /dev/null
+    # The fields after the last ')' of stat: the ppid is the second of them, tty_nr the fifth.
+    f=(${(s: :)${line##*\)}})
+    if [[ $line != *'('*')'* || $#rec != 4 || $f[2] != "$rec[1]" || $f[5] != "$rec[4]" ]]; then
         return 0
     fi
-    _tlogger_utc stamp '%Y-%m-%dT%H:%M:%SZ'
-    _tlogger_write_new $_tlogger_main/exited $stamp || :
+    local -x TZ=UTC0
+    strftime -s stamp '%Y-%m-%dT%H:%M:%SZ' $EPOCHSECONDS
+    if ! sysopen -w -o creat,excl,nofollow,cloexec -m 600 -u fd $_tlogger_main/exited 2> /dev/null; then
+        return 0
+    fi
+    {
+        print -r -u $fd -- $stamp 2> /dev/null
+        rc=$?
+    } always {
+        exec {fd}>&-
+    }
+    # Only a full disk or an I/O error gets here; no empty marker may stay behind.
+    if (( rc )); then
+        command rm -f -- $_tlogger_main/exited 2> /dev/null
+    fi
+    return 0
 }
 
 # In a shell that script started for tlogger start, restore TZ and unset TLOGGER_HS* before
@@ -578,6 +597,12 @@ function tlogger {
                 ! zmodload -e zsh/system; then
                 _tlogger_say plain 'the plugin did not load completely; open a new terminal'
                 return 1
+            fi
+            if [[ $1 == stop ]]; then
+                # The exit runs here, one function deep: after an exit from deeper down, zsh runs
+                # every zshexit hook with that exit pending, which cuts the hooks short.
+                _tlogger_stop || return 1
+                builtin exit 0
             fi
             _tlogger_$1
             return
