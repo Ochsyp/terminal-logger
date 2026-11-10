@@ -161,7 +161,9 @@ pty_session() {
     pty_expect "tlogger: REC $PTY_ID"$'\r\n'
 }
 
-# Let CENTISECONDS (default 20) pass.
+# Let CENTISECONDS (default 20) pass. zselect returns 1 when its time runs out, which is the point
+# here, so the pause returns 0: a driver that ends with a pause must not fail for it.
 pty_pause() {
     zselect -t ${1:-20}
+    return 0
 }
