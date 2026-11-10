@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# tlogger: install, remove and report the zsh plugin that will record terminal sessions as
-# evidence for penetration tests. This version manages a 4-line block at the top of the zsh rc,
-# the plugin files, the config and the state folders, and records nothing yet.
+# tlogger: install, remove and report the zsh plugin that records terminal sessions as evidence
+# for penetration tests. It manages a 4-line block at the top of the zsh rc, the plugin files,
+# the config and the state folders; the plugin's tlogger start and stop do the recording.
 
 # Exit status: 0 done or nothing to change; 1 error or refusal, and for status an install in part;
 # 2 usage error, or --mode or --yes missing where no terminal can answer; 3 not installed or
@@ -20,7 +20,7 @@ SRC_ROOT=${SRC_ROOT%/*}
 SRC_ROOT=${SRC_ROOT%/*}
 
 # The files of a release, relative to the source tree. bin/tlogger is the only executable one.
-RELEASE_FILES=(bin/tlogger lib/tlogger.zsh libexec/rcblock.awk VERSION)
+RELEASE_FILES=(bin/tlogger lib/config.zsh lib/tlogger.zsh libexec/rcblock.awk VERSION)
 
 # The marker lines around the block; libexec/rcblock.awk holds the same two lines.
 START_MARK='# >>> tlogger >>>'
@@ -194,10 +194,13 @@ Commands:
   version    Print the version.
   help       Show this help; -h and --help do the same.
 
+In a zsh terminal with the plugin loaded, tlogger start records that terminal, tlogger stop
+pauses the recording and tlogger status shows whether the terminal is recorded.
+
 Install options:
   --mode auto|manual  Record every new terminal (auto) or only on request (manual). This
-                      version records nothing yet. Without --mode, the mode in the config is
-                      kept, or a terminal is asked.
+                      version records only on request, with tlogger start, in both modes.
+                      Without --mode, the mode in the config is kept, or a terminal is asked.
   --dry-run           Show the plan and the change to the rc, and write nothing.
   --print-only        Print the block to add by hand, and write nothing.
   --yes               Do not ask for confirmation; needed outside a terminal.
@@ -355,13 +358,13 @@ check_source_tree() {
     done
 }
 
-# Warn when /usr/bin/script lacks --logging-format, which recording needs from a later version
-# on (util-linux 2.35 or newer). Only warns: this version records nothing.
+# Warn when /usr/bin/script lacks --logging-format, which tlogger start needs (util-linux 2.35 or
+# newer). Only warns: install works without it, and tlogger start refuses until it is there.
 check_recorder() {
     local help
     help=$(/usr/bin/script --help 2> /dev/null) || help=
     if [[ $help != *--logging-format* ]]; then
-        warn "/usr/bin/script lacks --logging-format; recording, which arrives in a later version, needs util-linux 2.35 or newer"
+        warn "/usr/bin/script lacks --logging-format; tlogger start needs util-linux 2.35 or newer"
     fi
 }
 
@@ -1172,11 +1175,15 @@ ensure_dir() {
     fi
 }
 
-# Read the config into CONFIG_MODE and CONFIG_LOGDIR without running it: key=value lines, blank
-# lines and '#' comments; unknown keys are kept and ignored. Sets CONFIG_ERROR, instead of
-# exiting, for an unsafe file, a bad line, a repeated key or an invalid value.
+# Read the config into CONFIG_MODE and CONFIG_LOGDIR without running it, by the line rules of
+# lib/config.zsh: key=value lines, blank lines and '#' comments, with the whitespace around a
+# value trimmed and a logdir's trailing slashes dropped. Every other key, the plugin's
+# record_input, min_free_mb and recorder included, is accepted unchecked, and install keeps its
+# line as it is. Sets CONFIG_ERROR, instead of exiting, for an unsafe file, a bad line, a repeated
+# key or an invalid mode or logdir.
 read_config() {
     local line key value n=0
+    local blank_re='^[[:space:]]*(#|$)' key_re='^[a-z][a-z0-9_]*='
     local -A seen=()
     CONFIG_MODE='' CONFIG_LOGDIR='' CONFIG_ERROR=''
     if [[ ! -e $CONFIG_FILE && ! -L $CONFIG_FILE ]]; then
@@ -1196,15 +1203,17 @@ read_config() {
     fi
     while IFS= read -r line || [[ -n $line ]]; do
         n=$(( n + 1 ))
-        if [[ -z $line || $line == '#'* ]]; then
+        if [[ $line =~ $blank_re ]]; then
             continue
         fi
-        if [[ ! $line =~ ^[a-z][a-z0-9_]*= ]]; then
+        if [[ ! $line =~ $key_re ]]; then
             CONFIG_ERROR="has line $n, which is not a key=value line"
             return 0
         fi
         key=${line%%=*}
         value=${line#*=}
+        value=${value#"${value%%[![:space:]]*}"}
+        value=${value%"${value##*[![:space:]]}"}
         if [[ -n ${seen[$key]+set} ]]; then
             CONFIG_ERROR="repeats the key $key on line $n"
             return 0
@@ -1219,7 +1228,10 @@ read_config() {
                 CONFIG_MODE=$value
                 ;;
             logdir)
-                if [[ $value != /* ]]; then
+                while [[ $value == */ && $value != / ]]; do
+                    value=${value%/}
+                done
+                if [[ $value != /* || $value == *[[:cntrl:]]* ]]; then
                     CONFIG_ERROR="has a logdir on line $n that is not an absolute path"
                     return 0
                 fi
@@ -1271,7 +1283,8 @@ install_config() {
     if [[ ! -e $CONFIG_FILE ]]; then
         replace_config << EOF
 # tlogger settings: key=value lines and # comments. tlogger reads this file as data and never runs it.
-# mode: auto records every new terminal, manual only on request (recording arrives in a later version).
+# mode: auto records every new terminal, manual only on tlogger start.
+# Optional: record_input=yes|no (default yes), min_free_mb=<MB> (default 200).
 mode=$MODE
 logdir=$SESSIONS_DIR
 EOF
@@ -1470,7 +1483,7 @@ print_install_summary() {
     elif [[ $RC_STATE == missing ]]; then
         backup_note="none: there was no rc"
     fi
-    printf 'tlogger %s is installed. It records nothing yet; recording arrives in a later version.\n' "$VERSION_STR"
+    printf 'tlogger %s is installed. In a new zsh terminal, tlogger start records it and tlogger stop pauses.\n' "$VERSION_STR"
     printf '  %-10s %s\n' \
         rc: "$(shown "$RC")" \
         mode: "$MODE" \
@@ -1737,7 +1750,7 @@ cmd_status() {
         result=1
     fi
     case $result in
-        0) printf 'tlogger is installed. This terminal is not recorded: recording arrives in a later version.\n' ;;
+        0) printf 'tlogger is installed. In a zsh terminal, tlogger status shows whether that terminal is recorded.\n' ;;
         3) printf 'tlogger is not installed.\n' ;;
         *) printf 'tlogger is installed only in part; run tlogger install to repair it.\n' ;;
     esac
@@ -1764,7 +1777,9 @@ cmd_version() {
 # =======================================================
 
 # Run the command named by the first argument. Sets the shell options, a private umask and the
-# traps that clean up at every exit; signals exit 128+n. Exits 2 without a known command.
+# traps that clean up at every exit; signals exit 128+n. Exits 2 without a known command, and for
+# start and stop, which only the plugin runs; a terminal still on the plugin it loaded before an
+# install of this version sends them here.
 main() {
     local cmd
     set -euo pipefail
@@ -1782,6 +1797,9 @@ main() {
         status) cmd_status "$@" ;;
         version | --version) cmd_version "$@" ;;
         help | -h | --help) usage ;;
+        start | stop)
+            die 2 "tlogger $cmd works only in a zsh terminal that has loaded the plugin; open a new zsh terminal"
+            ;;
         *) usage_error "unknown command: $cmd" ;;
     esac
 }
