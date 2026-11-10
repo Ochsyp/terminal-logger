@@ -194,8 +194,16 @@ make_plugin_release() {
         print -r -- "release: $_tlogger_release"
     ' zsh "$PLUGIN" < /dev/null
     [ "$status" -eq 0 ]
-    grep -qxF 'functions: _tlogger_df _tlogger_drop_empty _tlogger_handshake _tlogger_init _tlogger_load_config _tlogger_preflight _tlogger_say _tlogger_shown _tlogger_start _tlogger_stat _tlogger_status _tlogger_stop _tlogger_tty_state _tlogger_utc _tlogger_write_new _tlogger_zshexit add-zsh-hook tlogger' <<< "$output"
-    grep -qxF 'parameters: _tlogger_cfg _tlogger_main _tlogger_release _tlogger_state zshexit_functions' <<< "$output"
+    local want_f want_p got_f got_p
+    want_f='functions: _tlogger_df _tlogger_drop_empty _tlogger_handshake _tlogger_init _tlogger_load_config _tlogger_preflight _tlogger_say _tlogger_shown _tlogger_start _tlogger_stat _tlogger_status _tlogger_stop _tlogger_tty_state _tlogger_utc _tlogger_write_new _tlogger_zshexit add-zsh-hook tlogger'
+    want_p='parameters: _tlogger_cfg _tlogger_main _tlogger_release _tlogger_state zshexit_functions'
+    got_f=$(grep '^functions: ' <<< "$output") || got_f=
+    got_p=$(grep '^parameters: ' <<< "$output") || got_p=
+    if [[ $got_f != "$want_f" || $got_p != "$want_p" ]]; then
+        printf 'want: %s\ngot:  %s\nwant: %s\ngot:  %s\nstderr:\n%s\n' \
+            "$want_f" "$got_f" "$want_p" "$got_p" "$stderr" >&2
+        return 1
+    fi
     grep -qxF 'options: unchanged' <<< "$output"
     grep -qxF 'prompt: unchanged' <<< "$output"
     grep -qxF "release: $RELEASE_DIR" <<< "$output"
