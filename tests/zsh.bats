@@ -165,7 +165,8 @@ make_plugin_release() {
     need zsh
     make_plugin_release
     # The modules the plugin loads are loaded first, so that their parameters do not count as
-    # new, and LC_ALL=C fixes the sort order. The script is zsh code; zsh expands it, not bash.
+    # new, and LC_ALL=C fixes the sort order. The name lists stay unquoted: in double quotes zsh
+    # would join them before it sorts them. The script is zsh code; zsh expands it, not bash.
     # shellcheck disable=SC2016
     run --separate-stderr env LC_ALL=C zsh -f -i -c '
         zmodload zsh/datetime zsh/system zsh/parameter
@@ -183,8 +184,8 @@ make_plugin_release() {
         _t_o2=$(setopt)
         _t_new_f=(${_t_f1:|_t_f0})
         _t_new_p=(${_t_p1:|_t_p0})
-        print -r -- "functions: ${(oj: :)_t_new_f}"
-        print -r -- "parameters: ${(oj: :)_t_new_p}"
+        print -r -- functions: ${(o)_t_new_f}
+        print -r -- parameters: ${(o)_t_new_p}
         if [[ $_t_o0 == "$_t_o1" && $_t_o1 == "$_t_o2" ]]; then
             print -r -- "options: unchanged"
         fi
