@@ -82,7 +82,9 @@ _pty_until() {
 pty_shell() {
     local -a assignments
     assignments=(HOME=$HOME PATH=$PATH TERM=dumb "$@")
-    if ! zpty -e $PTY_NAME "stty rows 24 cols 80 2> /dev/null; exec env -i ${(j: :)${(q)assignments}} zsh -i"; then
+    # In double quotes, (@) keeps the words apart, so that (q) quotes each one before they are
+    # joined; without it the words would be joined first and env would get one argument.
+    if ! zpty -e $PTY_NAME "stty rows 24 cols 80 2> /dev/null; exec env -i ${(j: :)${(@q)assignments}} zsh -i"; then
         pty_fail 'zpty cannot start the shell'
     fi
     pty_run 'print -r -- $$'
