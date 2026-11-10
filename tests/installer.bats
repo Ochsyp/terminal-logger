@@ -77,7 +77,7 @@ round_trip() {
 # so that a test can install a release other than the repository's own.
 make_source_tree() {
     local dir=$1 version=$2 f
-    for f in bin/tlogger lib/tlogger.zsh libexec/rcblock.awk; do
+    for f in bin/tlogger lib/config.zsh lib/tlogger.zsh libexec/rcblock.awk; do
         mkdir -p "$dir/${f%/*}"
         cp "$REPO_ROOT/$f" "$dir/$f"
     done
@@ -109,10 +109,10 @@ list_releases() {
     tail -n +5 "$RC" | cmp - "$BATS_TEST_TMPDIR/original"
     [ -L "$DATA/current" ]
     [ "$(readlink "$DATA/current")" = "releases/$VERSION_TEXT" ]
-    for f in bin/tlogger lib/tlogger.zsh libexec/rcblock.awk VERSION; do
+    for f in bin/tlogger lib/config.zsh lib/tlogger.zsh libexec/rcblock.awk VERSION; do
         cmp "$REPO_ROOT/$f" "$RELEASE/$f"
     done
-    [ "$(wc -l < "$RELEASE/MANIFEST")" -eq 4 ]
+    [ "$(wc -l < "$RELEASE/MANIFEST")" -eq 5 ]
     (cd "$RELEASE" && sha256sum --quiet --check MANIFEST)
     grep -qx 'mode=manual' "$CONF/config"
     grep -qxF "logdir=$STATE/sessions" "$CONF/config"
@@ -142,6 +142,7 @@ list_releases() {
     [ "$(stat -c %a "$STATE/rc-backups")" = 700 ]
     [ "$(stat -c %a "$STATE/sessions")" = 700 ]
     [ "$(stat -c %a "$RELEASE/bin/tlogger")" = 755 ]
+    [ "$(stat -c %a "$RELEASE/lib/config.zsh")" = 644 ]
     [ "$(stat -c %a "$RELEASE/lib/tlogger.zsh")" = 644 ]
     [ "$(stat -c %a "$RELEASE/libexec/rcblock.awk")" = 644 ]
     [ "$(stat -c %a "$RELEASE/VERSION")" = 644 ]
@@ -413,6 +414,18 @@ list_releases() {
     [[ $stderr == *"Usage: tlogger <command> [options]"* ]]
 }
 
+@test "start and stop exit 2 and name the terminal where they work" {
+    local cmd
+    # A terminal still on the plugin it loaded before an install of this version sends them here.
+    for cmd in start stop; do
+        run_tlogger "$cmd"
+        [ "$status" -eq 2 ]
+        [ -z "$output" ]
+        [ "$stderr" = "tlogger: tlogger $cmd works only in a zsh terminal that has loaded the plugin; open a new zsh terminal" ]
+    done
+    refute_tlogger_folders
+}
+
 @test "no command exits 2 with the usage" {
     run_tlogger
     [ "$status" -eq 2 ]
@@ -615,6 +628,61 @@ list_releases() {
     run_tlogger install --yes
     [ "$status" -eq 0 ]
     grep -qx 'mode=auto' "$CONF/config"
+}
+
+@test "install keeps the plugin's own config keys and an indented comment as they are" {
+    need symlinks
+    printf 'alias ll=ls\n' > "$RC"
+    run_tlogger install --mode manual --yes
+    [ "$status" -eq 0 ]
+    printf '  # tuned for this engagement\nrecord_input=no\nmin_free_mb=500\nrecorder=/usr/bin/script\n' \
+        >> "$CONF/config"
+    cp "$CONF/config" "$BATS_TEST_TMPDIR/config-before"
+    run_tlogger install --yes
+    [ "$status" -eq 0 ]
+    cmp "$CONF/config" "$BATS_TEST_TMPDIR/config-before"
+    run_tlogger install --mode auto --yes
+    [ "$status" -eq 0 ]
+    grep -qx 'mode=auto' "$CONF/config"
+    grep -qxF '  # tuned for this engagement' "$CONF/config"
+    grep -qx 'record_input=no' "$CONF/config"
+    grep -qx 'min_free_mb=500' "$CONF/config"
+    grep -qx 'recorder=/usr/bin/script' "$CONF/config"
+    run_tlogger status
+    [ "$status" -eq 0 ]
+    grep -qx '  mode: *auto' <<< "$output"
+}
+
+@test "read_config trims values, skips indented comments and blank lines, and runs no value" {
+    local config="$BATS_TEST_TMPDIR/config"
+    # bash expands these in the child, after the source.
+    # shellcheck disable=SC2016
+    local probe='source "$1" && CONFIG_FILE=$2 && read_config && printf "%s|%s|%s\n" "$CONFIG_MODE" "$CONFIG_LOGDIR" "$CONFIG_ERROR"'
+    printf '   # an indented comment\n\t \nmode= auto \t\nlogdir=/home/kali/evidence//  \r\nrecord_input=no\nmin_free_mb=500\n' \
+        > "$config"
+    run bash -c "$probe" _ "$TLOGGER" "$config" < /dev/null
+    [ "$status" -eq 0 ]
+    [ "$output" = 'auto|/home/kali/evidence|' ]
+    # The config line is data for tlogger; no shell may expand it.
+    # shellcheck disable=SC2016
+    printf 'mode=$(touch %s/ran)\n' "$BATS_TEST_TMPDIR" > "$config"
+    run bash -c "$probe" _ "$TLOGGER" "$config" < /dev/null
+    [ "$status" -eq 0 ]
+    [ "$output" = '||has a mode on line 1 that is neither auto nor manual' ]
+    [ ! -e "$BATS_TEST_TMPDIR/ran" ]
+    printf 'logdir=/home/kali/a\tb\n' > "$config"
+    run bash -c "$probe" _ "$TLOGGER" "$config" < /dev/null
+    [ "$status" -eq 0 ]
+    [ "$output" = '||has a logdir on line 1 that is not an absolute path' ]
+}
+
+@test "a source tree without lib/config.zsh is refused before anything is written" {
+    make_source_tree "$BATS_TEST_TMPDIR/src" 0.0.1
+    rm "$BATS_TEST_TMPDIR/src/lib/config.zsh"
+    install_from "$BATS_TEST_TMPDIR/src"
+    [ "$status" -eq 1 ]
+    [[ $stderr == *"lacks lib/config.zsh"* ]]
+    refute_tlogger_folders
 }
 
 @test "a symlinked state folder refuses install before anything is written" {

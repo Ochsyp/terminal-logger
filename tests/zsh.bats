@@ -17,12 +17,14 @@ setup() {
     IFS= read -r VERSION_TEXT < "$REPO_ROOT/VERSION"
 }
 
-# Copy lib/tlogger.zsh into a release folder of the test's own, with a VERSION file and no
-# bin/tlogger, and set PLUGIN to the copy and RELEASE_DIR to the folder, symlinks resolved.
+# Copy lib/tlogger.zsh and lib/config.zsh into a release folder of the test's own, with a VERSION
+# file and no bin/tlogger, and set PLUGIN to the copy and RELEASE_DIR to the folder, symlinks
+# resolved.
 make_plugin_release() {
     RELEASE_DIR="$BATS_TEST_TMPDIR/release"
     mkdir -p "$RELEASE_DIR/lib"
     cp "$REPO_ROOT/lib/tlogger.zsh" "$RELEASE_DIR/lib/tlogger.zsh"
+    cp "$REPO_ROOT/lib/config.zsh" "$RELEASE_DIR/lib/config.zsh"
     printf '0.0.0-test\n' > "$RELEASE_DIR/VERSION"
     RELEASE_DIR=$(cd "$RELEASE_DIR" && pwd -P)
     PLUGIN="$RELEASE_DIR/lib/tlogger.zsh"
@@ -116,7 +118,7 @@ make_plugin_release() {
     zsh -n "$RC"
 }
 
-@test "an interactive zsh loads the plugin, and tlogger status says nothing is recorded" {
+@test "an interactive zsh loads the plugin, and tlogger status says that the terminal is not recorded" {
     need zsh
     need symlinks
     printf 'alias ll=ls\n' > "$RC"
@@ -125,8 +127,12 @@ make_plugin_release() {
     [[ $stderr == *"plugin loaded"* ]]
     run --separate-stderr zsh -i -c 'tlogger status' < /dev/null
     [ "$status" -eq 0 ]
-    [[ $output == *"tlogger plugin $VERSION_TEXT"* ]]
-    [[ $output == *"this terminal is NOT recorded (recording arrives in a later version)"* ]]
+    grep -qxF "tlogger plugin $VERSION_TEXT" <<< "$output"
+    grep -qx '  state: *NOREC, this terminal is NOT recorded' <<< "$output"
+    grep -qx '  session: *none' <<< "$output"
+    grep -qx '  mode: *manual' <<< "$output"
+    grep -qx '  logdir: *~/\.local/state/tlogger/sessions' <<< "$output"
+    grep -qx '  record_input: *yes' <<< "$output"
     run --separate-stderr zsh -i -c 'tlogger version' < /dev/null
     [ "$status" -eq 0 ]
     [[ $output == *"tlogger $VERSION_TEXT"* ]]
@@ -155,12 +161,14 @@ make_plugin_release() {
     [ "$output" = "0 0" ]
 }
 
-@test "the plugin defines only tlogger and _tlogger_release, and changes no option" {
+@test "the plugin defines only its own functions and parameters, and changes no option" {
     need zsh
     make_plugin_release
-    # The script is zsh code; zsh expands it, not bash.
+    # The modules the plugin loads are loaded first, so that their parameters do not count as
+    # new, and LC_ALL=C fixes the sort order. The script is zsh code; zsh expands it, not bash.
     # shellcheck disable=SC2016
-    run --separate-stderr zsh -f -i -c '
+    run --separate-stderr env LC_ALL=C zsh -f -i -c '
+        zmodload zsh/datetime zsh/system zsh/parameter
         typeset -a _t_f0 _t_f1 _t_p0 _t_p1 _t_new_f _t_new_p
         typeset _t_o0 _t_o1 _t_o2 _t_prompt
         _t_prompt=$PROMPT
@@ -186,13 +194,14 @@ make_plugin_release() {
         print -r -- "release: $_tlogger_release"
     ' zsh "$PLUGIN" < /dev/null
     [ "$status" -eq 0 ]
-    grep -qxF 'functions: tlogger' <<< "$output"
-    grep -qxF 'parameters: _tlogger_release' <<< "$output"
+    grep -qxF 'functions: _tlogger_df _tlogger_drop_empty _tlogger_handshake _tlogger_init _tlogger_load_config _tlogger_preflight _tlogger_say _tlogger_shown _tlogger_start _tlogger_stat _tlogger_status _tlogger_stop _tlogger_tty_state _tlogger_utc _tlogger_write_new _tlogger_zshexit add-zsh-hook tlogger' <<< "$output"
+    grep -qxF 'parameters: _tlogger_cfg _tlogger_main _tlogger_release _tlogger_state zshexit_functions' <<< "$output"
     grep -qxF 'options: unchanged' <<< "$output"
     grep -qxF 'prompt: unchanged' <<< "$output"
     grep -qxF "release: $RELEASE_DIR" <<< "$output"
     grep -qxF 'tlogger plugin 0.0.0-test' <<< "$output"
-    grep -qxF 'this terminal is NOT recorded (recording arrives in a later version)' <<< "$output"
+    grep -qx '  state: *NOREC, this terminal is NOT recorded' <<< "$output"
+    [ -z "$stderr" ]
 }
 
 @test "the plugin's tlogger sends other subcommands to the bin/tlogger of its release" {

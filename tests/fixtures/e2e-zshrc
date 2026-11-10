@@ -1,0 +1,4 @@
+# Synthetic zsh rc for tests/e2e-manual.bats, below the block that tlogger install adds. Without
+# the line editor the terminal shows exactly what is typed and printed, as the tests expect.
+unsetopt zle
+PROMPT='e2e%# '
