@@ -1,7 +1,7 @@
 # Drives an interactive shell in a pseudo-terminal through zsh's own zsh/zpty module, for
-# tests/e2e-manual.bats: types lines, waits for output against a hard deadline and frames commands
-# with markers that give their output and exit status. A wait that times out or sees the shell end
-# ends the driver with a report of the terminal output. Sourced by the driver; no tmux involved.
+# tests/e2e-manual.bats and tests/e2e-auto.bats: types lines and keys, waits for output or for the
+# end of a process against a hard deadline, and frames commands with markers that give their output
+# and exit status. A wait that fails ends the driver with a report of the output; no tmux involved.
 
 if ! zmodload zsh/zpty zsh/zselect zsh/datetime 2> /dev/null; then
     print -ru2 -- 'pty: this zsh lacks the zsh/zpty, zsh/zselect or zsh/datetime module'
@@ -11,11 +11,12 @@ setopt extendedglob
 
 # The zpty command name. PTY_BUF holds the output no wait has consumed yet, PTY_LOG all output
 # read so far, PTY_BEFORE what the last pty_expect skipped before its text. PTY_OUT and PTY_STATUS
-# are the output and exit status of the last frame; PTY_ID and PTY_BANNER come from pty_session,
-# PTY_PID, the pid of the shell in the terminal, from pty_shell. PTY_SEQ counts the frames, and
-# _pty_mark keeps the length of PTY_LOG when each frame began.
+# are the output and exit status of the last frame; PTY_ID and PTY_BANNER come from pty_session.
+# PTY_PID is the pid of the shell in the terminal, whose end cuts every wait short; pty_shell and
+# pty_auto_shell set it, and pty_auto_shell also sets PTY_OUTER, PTY_RECORDER and PTY_INNER.
+# PTY_SEQ counts the frames, and _pty_mark keeps the length of PTY_LOG when each frame began.
 typeset -g PTY_NAME=e2e PTY_BUF= PTY_LOG= PTY_BEFORE= PTY_OUT= PTY_ID= PTY_BANNER=
-typeset -gi PTY_STATUS=0 PTY_SEQ=0 PTY_PID=0
+typeset -gi PTY_STATUS=0 PTY_SEQ=0 PTY_PID=0 PTY_OUTER=0 PTY_RECORDER=0 PTY_INNER=0
 typeset -ga _pty_mark
 # The longest a wait lasts, in seconds.
 typeset -gi PTY_WAIT=20
@@ -77,16 +78,24 @@ _pty_until() {
 }
 
 # Start the interactive zsh under test in a new 24x80 terminal with echo on, with only HOME, PATH,
-# TERM=dumb and the NAME=VALUE arguments in its environment, wait until it runs commands and set
-# PTY_PID to its pid.
-pty_shell() {
+# TERM=dumb and the NAME=VALUE arguments in its environment, and type nothing. Forgets the unread
+# output of an earlier terminal, and PTY_PID until a starter sets it again.
+pty_open() {
     local -a assignments
     assignments=(HOME=$HOME PATH=$PATH TERM=dumb "$@")
+    PTY_BUF= PTY_PID=0
     # In double quotes, (@) keeps the words apart, so that (q) quotes each one before they are
     # joined; without it the words would be joined first and env would get one argument.
     if ! zpty -e $PTY_NAME "stty rows 24 cols 80 2> /dev/null; exec env -i ${(j: :)${(@q)assignments}} zsh -i"; then
         pty_fail 'zpty cannot start the shell'
     fi
+}
+
+# Start the zsh under test as pty_open does, wait until it runs commands and set PTY_PID to its
+# pid. The first line is typed at once and runs once the rc has loaded; in a terminal that records
+# itself, it runs in the recorded shell, since script passes on what was typed before it started.
+pty_shell() {
+    pty_open "$@"
     pty_run 'print -r -- $$'
     if (( PTY_STATUS != 0 )) || [[ $PTY_OUT != <->$'\n' ]]; then
         pty_fail 'the shell does not run commands'
@@ -94,9 +103,44 @@ pty_shell() {
     PTY_PID=${PTY_OUT%$'\n'}
 }
 
+# Start the zsh under test as pty_open does, in a terminal that records itself while the rc loads,
+# and type nothing until the banner and the REC line have come, which pty_session reads. Then set
+# PTY_INNER to the pid of the recorded shell, PTY_RECORDER to that of its parent, which must be
+# script, and PTY_OUTER and PTY_PID to that of script's parent, the shell that zpty started.
+pty_auto_shell() {
+    local -a ids
+    pty_open "$@"
+    pty_session
+    pty_run 'print -r -- "$$ $PPID"'
+    ids=(${=PTY_OUT})
+    if (( PTY_STATUS != 0 || $#ids != 2 )) || [[ $ids[1] != <-> || $ids[2] != <-> ]]; then
+        pty_fail "the recorded shell does not run commands: ${(V)PTY_OUT}"
+    fi
+    PTY_INNER=$ids[1] PTY_RECORDER=$ids[2]
+    pty_parent $PTY_RECORDER
+    if [[ $reply[1] != script ]]; then
+        pty_fail "the parent of the recorded shell is ${(V)reply[1]}, not script"
+    fi
+    PTY_OUTER=$REPLY PTY_PID=$REPLY
+}
+
+# End the terminal: read what it printed last, then let zpty -d hang up whatever still runs in it,
+# so that pty_open can start the next terminal under the same name.
+pty_close() {
+    _pty_read
+    zpty -d $PTY_NAME 2> /dev/null
+    PTY_BUF= PTY_PID=0
+    return 0
+}
+
 # Type LINE and Enter into the terminal.
 pty_send() {
     zpty -w $PTY_NAME "$1" || pty_fail "cannot type into the terminal: $1"
+}
+
+# Type TEXT into the terminal without Enter, such as $'\x04' for Ctrl+D.
+pty_type() {
+    zpty -wn $PTY_NAME "$1" || pty_fail "cannot type into the terminal: ${(V)1}"
 }
 
 # Wait until the terminal prints TEXT, at most SECONDS; consume the output up to the end of TEXT
@@ -148,7 +192,7 @@ pty_out_is() {
     [[ $PTY_OUT == "$1"$'\n' ]]
 }
 
-# Wait for the banner of tlogger start and the REC line of the recorded shell; set PTY_BANNER to
+# Wait for the banner of a recording and the REC line of the recorded shell; set PTY_BANNER to
 # the banner line and PTY_ID to the session id it names.
 pty_session() {
     pty_expect 'tlogger: recording session '
@@ -159,6 +203,28 @@ pty_session() {
         pty_fail "the banner names no session id: ${(V)PTY_BANNER}"
     fi
     pty_expect "tlogger: REC $PTY_ID"$'\r\n'
+}
+
+# Set REPLY to the parent pid and reply to the comm of process PID, from /proc/PID/stat read
+# without a fork: the comm lies between the first ( and the last ), and the ppid is the second
+# field after it. Ends the driver when the file cannot be read.
+pty_parent() {
+    local line
+    local -a f
+    if ! { line=$(</proc/$1/stat); } 2> /dev/null || [[ $line != *'('*')'* ]]; then
+        pty_fail "cannot read /proc/$1/stat"
+    fi
+    f=(${(s: :)${line##*\)}})
+    reply=("${${line#*\(}%\)*}")
+    REPLY=$f[2]
+}
+
+# Wait at most SECONDS until process PID has ended and the driver has reaped it, as the shell that
+# zpty started does once a recording closes its terminal. kill -0 still finds a process that has
+# ended until then; zsh reaps every child as SIGCHLD comes.
+pty_wait_gone() {
+    local pid=$1
+    _pty_until '! kill -0 $pid 2> /dev/null' "the end of process $pid" $2
 }
 
 # Let CENTISECONDS (default 20) pass. zselect returns 1 when its time runs out, which is the point

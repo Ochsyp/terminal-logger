@@ -1,0 +1,6 @@
+# Synthetic zsh rc for tests/e2e-auto.bats, below the block that tlogger install adds. Without
+# the line editor the terminal shows exactly what is typed and printed, and E2E_RC_DONE, never
+# exported, tells that this shell ran the rest of its rc after the block.
+unsetopt zle
+PROMPT='e2e%# '
+E2E_RC_DONE=1

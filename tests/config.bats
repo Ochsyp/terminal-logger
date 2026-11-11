@@ -32,6 +32,17 @@ load_config() {
         done' zsh "$REPO_ROOT/lib/config.zsh" < /dev/null
 }
 
+# Load the config as load_config does, but print record_ssh and record_tmux, on one line.
+load_policies() {
+    # zsh expands these, not bash.
+    # shellcheck disable=SC2016
+    run --separate-stderr zsh -f -c '
+        source "$1" || exit 1
+        _tlogger_load_config || exit 1
+        print -r -- "$_tlogger_cfg[record_ssh] $_tlogger_cfg[record_tmux]"' zsh \
+        "$REPO_ROOT/lib/config.zsh" < /dev/null
+}
+
 # Fail unless the last load_config exited 0 and printed MODE, LOGDIR, RECORD_INPUT, MIN_FREE_MB
 # and RECORDER, with the default config folder.
 assert_config() {
@@ -151,6 +162,30 @@ bash_mode_logdir() {
     [ "${stderr_lines[4]}" = 'tlogger: warning: ~/.config/tlogger/config line 5: recorder must be an absolute path; using /usr/bin/script' ]
 }
 
+@test "record_ssh and record_tmux take yes or no from the config or a preset, and default to yes" {
+    load_policies
+    [ "$status" -eq 0 ]
+    [ "$output" = 'yes yes' ]
+    [ -z "$stderr" ]
+    printf 'record_ssh= no\nrecord_tmux=no\t\n' > "$CONFIG"
+    load_policies
+    [ "$output" = 'no no' ]
+    [ -z "$stderr" ]
+    TLOGGER_RECORD_SSH=yes TLOGGER_RECORD_TMUX=' yes ' load_policies
+    [ "$output" = 'yes yes' ]
+    [ -z "$stderr" ]
+    # Invalid values get the default yes, with one warning each, in the order of the keys.
+    printf 'record_tmux=1\nrecord_ssh=maybe\n' > "$CONFIG"
+    load_policies
+    [ "$output" = 'yes yes' ]
+    [ "${#stderr_lines[@]}" -eq 2 ]
+    [ "${stderr_lines[0]}" = 'tlogger: warning: ~/.config/tlogger/config line 2: record_ssh must be yes or no; using yes' ]
+    [ "${stderr_lines[1]}" = 'tlogger: warning: ~/.config/tlogger/config line 1: record_tmux must be yes or no; using yes' ]
+    TLOGGER_RECORD_TMUX=never load_policies
+    [ "$output" = 'yes yes' ]
+    [ "${stderr_lines[1]}" = 'tlogger: warning: TLOGGER_RECORD_TMUX: record_tmux must be yes or no; using yes' ]
+}
+
 @test "min_free_mb takes 1 to 12 digits only, and logdir no control character" {
     local value
     for value in -5 1e3 0x10 ' ' 1234567890123 '1 000'; do
@@ -234,7 +269,7 @@ bash_mode_logdir() {
         [plain]=$'mode=auto\nlogdir=/home/kali/evidence\n'
         [spaced]=$'# a comment\n\n   # an indented comment\n\t \nmode= manual \t\nlogdir=/home/kali/ev//  \n'
         [crlf]=$'mode=auto\r\nlogdir=/home/kali/crlf\r\n'
-        [plugin-keys]=$'record_input=no\nmin_free_mb=500\nrecorder=/usr/bin/script\nengagement=demo\nmode=auto\n'
+        [plugin-keys]=$'record_input=no\nmin_free_mb=500\nrecorder=/usr/bin/script\nrecord_ssh=no\nrecord_tmux=no\nengagement=demo\nmode=auto\n'
         [root]=$'logdir=/\n'
         [no-final-newline]='mode=auto'
         [empty]=''
