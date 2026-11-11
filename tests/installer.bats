@@ -509,7 +509,8 @@ list_releases() {
 }
 
 @test "install --dry-run for a missing rc creates nothing" {
-    TLOGGER_SKEL="$SKEL_FIXTURE" run_tlogger install --mode auto --dry-run
+    # Auto mode runs the smoke test, a dry run too; the stub passes it.
+    TLOGGER_RECORDER=$STUB_RECORDER TLOGGER_SKEL="$SKEL_FIXTURE" run_tlogger install --mode auto --dry-run
     [ "$status" -eq 0 ]
     grep -qx '  mode: *auto' <<< "$output"
     [ ! -e "$RC" ]
@@ -618,14 +619,15 @@ list_releases() {
     [ "$status" -eq 0 ]
     logdir=$(grep '^logdir=' "$CONF/config")
     printf '# a note\nengagement=demo\n' >> "$CONF/config"
-    run_tlogger install --mode auto --yes
+    # Auto mode, given or kept, runs the smoke test; the stub passes it.
+    TLOGGER_RECORDER=$STUB_RECORDER run_tlogger install --mode auto --yes
     [ "$status" -eq 0 ]
     grep -qx 'mode=auto' "$CONF/config"
     grep -qxF "$logdir" "$CONF/config"
     grep -qx '# a note' "$CONF/config"
     grep -qx 'engagement=demo' "$CONF/config"
     [ "$(grep -c '^mode=' "$CONF/config")" -eq 1 ]
-    run_tlogger install --yes
+    TLOGGER_RECORDER=$STUB_RECORDER run_tlogger install --yes
     [ "$status" -eq 0 ]
     grep -qx 'mode=auto' "$CONF/config"
 }
@@ -635,22 +637,38 @@ list_releases() {
     printf 'alias ll=ls\n' > "$RC"
     run_tlogger install --mode manual --yes
     [ "$status" -eq 0 ]
-    printf '  # tuned for this engagement\nrecord_input=no\nmin_free_mb=500\nrecorder=/usr/bin/script\n' \
+    printf '  # tuned for this engagement\nrecord_input=no\nmin_free_mb=500\nrecorder=/usr/bin/script\nrecord_ssh=no\nrecord_tmux=no\n' \
         >> "$CONF/config"
     cp "$CONF/config" "$BATS_TEST_TMPDIR/config-before"
     run_tlogger install --yes
     [ "$status" -eq 0 ]
     cmp "$CONF/config" "$BATS_TEST_TMPDIR/config-before"
-    run_tlogger install --mode auto --yes
+    # Auto mode runs the smoke test; the stub passes it, and TLOGGER_RECORDER wins over the
+    # recorder= line.
+    TLOGGER_RECORDER=$STUB_RECORDER run_tlogger install --mode auto --yes
     [ "$status" -eq 0 ]
     grep -qx 'mode=auto' "$CONF/config"
     grep -qxF '  # tuned for this engagement' "$CONF/config"
     grep -qx 'record_input=no' "$CONF/config"
     grep -qx 'min_free_mb=500' "$CONF/config"
     grep -qx 'recorder=/usr/bin/script' "$CONF/config"
+    grep -qx 'record_ssh=no' "$CONF/config"
+    grep -qx 'record_tmux=no' "$CONF/config"
     run_tlogger status
     [ "$status" -eq 0 ]
     grep -qx '  mode: *auto' <<< "$output"
+}
+
+@test "a new config names the optional keys in its comments and sets only mode and logdir" {
+    need symlinks
+    local key
+    printf 'alias ll=ls\n' > "$RC"
+    run_tlogger install --mode manual --yes
+    [ "$status" -eq 0 ]
+    for key in record_input min_free_mb record_ssh record_tmux; do
+        grep -q "^#.*$key=" "$CONF/config"
+    done
+    [ "$(grep -v '^#' "$CONF/config")" = "mode=manual"$'\n'"logdir=$STATE/sessions" ]
 }
 
 @test "read_config trims values, skips indented comments and blank lines, and runs no value" {
