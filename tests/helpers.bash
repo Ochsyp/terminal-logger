@@ -12,6 +12,12 @@ DENY_TERM=forbidden-term-example
 TLOGGER="$REPO_ROOT/bin/tlogger"
 GOLDEN_BLOCK="$REPO_ROOT/tests/golden/rc-block.zsh"
 
+# A stand-in for util-linux script that passes the smoke test of auto mode. Wherever install or
+# tlogger mode must pass that test, installer.bats and mode.bats name it, in TLOGGER_RECORDER or in
+# the config's recorder=, so that they run without script; e2e-auto.bats runs the real one.
+# shellcheck disable=SC2034 # The .bats files use it.
+STUB_RECORDER="$REPO_ROOT/tests/stub-bin/tlogger-test-recorder"
+
 # The real zsh, found before the stub can shadow it, or empty. Without one, tests/stub-bin goes
 # first on PATH, so that bin/tlogger still gets answers to what it asks zsh; the stub refuses to
 # run when TLOGGER_CI=1, so CI cannot pass on it.

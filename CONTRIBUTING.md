@@ -85,6 +85,18 @@ bats tests/
   `cmdline` files and a boot id into the folder that `TLOGGER_PROC` names. `TLOGGER_PROC`, default
   `/proc`, exists for the tests only, as do the config key `recorder` and `TLOGGER_RECORDER`, which
   name the `script` binary.
+- `tests/autostart.bats` checks the autostart guard, `_tlogger_autostart_why`, in a real zsh
+  without a terminal: each reason it gives, in the order of its contract, the presets and config
+  keys it reads, and that it prints nothing. It runs the guard from a script file with
+  `zsh -f -i FILE`, since `zsh -c` sets `ZSH_EXECUTION_STRING`, which is itself a reason.
+- `tests/mode.bats` checks `tlogger mode` and the smoke test of the recorder in `tlogger mode` and
+  `install`. `tests/stub-bin/tlogger-test-recorder` stands in for `script` there: it takes the
+  options tlogger gives `script`, creates the empty logs and exits 0, or, with
+  `TLOGGER_TEST_RECORDER_STATUS` set to 1-255, exits with that status and writes nothing.
+  Wherever `install` or `tlogger mode` must pass the smoke test, `installer.bats` and `mode.bats`
+  name the stub, in `TLOGGER_RECORDER` or in the config key `recorder`, so that those tests run
+  without `script`. One `mode.bats` test runs the real `script`, and `tests/e2e-auto.bats`
+  installs with it.
 - `tests/e2e-manual.bats` records for real, without tmux. It installs tlogger from the work tree
   into the test's HOME and drives an interactive zsh in a pseudo-terminal through zsh's own
   `zsh/zpty` module, with the functions in `tests/helpers/pty.zsh`. The driver types lines, waits
@@ -96,9 +108,16 @@ bats tests/
   line editor off, and in one test the rc built from `/etc/skel/.zshrc`. These tests need Linux,
   zsh with the `zsh/zpty` and `zsh/zselect` modules, util-linux `script`, symlinks, POSIX modes
   and a non-root user.
-- git stores the hooks, `bin/tlogger`, `tests/stub-bin/zsh` and every `.bats` file as executable
-  files, and the sourced files as plain ones; a lint test checks the modes in the index. Where
-  `core.filemode` is false, as on Git for Windows, stage a new executable file with
+- `tests/e2e-auto.bats` does the same for auto mode, on `tests/fixtures/e2e-auto-zshrc`, which
+  sets `E2E_RC_DONE` after the tlogger block, so that a test can tell which shell loaded the rest
+  of the rc. In auto mode `script` passes on what was typed before it started, so a line typed
+  into a new terminal runs in the recorded shell; `pty_auto_shell` therefore types nothing until
+  the banner and the REC line have come, and finds the shell that zpty started, the parent of
+  `script`, through `/proc`. `pty_wait_gone` waits until a closed terminal's shell has ended, and
+  `pty_close` ends a terminal so that the next one can start.
+- git stores the hooks, `bin/tlogger`, the stubs in `tests/stub-bin` and every `.bats` file as
+  executable files, and the sourced files as plain ones; a lint test checks the modes in the
+  index. Where `core.filemode` is false, as on Git for Windows, stage a new executable file with
   `git add --chmod=+x`, and check the modes with `git ls-files -s`.
 - Tests tagged `root` (`# bats test_tags=root`) run only as root and skip otherwise. The other
   tests expect a non-root user: tlogger refuses root with a HOME that is not root's, so a run as
@@ -118,6 +137,25 @@ bats tests/
   a non-root user with `--filter-tags '!root'`, and the tests tagged root run afterwards as root.
   CI fails when any test fails or is skipped, and when the two runs together do not run every
   test that `bats --count tests/` counts.
+
+### zsh pitfalls
+
+A machine without zsh skips every zsh test, so CI is often the first place new zsh code runs.
+Check new code against these rules and the zsh documentation before it gets there:
+
+- In double quotes, zsh joins an array before `(q)` quotes it and before `(o)` sorts it. Write
+  `"${(j: :)${(@q)a}}"`, with `(@)`, or leave the array unquoted.
+- An `exit` inside nested functions waits until they return, and zsh then runs the `zshexit`
+  hooks with that exit still pending, where the first shell function a hook calls makes the hook
+  return early. `_tlogger_zshexit` therefore calls builtins only, and the plugin runs `exit` at
+  most one function deep, where the hooks run in full.
+- `zselect -t N` returns 1 when its time runs out; a function that ends with it returns 0
+  itself.
+- `zsh -c` sets `ZSH_EXECUTION_STRING`, which stops autostart, so a test that needs autostart to
+  pass that check runs its code from a script file.
+- With job control on, a foreground job that a signal kills can leave the terminal raw: no echo,
+  and no CR before LF. A test driver does not depend on either afterwards.
+- `$(<file)` reads a file without a fork; every other command substitution forks.
 
 ### Moving the Kali image
 

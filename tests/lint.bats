@@ -11,18 +11,20 @@ setup() {
     isolate_home
 }
 
-# Run ShellCheck in the repository root on the hooks, denylist.sh, bin/tlogger, the zsh stub,
+# Run ShellCheck in the repository root on the hooks, denylist.sh, bin/tlogger, the stubs,
 # helpers.bash and the .bats files. The paths stay relative, because some ShellCheck builds
 # cannot read the absolute paths a POSIX layer passes them.
 shellcheck_repo() {
-    (cd "$REPO_ROOT" && shellcheck .githooks/* bin/tlogger tests/stub-bin/zsh tests/*.bash tests/*.bats)
+    (cd "$REPO_ROOT" && shellcheck .githooks/* bin/tlogger tests/stub-bin/zsh \
+        tests/stub-bin/tlogger-test-recorder tests/*.bash tests/*.bats)
 }
 
 @test "no file that git tracks or would add holds a CR byte" {
     local path
     local -a files=() required=(bin/tlogger lib/config.zsh lib/tlogger.zsh libexec/rcblock.awk
-        VERSION tests/stub-bin/zsh tests/golden/rc-block.zsh tests/fixtures/skel-zshrc
-        tests/fixtures/e2e-zshrc tests/helpers/pty.zsh tests/helpers/fakeproc.zsh)
+        VERSION tests/stub-bin/zsh tests/stub-bin/tlogger-test-recorder tests/golden/rc-block.zsh
+        tests/fixtures/skel-zshrc tests/fixtures/e2e-zshrc tests/fixtures/e2e-auto-zshrc
+        tests/helpers/pty.zsh tests/helpers/fakeproc.zsh)
     while IFS= read -r -d '' path; do
         if [[ -f "$REPO_ROOT/$path" ]]; then
             files+=("$REPO_ROOT/$path")
@@ -52,9 +54,10 @@ shellcheck_repo() {
     done
 }
 
-@test "bin/tlogger, the zsh stub and tests/helpers.bash pass a bash -n syntax check" {
+@test "bin/tlogger, the stubs and tests/helpers.bash pass a bash -n syntax check" {
     bash -n "$REPO_ROOT/bin/tlogger"
     bash -n "$REPO_ROOT/tests/stub-bin/zsh"
+    bash -n "$REPO_ROOT/tests/stub-bin/tlogger-test-recorder"
     bash -n "$REPO_ROOT/tests/helpers.bash"
 }
 
@@ -94,8 +97,8 @@ shellcheck_repo() {
 @test "git stores the hooks, the scripts and the .bats files as executable, and the sourced files not" {
     local mode path listing file want
     local -i hooks=0 indexed_hooks=0
-    # The two scripts must be in the index at all; git add --chmod=+x stages one executable.
-    for path in bin/tlogger tests/stub-bin/zsh; do
+    # The three scripts must be in the index at all; git add --chmod=+x stages one executable.
+    for path in bin/tlogger tests/stub-bin/zsh tests/stub-bin/tlogger-test-recorder; do
         if [[ -z $(git -C "$REPO_ROOT" ls-files -- "$path") ]]; then
             printf '%s is not in the index; stage it with git add --chmod=+x\n' "$path" >&2
             return 1

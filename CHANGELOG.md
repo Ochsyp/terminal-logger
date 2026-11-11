@@ -29,11 +29,29 @@ All notable changes to this project are listed here. The format follows
   users may write in, a session folder that cannot stay private or too little free space stop
   `tlogger start` with a red notice and leave the shell working. A recording whose `script`
   process dies counts as ended unexpectedly. The config takes `record_input` and `min_free_mb`,
-  and `TLOGGER_<KEY>` variables win over it; `lib/config.zsh` reads it as data. Autostart arrives
-  in the next phase.
+  and `TLOGGER_<KEY>` variables win over it; `lib/config.zsh` reads it as data.
 - Tests for the config parser, for the terminal state over a fake `/proc`, and end to end in a
   pseudo-terminal that zsh's `zpty` module drives, also under the rc built from Kali's
   `/etc/skel/.zshrc`.
+- Automatic mode: with `mode=auto`, every new interactive zsh terminal records itself as its shell
+  starts, through the same checks and recording as `tlogger start`. `exit` and Ctrl+D end the
+  recording and close the terminal; `tlogger stop` pauses and keeps it open, as does a recording
+  that is refused, fails to start or ends unexpectedly, with its notice. `zsh -c` and `zsh -i -c`
+  commands, VS Code's environment probe, asciinema recordings, shells without a terminal and
+  terminals that are recorded already do not record themselves, and say nothing. The kill
+  switches, `TLOGGER_DISABLE=1` and the `disable` file, stop it with a red notice in each new
+  terminal, and exported `TLOGGER_<KEY>` variables, such as `TLOGGER_MODE=manual`, set the policy
+  of a terminal profile.
+- `tlogger mode` prints the mode in the config, and `tlogger mode auto|manual` sets it: it
+  changes only the `mode=` line and writes the config with mode 0600 through a temp file and a
+  rename.
+- The config keys `record_ssh` and `record_tmux` (`yes` or `no`, default `yes`) decide whether an
+  SSH login or a tmux pane records itself in auto mode.
+- A smoke test of the recorder: `install` in auto mode, a dry run included, and
+  `tlogger mode auto` first record the command `true` with `script` in a private temp folder, and
+  refuse auto mode when that fails.
+- Tests of the autostart guard in a real zsh, of `tlogger mode` and the smoke test with a stub
+  recorder, and end to end in auto mode in a pseudo-terminal that zsh's `zpty` module drives.
 
 ### Changed
 
@@ -45,5 +63,7 @@ All notable changes to this project are listed here. The format follows
   `bin/tlogger start` and `stop`, which a terminal still on the plugin it loaded before an
   install sends there, exit 2 and say that they work only in a zsh terminal that has loaded the
   plugin.
+- The config that `install` writes for a new user names the optional keys `record_input`,
+  `min_free_mb`, `record_ssh` and `record_tmux` in its comments.
 
 [Unreleased]: https://github.com/Ochsyp/terminal-logger/commits/main

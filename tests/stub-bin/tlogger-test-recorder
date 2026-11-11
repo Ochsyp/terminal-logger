@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Stand-in for util-linux script in the tests of bin/tlogger, which pass its path in
+# TLOGGER_RECORDER. It takes the options that tlogger gives script, creates the empty logs that
+# --log-timing, --log-in and --log-out name, runs no command and exits 0, so that it passes the
+# smoke test of auto mode. With TLOGGER_TEST_RECORDER_STATUS set to 1-255, it only exits with that.
+
+set -u
+
+status=${TLOGGER_TEST_RECORDER_STATUS:-0}
+if [[ ! $status =~ ^[0-9]{1,3}$ ]] || (( 10#$status > 255 )); then
+    printf 'tlogger-test-recorder: TLOGGER_TEST_RECORDER_STATUS must be a number from 0 to 255\n' >&2
+    exit 98
+fi
+if (( 10#$status != 0 )); then
+    exit $(( 10#$status ))
+fi
+
+logs=()
+while (( $# )); do
+    case $1 in
+        --help)
+            # The line that tlogger's check for util-linux 2.35 or newer looks for.
+            printf ' -m, --logging-format <name>  force to classic or advanced format\n'
+            exit 0
+            ;;
+        --quiet | --flush | --return) shift ;;
+        --logging-format | --command | --log-timing | --log-in | --log-out)
+            if (( $# < 2 )); then
+                printf 'tlogger-test-recorder: %s needs a value\n' "$1" >&2
+                exit 98
+            fi
+            case $1 in
+                --log-*) logs+=("$2") ;;
+            esac
+            shift 2
+            ;;
+        *)
+            printf 'tlogger-test-recorder: unknown argument %s\n' "$1" >&2
+            exit 98
+            ;;
+    esac
+done
+
+for log in "${logs[@]}"; do
+    : > "$log" || exit 1
+done
+exit 0

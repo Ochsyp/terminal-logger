@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # tlogger: install, remove and report the zsh plugin that records terminal sessions as evidence
-# for penetration tests. It manages a 4-line block at the top of the zsh rc, the plugin files,
-# the config and the state folders; the plugin's tlogger start and stop do the recording.
+# for penetration tests, and set its mode. It manages a 4-line block at the top of the zsh rc,
+# the plugin files, the config and the state folders; the plugin does the recording, on tlogger
+# start or, in auto mode, in every new terminal.
 
 # Exit status: 0 done or nothing to change; 1 error or refusal, and for status an install in part;
 # 2 usage error, or --mode or --yes missing where no terminal can answer; 3 not installed or
@@ -110,10 +111,18 @@ SCAN_END=0
 SCAN_FOREIGN=()
 SCAN_ERRORS=()
 
-# What read_config found in the config.
+# What read_config found in the config: CONFIG_RECORDER is the recorder= value, unchecked, and
+# CONFIG_RECORDER_LINE its line number, 0 when there is none.
 CONFIG_MODE=
 CONFIG_LOGDIR=
+CONFIG_RECORDER=
+CONFIG_RECORDER_LINE=0
 CONFIG_ERROR=
+
+# The recorder that auto mode runs, set by resolve_recorder, and the smoke test's temp folder
+# while it exists.
+RECORDER=
+SMOKE_DIR=
 
 # Temp state that cleanup removes: the private work folder, which a dry run never creates, single
 # temp files and links, a backup being written, and a release folder being built or replaced,
@@ -190,16 +199,19 @@ Commands:
              the plugin files, the config and the state folders.
   uninstall  Remove the block and the plugin files. The config stays unless --purge-config is
              given; logs and rc backups always stay.
+  mode       Print the mode in the config, auto or manual. tlogger mode auto|manual sets it;
+             auto first runs a smoke test of the recorder.
   status     Show whether tlogger is installed and where its files are.
   version    Print the version.
   help       Show this help; -h and --help do the same.
 
 In a zsh terminal with the plugin loaded, tlogger start records that terminal, tlogger stop
-pauses the recording and tlogger status shows whether the terminal is recorded.
+pauses the recording and tlogger status shows whether the terminal is recorded. In auto mode
+every new terminal records itself as its shell starts.
 
 Install options:
-  --mode auto|manual  Record every new terminal (auto) or only on request (manual). This
-                      version records only on request, with tlogger start, in both modes.
+  --mode auto|manual  Record every new terminal (auto) or only on request, with tlogger start
+                      (manual). auto first runs a smoke test of the recorder.
                       Without --mode, the mode in the config is kept, or a terminal is asked.
   --dry-run           Show the plan and the change to the rc, and write nothing.
   --print-only        Print the block to add by hand, and write nothing.
@@ -222,12 +234,13 @@ usage_error() {
     exit 2
 }
 
-# Remove what this run made and did not keep: the work folder, temp files and links, a partial
-# backup and a release folder being built or replaced, after moving a release that was set aside
-# back into place. Runs from the EXIT trap, ignores every failure and never changes the exit
-# status.
+# Remove what this run made and did not keep: the work folder, the smoke test's folder, temp
+# files and links, a partial backup and a release folder being built or replaced, after moving a
+# release that was set aside back into place. Runs from the EXIT trap, ignores every failure and
+# never changes the exit status.
 cleanup() {
     local p
+    remove_smoke_dir
     for p in "${TEMP_PATHS[@]}"; do
         rm -f -- "$p" 2> /dev/null || true
     done
@@ -1178,14 +1191,15 @@ ensure_dir() {
 # Read the config into CONFIG_MODE and CONFIG_LOGDIR without running it, by the line rules of
 # lib/config.zsh: key=value lines, blank lines and '#' comments, with the whitespace around a
 # value trimmed and a logdir's trailing slashes dropped. Every other key, the plugin's
-# record_input, min_free_mb and recorder included, is accepted unchecked, and install keeps its
-# line as it is. Sets CONFIG_ERROR, instead of exiting, for an unsafe file, a bad line, a repeated
-# key or an invalid mode or logdir.
+# record_input, min_free_mb, record_ssh, record_tmux and recorder included, is accepted unchecked,
+# and install keeps its line as it is; the recorder value goes to CONFIG_RECORDER and its line
+# number to CONFIG_RECORDER_LINE, for resolve_recorder. Sets CONFIG_ERROR, instead of exiting, for
+# an unsafe file, a bad line, a repeated key or an invalid mode or logdir.
 read_config() {
     local line key value n=0
     local blank_re='^[[:space:]]*(#|$)' key_re='^[a-z][a-z0-9_]*='
     local -A seen=()
-    CONFIG_MODE='' CONFIG_LOGDIR='' CONFIG_ERROR=''
+    CONFIG_MODE='' CONFIG_LOGDIR='' CONFIG_RECORDER='' CONFIG_RECORDER_LINE=0 CONFIG_ERROR=''
     if [[ ! -e $CONFIG_FILE && ! -L $CONFIG_FILE ]]; then
         return 0
     fi
@@ -1237,6 +1251,10 @@ read_config() {
                 fi
                 CONFIG_LOGDIR=$value
                 ;;
+            recorder)
+                CONFIG_RECORDER=$value
+                CONFIG_RECORDER_LINE=$n
+                ;;
         esac
     done < "$CONFIG_FILE"
 }
@@ -1253,20 +1271,41 @@ replace_config() {
     mv -T -f -- "$tmp" "$CONFIG_FILE" 2> /dev/null || die 1 "cannot write $(shown "$CONFIG_FILE")"
 }
 
-# Print the config with the line of KEY set to VALUE, or VALUE appended as a new line when KEY is
-# missing. Every other line is copied as it is.
+# Print the config with its first KEY= line set to KEY=VALUE, or with KEY=VALUE appended as a new
+# line when there is none, and every other byte as it is. The changed line keeps a CR before its
+# line end, and a last line without a newline stays without one, unless the new line follows it.
+# Returns 1 when the config cannot be opened or any write fails, such as on a full disk, so that
+# no caller renames a copy cut short over the config. Callers run it left of ||, where errexit
+# does not apply, so each write checks its own status.
 config_with() {
-    local key=$1 value=$2 line done=0
-    while IFS= read -r line || [[ -n $line ]]; do
-        if (( ! done )) && [[ $line == "$key="* ]]; then
-            printf '%s=%s\n' "$key" "$value"
-            done=1
-        else
-            printf '%s\n' "$line"
+    local key=$1 value=$2 line eol cr done=0
+    while true; do
+        eol=$'\n'
+        # read fails at the end of the file, and also on a last line without a newline.
+        if ! IFS= read -r line; then
+            if [[ -z $line ]]; then
+                break
+            fi
+            eol=
         fi
-    done < "$CONFIG_FILE"
+        if (( ! done )) && [[ $line == "$key="* ]]; then
+            cr=
+            if [[ $line == *$'\r' ]]; then
+                cr=$'\r'
+            fi
+            line=$key=$value$cr
+            done=1
+        fi
+        printf '%s%s' "$line" "$eol" || return 1
+        if [[ -z $eol ]]; then
+            break
+        fi
+    done < "$CONFIG_FILE" || return 1
     if (( ! done )); then
-        printf '%s=%s\n' "$key" "$value"
+        if [[ -z $eol ]]; then
+            printf '\n' || return 1
+        fi
+        printf '%s=%s\n' "$key" "$value" || return 1
     fi
 }
 
@@ -1284,7 +1323,8 @@ install_config() {
         replace_config << EOF
 # tlogger settings: key=value lines and # comments. tlogger reads this file as data and never runs it.
 # mode: auto records every new terminal, manual only on tlogger start.
-# Optional: record_input=yes|no (default yes), min_free_mb=<MB> (default 200).
+# Optional: record_input=yes|no (default yes), min_free_mb=<MB> (default 200),
+# record_ssh=yes|no (default yes) for SSH logins, record_tmux=yes|no (default yes) for tmux panes.
 mode=$MODE
 logdir=$SESSIONS_DIR
 EOF
@@ -1292,7 +1332,7 @@ EOF
         # Through a file, not a pipe, so that replace_config runs in this shell and cleanup
         # knows its temp file.
         { config_with mode "$MODE" > "$WORK/config"; } 2> /dev/null ||
-            die 1 "cannot write in the temp folder"
+            die 1 "cannot copy $(shown "$CONFIG_FILE") to the temp folder"
         replace_config < "$WORK/config"
     fi
     chmod 600 -- "$CONFIG_FILE" 2> /dev/null || die 1 "cannot set mode 0600 on $(shown "$CONFIG_FILE")"
@@ -1407,6 +1447,79 @@ probe_plugin() {
 }
 
 # =======================================================
+#                   RECORDER SMOKE TEST
+# =======================================================
+
+# Set RECORDER to the recorder that auto mode runs, picked as lib/config.zsh picks it: an exported,
+# non-empty TLOGGER_RECORDER, trimmed, else the config's recorder=, else /usr/bin/script. A value
+# that is not an absolute path without control characters gets one warning and the default. Call
+# after read_config.
+resolve_recorder() {
+    local value origin
+    RECORDER=/usr/bin/script
+    if [[ -n ${TLOGGER_RECORDER-} && ${TLOGGER_RECORDER@a} == *x* ]]; then
+        value=$TLOGGER_RECORDER
+        value=${value#"${value%%[![:space:]]*}"}
+        value=${value%"${value##*[![:space:]]}"}
+        origin=TLOGGER_RECORDER
+    elif (( CONFIG_RECORDER_LINE )); then
+        value=$CONFIG_RECORDER
+        origin="$(shown "$CONFIG_FILE") line $CONFIG_RECORDER_LINE"
+    else
+        return 0
+    fi
+    if [[ $value != /* || $value == *[[:cntrl:]]* ]]; then
+        warn "$origin: recorder must be an absolute path; using /usr/bin/script"
+        return 0
+    fi
+    RECORDER=$value
+}
+
+# Run RECORDER once as auto mode runs it, but with the command true, in a new private temp folder
+# SMOKE_DIR: 'TZ=UTC0 RECORDER --quiet --logging-format advanced --log-timing SMOKE_DIR/timing
+# --log-out SMOKE_DIR/output.raw --command true', with stdin from /dev/null, the output dropped
+# and, where timeout exists, a limit of 10 seconds. Succeeds when the recorder exits 0 and both
+# logs exist; a recorder that is missing, not executable or lacks --logging-format fails, as does
+# one that fails or times out. Removes the folder again; exits 1 when it cannot create it.
+smoke_test() {
+    local status=0
+    local -a limit=()
+    SMOKE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/tlogger-smoke.XXXXXX" 2> /dev/null) ||
+        die 1 "cannot create a temp folder in $(shown "${TMPDIR:-/tmp}")"
+    if command -v timeout > /dev/null 2>&1; then
+        # -k 2 follows with KILL when the recorder ignores TERM.
+        limit=(timeout -k 2 10)
+    fi
+    TZ=UTC0 "${limit[@]}" "$RECORDER" --quiet --logging-format advanced \
+        --log-timing "$SMOKE_DIR/timing" --log-out "$SMOKE_DIR/output.raw" --command true \
+        < /dev/null > /dev/null 2>&1 || status=$?
+    if (( status == 0 )) && [[ ! -f $SMOKE_DIR/timing || ! -f $SMOKE_DIR/output.raw ]]; then
+        status=1
+    fi
+    remove_smoke_dir
+    return "$status"
+}
+
+# Remove the smoke test's folder SMOKE_DIR with the plain files in it, without rm -r, and clear
+# SMOKE_DIR. Ignores every failure, so that cleanup can call it at any time.
+remove_smoke_dir() {
+    if [[ -n $SMOKE_DIR && -d $SMOKE_DIR && ! -L $SMOKE_DIR ]]; then
+        rm -f -- "$SMOKE_DIR"/* 2> /dev/null || true
+        rmdir -- "$SMOKE_DIR" 2> /dev/null || true
+    fi
+    SMOKE_DIR=
+}
+
+# Exit 1 unless the recorder that auto mode would run, as resolve_recorder picks it, passes the
+# smoke test. The message ends in HINT, which says what to do instead.
+require_working_recorder() {
+    resolve_recorder
+    if ! smoke_test; then
+        die 1 "auto mode needs a working recorder: $(shown "$RECORDER") failed its smoke test; $1"
+    fi
+}
+
+# =======================================================
 #                         INSTALL
 # =======================================================
 
@@ -1483,7 +1596,11 @@ print_install_summary() {
     elif [[ $RC_STATE == missing ]]; then
         backup_note="none: there was no rc"
     fi
-    printf 'tlogger %s is installed. In a new zsh terminal, tlogger start records it and tlogger stop pauses.\n' "$VERSION_STR"
+    if [[ $MODE == auto ]]; then
+        printf 'tlogger %s is installed. Every new zsh terminal records itself, and tlogger stop pauses.\n' "$VERSION_STR"
+    else
+        printf 'tlogger %s is installed. In a new zsh terminal, tlogger start records it and tlogger stop pauses.\n' "$VERSION_STR"
+    fi
     printf '  %-10s %s\n' \
         rc: "$(shown "$RC")" \
         mode: "$MODE" \
@@ -1495,8 +1612,10 @@ print_install_summary() {
 }
 
 # tlogger install: put the block at the top of the rc and install the code, config and state.
-# Writes nothing anywhere with --dry-run or --print-only, no temp folder either, and nothing
-# outside its private temp folder before the checks in check_targets and check_syntax pass.
+# When the mode is auto, from --mode, the question or the config, the recorder must pass the smoke
+# test first; --print-only skips it. Writes nothing anywhere with --dry-run or --print-only, no
+# temp folder either but the smoke test's own, which it removes, and nothing outside its private
+# temp folders before the checks in check_targets, the smoke test and check_syntax pass.
 cmd_install() {
     local question
     parse_install_options "$@"
@@ -1542,6 +1661,9 @@ cmd_install() {
     choose_mode
     if (( ! OPT_DRY_RUN && ! OPT_YES )) && ! on_tty; then
         die 2 "--yes is required when not run from a terminal"
+    fi
+    if [[ $MODE == auto ]]; then
+        require_working_recorder "install with --mode manual, or fix script"
     fi
     if (( RC_CHANGED )); then
         check_syntax put
@@ -1689,6 +1811,75 @@ cmd_uninstall() {
 }
 
 # =======================================================
+#                          MODE
+# =======================================================
+
+# Print a note on stderr when an exported TLOGGER_MODE is set, which in the terminal that has it
+# wins over the config.
+note_mode_preset() {
+    if [[ -n ${TLOGGER_MODE-} && ${TLOGGER_MODE@a} == *x* ]]; then
+        msg "note: TLOGGER_MODE is set, and in this terminal it wins over the config"
+    fi
+}
+
+# tlogger mode [auto|manual]: without an argument, print the mode in the config on stdout, manual
+# when the config has no mode= line. With one, set it: only the mode= line changes, or one is
+# appended, through a temp file in the config folder, mode 0600, and a rename; auto must pass the
+# smoke test first. Exits 0 when done or already so, 1 for an unsafe or invalid config or a failed
+# smoke test, 2 for a wrong or extra argument and 3 when there is no config.
+cmd_mode() {
+    local want='' current
+    case ${1-} in
+        -h | --help) usage; exit 0 ;;
+    esac
+    if (( $# > 1 )); then
+        usage_error "mode takes one argument at most: auto or manual"
+    fi
+    if (( $# == 1 )); then
+        if [[ $1 != auto && $1 != manual ]]; then
+            usage_error "mode takes auto or manual, not '$1'"
+        fi
+        want=$1
+    fi
+    refuse_foreign_root
+    resolve_paths
+    check_dir_safe "$CONFIG_DIR"
+    if [[ ! -e $CONFIG_FILE && ! -L $CONFIG_FILE ]]; then
+        die 3 "tlogger is not installed; run tlogger install"
+    fi
+    read_config
+    if [[ -n $CONFIG_ERROR ]]; then
+        die 1 "the config $(shown "$CONFIG_FILE") $CONFIG_ERROR; fix it by hand"
+    fi
+    current=${CONFIG_MODE:-manual}
+    if [[ -z $want ]]; then
+        printf '%s\n' "$current"
+        note_mode_preset
+        return 0
+    fi
+    if [[ $want == "$current" ]]; then
+        msg "mode is already $want"
+        note_mode_preset
+        return 0
+    fi
+    if [[ $want == auto ]]; then
+        require_working_recorder "keep manual mode, or fix script"
+    fi
+    make_work
+    # Through a file, not a pipe, so that replace_config runs in this shell and cleanup knows its
+    # temp file.
+    { config_with mode "$want" > "$WORK/config"; } 2> /dev/null ||
+        die 1 "cannot copy $(shown "$CONFIG_FILE") to the temp folder"
+    replace_config < "$WORK/config"
+    if [[ $want == auto ]]; then
+        msg "mode is now auto; new terminals record themselves"
+    else
+        msg "mode is now manual; tlogger start records a terminal"
+    fi
+    note_mode_preset
+}
+
+# =======================================================
 #                    STATUS AND VERSION
 # =======================================================
 
@@ -1794,6 +1985,7 @@ main() {
     case $cmd in
         install) cmd_install "$@" ;;
         uninstall) cmd_uninstall "$@" ;;
+        mode) cmd_mode "$@" ;;
         status) cmd_status "$@" ;;
         version | --version) cmd_version "$@" ;;
         help | -h | --help) usage ;;
