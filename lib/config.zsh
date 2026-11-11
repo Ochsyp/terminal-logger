@@ -2,21 +2,21 @@
 # _tlogger_load_config, which reads ${XDG_CONFIG_HOME:-$HOME/.config}/tlogger/config as data and
 # never runs or expands a value. bin/tlogger's read_config follows the same line rules.
 
-# Fill the global associative array _tlogger_cfg with mode, logdir, record_input, min_free_mb and
-# recorder, and with config_dir, the folder that holds the config and the disable file. Lines are
-# key=value, blank or '#' comments; whitespace around a value is trimmed, a repeated key keeps
-# its first value and an unknown key is ignored. An exported TLOGGER_<KEY in upper case> that is
-# not empty wins over the file. An invalid value, or a line that is not key=value, gets one
-# warning on stderr, and the key keeps its default. A file that is a symlink, not a regular file,
-# another user's or unreadable is not read. recorder= and TLOGGER_RECORDER exist for the tests.
-# Always returns 0, and runs no command.
+# Fill the global associative array _tlogger_cfg with mode, logdir, record_input, min_free_mb,
+# recorder, record_ssh and record_tmux, and with config_dir, the folder that holds the config and
+# the disable file. Lines are key=value, blank or '#' comments; whitespace around a value is
+# trimmed, a repeated key keeps its first value and an unknown key is ignored. An exported
+# TLOGGER_<KEY in upper case> that is not empty wins over the file. An invalid value, or a line
+# that is not key=value, gets one warning on stderr, and the key keeps its default. A file that is
+# a symlink, not a regular file, another user's or unreadable is not read. recorder= and
+# TLOGGER_RECORDER exist for the tests. Always returns 0, and runs no command.
 _tlogger_load_config() {
     emulate -L zsh
     setopt extendedglob
     local home=${${HOME-}%%/##} base cfg_dir state_dir file shown_file content line key value why
     local shown_default name
     local -i n
-    local -a lines
+    local -a lines keys
     local -A def raw origin
 
     # XDG base folders: unset, empty or relative values fall back to the defaults under HOME.
@@ -36,8 +36,10 @@ _tlogger_load_config() {
         base=${base%/}
     done
     state_dir=$base/tlogger
+    # The keys in the order of their checks, and so of their warnings.
+    keys=(mode logdir record_input min_free_mb recorder record_ssh record_tmux)
     def=(mode manual logdir "$state_dir/sessions" record_input yes min_free_mb 200
-        recorder /usr/bin/script)
+        recorder /usr/bin/script record_ssh yes record_tmux yes)
 
     file=$cfg_dir/config
     shown_file=$file
@@ -79,7 +81,7 @@ _tlogger_load_config() {
     done
 
     # Only an exported variable counts, so that this shell and the shells it starts agree.
-    for key in mode logdir record_input min_free_mb recorder; do
+    for key in $keys; do
         name=TLOGGER_${(U)key}
         if [[ ${(tP)name} == *export* && -n ${(P)name} ]]; then
             value=${(P)name}
@@ -90,7 +92,7 @@ _tlogger_load_config() {
 
     typeset -gA _tlogger_cfg
     _tlogger_cfg=(config_dir "$cfg_dir")
-    for key in mode logdir record_input min_free_mb recorder; do
+    for key in $keys; do
         if (( ! ${+raw[$key]} )); then
             _tlogger_cfg[$key]=$def[$key]
             continue
@@ -103,7 +105,7 @@ _tlogger_load_config() {
                     why='must be auto or manual'
                 fi
                 ;;
-            record_input)
+            record_input | record_ssh | record_tmux)
                 if [[ $value != (yes|no) ]]; then
                     why='must be yes or no'
                 fi

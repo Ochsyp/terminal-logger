@@ -1,7 +1,7 @@
 # tlogger plugin for zsh, sourced by the tlogger block at the top of the zsh rc. tlogger start
-# records this terminal with util-linux script, tlogger stop pauses the recording and tlogger
-# status shows the state; every other subcommand goes to bin/tlogger of the release this file
-# belongs to. It changes no zsh option outside its functions and never touches PROMPT.
+# records this terminal with util-linux script, tlogger stop pauses, tlogger status shows the
+# state, and in auto mode each new terminal records itself; other subcommands go to the release's
+# bin/tlogger. It changes no zsh option outside its functions and never touches PROMPT.
 
 # Only an interactive shell gets the command.
 [[ -o interactive ]] || return 0
@@ -382,16 +382,20 @@ _tlogger_preflight() {
     REPLY=$dir
 }
 
-# tlogger start: record this terminal. After the checks, prints the banner and runs the recorder
-# in the foreground, with TZ=UTC0 for its timestamps and SHELL set to this zsh binary, then
-# reports how the recording ended from the markers in the session folder, never from the exit
-# status or script's own messages. The terminal always stays open. Returns 0 when the recording
-# was paused or ended, 1 when a check refused it, it failed to start or it ended unexpectedly.
-_tlogger_start() {
+# Record this terminal, for tlogger start (KIND start) or for autostart (KIND auto): find the zsh
+# binary, run the preflight, print the banner and run the recorder in the foreground, with
+# TZ=UTC0 for its timestamps and SHELL set to that binary; then tell how the recording ended from
+# the markers in the session folder, never from the exit status or script's own messages. Prints
+# the notice of each outcome, but none for a recording that ended in KIND auto. Sets REPLY to
+# ended, paused, unexpected, failed or refused, and reply to the recorder's exit status, empty
+# unless it ran; callers declare both local. Returns 0 when the recording ended or was paused, 1
+# when a check refused it, it failed to start or it ended unexpectedly. Needs _tlogger_cfg filled.
+_tlogger_record() {
     emulate -L zsh
-    local REPLY dir id zsh_bin tzset=0 tzval=
+    local kind=$1 dir id zsh_bin tzset=0 tzval=
+    local -i rc
     local -a login
-    _tlogger_load_config
+    reply=()
     # The binary this shell runs, so that the recorded shell is the same zsh.
     zsh_bin=${${:-${TLOGGER_PROC:-/proc}/$$/exe}:A}
     if [[ ! -f $zsh_bin || ! -x $zsh_bin ]]; then
@@ -399,10 +403,12 @@ _tlogger_start() {
     fi
     if [[ -z $zsh_bin ]]; then
         _tlogger_say red 'NOT recording this terminal: cannot find the zsh binary'
+        REPLY=refused
         return 1
     fi
     if ! _tlogger_preflight; then
         _tlogger_say red "NOT recording this terminal: $REPLY"
+        REPLY=refused
         return 1
     fi
     dir=$REPLY id=${REPLY:t}
@@ -419,17 +425,24 @@ _tlogger_start() {
     TLOGGER_HS=$dir TLOGGER_HS_TZSET=$tzset TLOGGER_HS_TZ=$tzval TZ=UTC0 SHELL=$zsh_bin \
         $_tlogger_cfg[recorder] --quiet --flush --return --logging-format advanced \
         --log-timing $dir/timing $login --log-out $dir/output.raw
+    rc=$?
+    reply=($rc)
     # A marker counts only with its line in it.
     if [[ -s $dir/started ]]; then
         if [[ -s $dir/stop-requested ]]; then
             _tlogger_say plain 'recording paused; this terminal is NOT recorded; tlogger start resumes in a new session'
+            REPLY=paused
             return 0
         fi
         if [[ -s $dir/exited ]]; then
-            _tlogger_say plain 'recording ended; this terminal is NOT recorded'
+            if [[ $kind != auto ]]; then
+                _tlogger_say plain 'recording ended; this terminal is NOT recorded'
+            fi
+            REPLY=ended
             return 0
         fi
         _tlogger_say yellow "recording ended unexpectedly; session $id kept"
+        REPLY=unexpected
         return 1
     fi
     if _tlogger_drop_empty $dir; then
@@ -437,7 +450,20 @@ _tlogger_start() {
     else
         _tlogger_say red "recording failed to start; session $id kept"
     fi
+    REPLY=failed
     return 1
+}
+
+# tlogger start: read the config again and record this terminal with _tlogger_record. The
+# terminal always stays open, in auto mode too: the end of the recording returns to this shell's
+# prompt. Returns 0 when the recording was paused or ended, 1 when a check refused it, it failed to
+# start or it ended unexpectedly.
+_tlogger_start() {
+    emulate -L zsh
+    local REPLY
+    local -a reply
+    _tlogger_load_config
+    _tlogger_record start
 }
 
 # tlogger stop: pause the recording. Works only in the main recorded shell, outside a subshell
@@ -539,11 +565,13 @@ _tlogger_zshexit() {
     return 0
 }
 
-# In a shell that script started for tlogger start, restore TZ and unset TLOGGER_HS* before
-# anything can fail, so that no failure leaves them to this shell and its children. Then load the
-# zsh modules and lib/config.zsh, read the config, run the handshake there, work out this
-# terminal's state and add the zshexit hook. Runs once, when the plugin is sourced; prints one
-# warning and returns 1 when a module or lib/config.zsh is missing.
+# In a shell that script started for a recording, restore TZ and unset TLOGGER_HS* before
+# anything can fail, so that no failure leaves them to this shell and its children, and keep the
+# session folder that TLOGGER_HS named in _tlogger_hs, empty in every other shell, so that
+# autostart never runs in a shell that a recorder started. Then load the zsh modules and
+# lib/config.zsh, read the config, run the handshake there, work out this terminal's state and add
+# the zshexit hook. Runs once, when the plugin is sourced. Returns 0, or prints one warning and
+# returns 1 when a module or lib/config.zsh is missing.
 _tlogger_init() {
     emulate -L zsh
     local REPLY hs=${TLOGGER_HS-}
@@ -555,6 +583,7 @@ _tlogger_init() {
         esac
     fi
     unset TLOGGER_HS TLOGGER_HS_TZSET TLOGGER_HS_TZ
+    typeset -g _tlogger_hs=$hs
     if ! zmodload zsh/datetime zsh/system zsh/parameter 2> /dev/null; then
         _tlogger_say plain 'warning: zsh lacks the zsh/datetime, zsh/system or zsh/parameter module; tlogger cannot record in this terminal'
         return 1
@@ -578,6 +607,67 @@ _tlogger_init() {
         typeset -ga zshexit_functions
         zshexit_functions=(${zshexit_functions:#_tlogger_zshexit} _tlogger_zshexit)
     fi
+    return 0
+}
+
+# Set REPLY to the first reason autostart does not run in this shell, or to empty when it runs.
+# The checks run in this order, which is part of the contract: the mode is not auto, a TLOGGER_MODE
+# preset included; ZSH_EXECUTION_STRING is set, as zsh -c and IDE probes set it;
+# VSCODE_RESOLVING_ENVIRONMENT, or ASCIINEMA_REC or ASCIINEMA_SESSION, is not empty; an SSH login
+# with record_ssh=no; a tmux pane with record_tmux=no; a shell that is not interactive or lacks a
+# terminal on stdin or stdout; a terminal that is REC or EXT already, or a shell that a recorder
+# started (_tlogger_hs). Only the last two checks need a terminal. Prints nothing and forks
+# nothing; needs _tlogger_cfg filled. The last check runs _tlogger_tty_state.
+_tlogger_autostart_why() {
+    emulate -L zsh
+    REPLY=
+    if [[ ${_tlogger_cfg[mode]-} != auto ]]; then
+        REPLY='the mode is not auto'
+    elif (( ${+ZSH_EXECUTION_STRING} )); then
+        REPLY='ZSH_EXECUTION_STRING is set'
+    elif [[ -n ${VSCODE_RESOLVING_ENVIRONMENT-} ]]; then
+        REPLY='VSCODE_RESOLVING_ENVIRONMENT is set'
+    elif [[ -n ${ASCIINEMA_REC-} || -n ${ASCIINEMA_SESSION-} ]]; then
+        REPLY='ASCIINEMA_REC or ASCIINEMA_SESSION is set'
+    elif [[ ( -n ${SSH_CONNECTION-} || -n ${SSH_TTY-} ) && ${_tlogger_cfg[record_ssh]-} == no ]]; then
+        REPLY='an SSH login, and record_ssh is no'
+    elif [[ -n ${TMUX-} && ${_tlogger_cfg[record_tmux]-} == no ]]; then
+        REPLY='a tmux pane, and record_tmux is no'
+    elif [[ ! -o interactive || ! -t 0 || ! -t 1 ]]; then
+        REPLY='not an interactive shell on a terminal'
+    else
+        _tlogger_tty_state
+        if [[ $_tlogger_state == REC ]]; then
+            REPLY="already recorded, in session ${TLOGGER_SESSION:t}"
+        elif [[ $_tlogger_state == EXT ]]; then
+            REPLY='already recorded, by another script process'
+        elif [[ -n ${_tlogger_hs-} ]]; then
+            # A recorder whose handshake failed and that zsh cannot see as script, such as one
+            # under another name; recording here would nest recorders without end.
+            REPLY='a recorder started this shell, and its handshake failed'
+        fi
+    fi
+}
+
+# Autostart: record this new terminal with _tlogger_record, as tlogger start does, unless
+# _tlogger_autostart_why finds a reason not to, in which case it does nothing and prints nothing.
+# A recording that ended, started and exited without stop-requested, exits this shell with the
+# recorder's exit status, so that the window closes, and prints nothing. After a pause or a
+# failure, whose notices _tlogger_record prints, it returns 0, and the rest of the rc loads in an
+# ordinary NOREC shell. The exit runs here, one function deep, for the reason tlogger gives for
+# its own. Called once, by the plugin's last lines, after _tlogger_init succeeded.
+_tlogger_autostart() {
+    emulate -L zsh
+    local REPLY
+    local -a reply
+    _tlogger_autostart_why
+    if [[ -n $REPLY ]]; then
+        return 0
+    fi
+    if _tlogger_record auto && [[ $REPLY == ended ]]; then
+        builtin exit $reply[1]
+    fi
+    return 0
 }
 
 # tlogger: start, stop and status run in this shell and take no arguments; every other
@@ -616,10 +706,13 @@ function tlogger {
     "$_tlogger_release/bin/tlogger" "$@"
 }
 
-# Loading never ends the rc early: an error inside _tlogger_init is caught here and reported in
-# one warning, and the rest of the rc runs as usual.
+# Loading never ends the rc early: an error inside _tlogger_init or the autostart is caught here
+# and reported in one warning, and the rest of the rc runs as usual. Only an autostarted recording
+# that ended normally ends this shell, from inside _tlogger_autostart.
 {
-    _tlogger_init || :
+    if _tlogger_init; then
+        _tlogger_autostart
+    fi
 } always {
     if (( TRY_BLOCK_ERROR )); then
         TRY_BLOCK_ERROR=0
