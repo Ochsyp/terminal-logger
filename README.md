@@ -367,7 +367,7 @@ writes, moves or renames them. Three commands read them:
 | Command | What it does |
 |---|---|
 | `tlogger render [--stdout] [SESSION]` | Writes the plain-text transcript of the session to `transcript.txt` in its folder and names it, as in `tlogger: transcript ~/.local/state/tlogger/sessions/20261104T101500Z-a1B2c3/transcript.txt`; `--stdout` prints the transcript instead and writes nothing |
-| `tlogger show [SESSION]` | Pages the transcript with `less`, after rendering it when `transcript.txt` is missing or older than the logs; without a terminal on stdout, prints it |
+| `tlogger show [SESSION]` | Pages the transcript with `less`, after rendering it when `transcript.txt` is missing, older than the logs, or not what `render` writes (see below); without a terminal on stdout, prints it |
 | `tlogger replay [--speed N] [--maxdelay S] [SESSION]` | Replays the session in this terminal at its recorded pace with util-linux `scriptreplay`, through a filter; `--speed 2` replays twice as fast and `--speed 0.5` at half the pace, and `--maxdelay 1` waits at most a second between two outputs. Space pauses, Up and Down change the speed, and Ctrl+C stops |
 
 `SESSION` is a session id, which names a folder in the log folder, such as
@@ -405,11 +405,14 @@ comes back as it was:
 [full-screen program: 24x80, not kept here; replay shows it]
 ```
 
-When `output.raw` ends before its timing does, or the timing file holds malformed lines, `render`
+When `output.raw` ends before its timing does, holds more output than its timing covers (past
+the closing line that `script` writes), or the timing file holds malformed lines, `render`
 warns on stderr and ends the transcript with a note line, such as
-`[3 malformed timing lines skipped]`, so that a transcript with output missing does not look
-complete. Combining marks join a character until it holds 8 code points; the rest of a longer
-run of marks is dropped, so that such a run cannot slow the render down.
+`[3 malformed timing lines skipped]` or
+`[output.raw holds more output than its timing covers; the transcript stops here]`, so that a
+transcript with output missing does not look complete. Combining marks join a character until it
+holds 8 code points; the rest of a longer run of marks is dropped, so that such a run cannot slow
+the render down.
 
 The transcript holds no escape sequences: colours, titles and the other control sequences are
 gone, and each control character left in the text, like each byte that is not UTF-8, shows as
@@ -426,7 +429,11 @@ slowly. A target that switches to the alternate screen and never switches back h
 the session from the transcript, though not from `replay`; the marker line shows where.
 
 `show` runs `less` in its secure mode, with `LESSSECURE=1`, without `-R` and without `LESS`,
-`LESSOPEN` and `LESSCLOSE`, so that no input preprocessor runs.
+`LESSOPEN` and `LESSCLOSE`, so that no input preprocessor runs. It prints or pages an existing
+`transcript.txt` as it is only when the file is newer than the logs, starts with the header line
+that `render` writes for this session and holds no control byte but LF and HT (no NUL or other
+C0 byte, no DEL, no C1 control in UTF-8). Any other file, such as one that someone put into the
+session folder, is rendered again.
 
 ### Replay and its filter
 
@@ -439,7 +446,9 @@ output through a filter that passes only what draws the screen: text, cursor mov
 inserting and deleting, scroll regions, colours and attributes, the alternate screen and the DEC
 line graphics. It drops the rest: OSC, DCS, SOS, PM and APC strings, requests and reports, window
 operations, the mouse, focus, bracketed-paste and keypad modes, resets, every C1 control, and
-`CSI 3 J`, which would erase the scrollback of the terminal you replay in. When the replay ends,
+`CSI 3 J`, which would erase the scrollback of the terminal you replay in. It passes `CSI S` and
+`CSI T` (scroll) with one number or none only: with five parameters, `CSI T` is xterm's
+highlight mouse tracking, which makes a terminal wait for a mouse report. When the replay ends,
 or Ctrl+C or Ctrl+\ stops it, the filter puts back the colours, the cursor, the scroll region and
 the normal screen, and turns mouse, focus and bracketed-paste reporting off. The filter writes
 UTF-8 and expects a UTF-8 terminal, as Kali's terminals are: a terminal set to an 8-bit character
@@ -447,7 +456,8 @@ set such as Latin-1 can read bytes inside UTF-8 characters as C1 controls.
 
 `scriptreplay` reads a copy of the timing file, in a private temp folder, without its header
 lines: under a locale such as `de_DE`, `script` writes their delays with a comma, and
-`scriptreplay` stops at the first one.
+`scriptreplay` stops at the first one. Lines it would stop at, such as an `O`, `I` or `S` line
+with more than six fraction digits, are left out too, with a warning.
 
 > **Warning:** never replay these logs with `scriptlive`: it runs the recorded input again, every
 > command of the session, in a new shell. Do not `cat` `output.raw` to a terminal either, which

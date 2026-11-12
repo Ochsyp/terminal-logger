@@ -289,6 +289,36 @@ wait_for() {
     [ ! -s "$ERRORS" ]
 }
 
+@test "combining marks sent with the cursor below the scroll region keep the cap of 8 characters" {
+    need pyte
+    local marks start pad
+    # Region rows 1 to 10, an x in the last column of row 9, then 30000 times: a b in the last
+    # column of row 20, below the region, and a U+0301. At the pending wrap pyte moves the cursor
+    # down only to the bottom margin, so the mark joins the x, not the b.
+    printf -v marks '\e[20;80Hb\xcc\x81%.0s' {1..30000}
+    printf -v pad ' %.0s' {1..79}
+    session_new "$SESSION"
+    session_out '\e[1;10r\e[9;80Hx'"$marks"
+    session_end
+    start=$SECONDS
+    render_stdout
+    (( SECONDS - start < 30 ))
+    assert_lines "${pad}x"$'\xcc\x81\xcc\x81\xcc\x81\xcc\x81\xcc\x81\xcc\x81\xcc\x81' '' '' '' '' '' '' '' '' '' '' \
+        "${pad}b"
+    [ ! -s "$ERRORS" ]
+}
+
+@test "a character that ICH pushes off the last column is gone, and DCH does not bring it back" {
+    need pyte
+    local a79
+    printf -v a79 'a%.0s' {1..79}
+    session_new "$SESSION"
+    session_out "${a79}Z"'\r\e[@\e[P\r\n'
+    session_end
+    render_stdout
+    assert_lines "$a79"
+}
+
 @test "malformed timing lines get one warning each, are skipped and leave a note at the end" {
     need pyte
     mkdir -p "$SESSION"
@@ -318,6 +348,31 @@ wait_for() {
     # The timing file is read no further, so its last line gets no warning.
     assert_lines hello '[output.raw ends before its timing does; the transcript stops here]'
     [ "$(tr -d '\r' < "$ERRORS")" = "tlogger: warning: output.raw of session $ID ends before its timing does; the transcript stops there" ]
+}
+
+@test "an output.raw that holds more than its timing covers gives a warning and a note at the end" {
+    need pyte
+    session_new "$SESSION"
+    session_out 'hello\r\n'
+    # Output that no O entry covers, before script's trailer.
+    printf 'more\r\n' >> "$SESSION/output.raw"
+    session_end
+    render_stdout
+    assert_lines hello '[output.raw holds more output than its timing covers; the transcript stops here]'
+    [ "$(tr -d '\r' < "$ERRORS")" = "tlogger: warning: output.raw of session $ID holds more output than its timing covers; the transcript stops there" ]
+    # Output that no O entry covers and no trailer after it.
+    session_new "$SESSION"
+    session_out 'hello\r\n'
+    printf 'more' >> "$SESSION/output.raw"
+    render_stdout
+    assert_lines hello '[output.raw holds more output than its timing covers; the transcript stops here]'
+    # script's trailer alone, in the language of any locale, is no output.
+    session_new "$SESSION"
+    session_out 'hello\r\n'
+    printf '\nSkript beendet am 2026-11-12 10:01:00+00:00 [COMMAND_EXIT_CODE="0"]\n' >> "$SESSION/output.raw"
+    render_stdout
+    assert_lines hello
+    [ ! -s "$ERRORS" ]
 }
 
 @test "ESC [ c and the other requests and reports add no text" {
@@ -646,6 +701,16 @@ wait_for() {
     [ "$output" = "$(printf '%s\n' 'O 0.010000 5' 'I 1.500000 3' \
         'S 0.250000 SIGWINCH ROWS=30 COLS=100' 'S 0.000001 SIGTERM ' 'O 12.000001 7')" ]
     [ "$stderr" = "$(printf 'tlogger: warning: timing line %s is malformed; skipped\n' 5 7 11)" ]
+}
+
+@test "replay-timing drops O, I and S lines with more than 6 fraction digits, which scriptreplay rejects" {
+    printf '%s\n' 'O 0.1234567 5' 'I 0.12345678 3' 'S 0.123456789 SIGTERM ' 'O 0.123456 7' \
+        'I 0.1 1' 'S 0.000001 SIGWINCH ROWS=30 COLS=100' 'O 1.0000000 2' > "$BATS_TEST_TMPDIR/timing"
+    run --separate-stderr "$PYTHON3" -I "$VIEW" replay-timing < "$BATS_TEST_TMPDIR/timing"
+    stderr=${stderr//$'\r'/}
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(printf '%s\n' 'O 0.123456 7' 'I 0.1 1' 'S 0.000001 SIGWINCH ROWS=30 COLS=100')" ]
+    [ "$stderr" = "$(printf 'tlogger: warning: timing line %s is malformed; skipped\n' 1 2 3 7)" ]
 }
 
 @test "more than 100 malformed timing lines get 100 warnings and one line for the rest" {

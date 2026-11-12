@@ -84,10 +84,22 @@ fi
 cat -- "$HOME/replay-out"'
 }
 
-# Give the session in SDIR a transcript.txt that holds the line TEXT and is newer than its logs,
-# whose times go back to 2001, so that show prints it as it is.
+# Print the header line that render writes to the transcript of the session NAME.
+transcript_header() {
+    printf '# DERIVED transcript of session %s; the evidence is output.raw with timing. tlogger 0.1.0, rendered 2026-11-12T10:00:00Z\n' "$1"
+}
+
+# Give the session in SDIR a transcript.txt that holds render's header line and then the line
+# TEXT, and is newer than its logs, whose times go back to 2001, so that show prints it as it is.
 fresh_transcript() {
-    printf '%s\n' "$1" > "$SDIR/transcript.txt"
+    { transcript_header "${SDIR##*/}"; printf '%s\n' "$1"; } > "$SDIR/transcript.txt"
+    touch -d '2001-01-01 00:00:00' "$SDIR/output.raw" "$SDIR/timing"
+}
+
+# Give the session in SDIR a transcript.txt that is newer than its logs and starts with render's
+# header line for it, then holds the bytes that printf %b makes of BODY.
+crafted_transcript() {
+    { transcript_header "${SDIR##*/}"; printf '%b' "$1"; } > "$SDIR/transcript.txt"
     touch -d '2001-01-01 00:00:00' "$SDIR/output.raw" "$SDIR/timing"
 }
 
@@ -135,25 +147,25 @@ fresh_transcript() {
     fresh_transcript 'transcript of case-1'
     run_tlogger show
     [ "$status" -eq 0 ]
-    [ "$output" = 'transcript of 20261112T080000Z-bbbbbb' ]
+    [ "$output" = "$(transcript_header 20261112T080000Z-bbbbbb; echo 'transcript of 20261112T080000Z-bbbbbb')" ]
     [ -z "$stderr" ]
     run_tlogger show 20261110T090000Z-aaaaaa
     [ "$status" -eq 0 ]
-    [ "$output" = 'transcript of 20261110T090000Z-aaaaaa' ]
+    [ "${output##*$'\n'}" = 'transcript of 20261110T090000Z-aaaaaa' ]
     run_tlogger show -- 20261111T235959Z-cccccc
     [ "$status" -eq 0 ]
-    [ "$output" = 'transcript of 20261111T235959Z-cccccc' ]
+    [ "${output##*$'\n'}" = 'transcript of 20261111T235959Z-cccccc' ]
     run_tlogger show "$LOGS/20261110T090000Z-aaaaaa/"
     [ "$status" -eq 0 ]
-    [ "$output" = 'transcript of 20261110T090000Z-aaaaaa' ]
+    [ "${output##*$'\n'}" = 'transcript of 20261110T090000Z-aaaaaa' ]
     # A path may name a session folder anywhere, by any name, and be relative.
     run_tlogger show "$HOME/evidence/case-1"
     [ "$status" -eq 0 ]
-    [ "$output" = 'transcript of case-1' ]
+    [ "${output##*$'\n'}" = 'transcript of case-1' ]
     cd "$HOME/evidence"
     run_tlogger show ./case-1
     [ "$status" -eq 0 ]
-    [ "$output" = 'transcript of case-1' ]
+    [ "${output##*$'\n'}" = 'transcript of case-1' ]
     run_tlogger show case-1
     assert_refused 1 "tlogger: 'case-1' is not a session id; name a session folder elsewhere by a path with a /"
 }
@@ -211,7 +223,7 @@ fresh_transcript() {
     assert_refused 1 'tlogger: ~/.local/state/tlogger/sessions/20261112T235959Z-zzzzzz is a symlink, which tlogger does not follow'
     run_tlogger show
     [ "$status" -eq 0 ]
-    [ "$output" = 'the real session' ]
+    [ "${output##*$'\n'}" = 'the real session' ]
     session_new "$HOME/case"
     mv "$HOME/case/output.raw" "$HOME/output.raw"
     ln -s "$HOME/output.raw" "$HOME/case/output.raw"
@@ -246,10 +258,10 @@ fresh_transcript() {
     fresh_transcript 'in the default log folder'
     run_tlogger show
     [ "$status" -eq 0 ]
-    [ "$output" = 'in the evidence folder' ]
+    [ "${output##*$'\n'}" = 'in the evidence folder' ]
     run_tlogger show "$ID"
     [ "$status" -eq 0 ]
-    [ "$output" = 'in the evidence folder' ]
+    [ "${output##*$'\n'}" = 'in the evidence folder' ]
     printf 'not a key line\n' > "$HOME/.config/tlogger/config"
     run_tlogger show "$ID"
     assert_refused 1 'tlogger: the config ~/.config/tlogger/config has line 1, which is not a key=value line; fix it by hand'
@@ -393,8 +405,49 @@ tlogger: the replay of session $ID failed: scriptreplay exited with status 3" ]
     fresh_transcript 'kept as it is'
     TLOGGER_PYTHON=$HOME/missing run_tlogger show
     [ "$status" -eq 0 ]
-    [ "$output" = 'kept as it is' ]
+    [ "$output" = "$(transcript_header "$ID"; echo 'kept as it is')" ]
     [ -z "$stderr" ]
+}
+
+@test "show does not print a transcript that holds control bytes or lacks render's header, and renders it again" {
+    session_new "$LOGS/$ID"
+    local body
+    # OSC 52 writes the clipboard of the terminal and CSI 6 n makes it answer.
+    for body in 'x\e]52;c;aGVsbG8=\a\n' 'x\e[6n\n' 'x\x00y\n' 'x\x01y\n' 'x\x7fy\n' 'x\xc2\x9b6ny\n' \
+        'x\xc2\x80y\n' 'x\xc2\x9fy\n'; do
+        crafted_transcript "$body"
+        TLOGGER_PYTHON=$HOME/missing run_tlogger show
+        assert_refused 1 'tlogger: show needs python3'
+    done
+    # No header, or the header of another session; the text is harmless.
+    printf 'plain text\n' > "$SDIR/transcript.txt"
+    touch -d '2001-01-01 00:00:00' "$SDIR/output.raw" "$SDIR/timing"
+    TLOGGER_PYTHON=$HOME/missing run_tlogger show
+    assert_refused 1 'tlogger: show needs python3'
+    { transcript_header 20261111T100000Z-zzzzzz; echo 'plain text'; } > "$SDIR/transcript.txt"
+    touch -d '2001-01-01 00:00:00' "$SDIR/output.raw" "$SDIR/timing"
+    TLOGGER_PYTHON=$HOME/missing run_tlogger show
+    assert_refused 1 'tlogger: show needs python3'
+}
+
+@test "show keeps a transcript with tabs and UTF-8 that is no C1 control" {
+    session_new "$LOGS/$ID"
+    crafted_transcript 'a\tb caf\xc3\xa9 \xe2\x94\x80 \xc2\xa0 \xc2\xa9\n'
+    TLOGGER_PYTHON=$HOME/missing run_tlogger show
+    [ "$status" -eq 0 ]
+    [ "${output##*$'\n'}" = $'a\tb caf\xc3\xa9 \xe2\x94\x80 \xc2\xa0 \xc2\xa9' ]
+}
+
+@test "show renders a crafted transcript again instead of printing it" {
+    need pyte
+    session_new "$LOGS/$ID"
+    session_out 'fresh output\r\n'
+    session_end
+    crafted_transcript 'x\e]52;c;aGVsbG8=\a\n'
+    TLOGGER_PYTHON=$PYTHON3 run_tlogger show
+    [ "$status" -eq 0 ]
+    [ "${output#*$'\n'}" = 'fresh output' ]
+    [ "$(tail -n +2 "$SDIR/transcript.txt")" = 'fresh output' ]
 }
 
 @test "render writes transcript.txt and names it with ~, and --stdout prints it and writes nothing" {

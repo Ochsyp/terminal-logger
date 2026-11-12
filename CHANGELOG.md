@@ -71,17 +71,22 @@ All notable changes to this project are listed here. The format follows
   `configure_prompt` in both Ctrl+P states included, and end-to-end tests of the journal, the
   stamp and the segment, with Ctrl+P under the rc built from `/etc/skel/.zshrc`.
 - `tlogger render`, `show` and `replay`, which build a derived plain-text transcript with
-  `python3-pyte` and replay through an escape-sequence filter, without tmux. `render` writes
-  `transcript.txt` (mode 0600, through `transcript.txt.part` and a rename) in the session folder,
-  or prints it with `--stdout`: the lines that scroll off the screen or that `clear` erases, the
-  screen at the end, one marker line for a full-screen program, and a note line when
-  `output.raw` ends early or timing lines are malformed, with no escape sequences. `show` pages
-  it with `less` in secure mode, rendering it first when it is missing or older than the logs.
-  `replay` runs util-linux `scriptreplay`, with `--speed` and `--maxdelay`, and passes its output
-  through a filter that keeps only an allow-list of what draws the screen, without `CSI 3 J`,
-  which would erase the scrollback of the terminal that replays. Each takes
-  a session id, a path to a session folder or nothing for the newest session, and never writes
-  the evidence files. `libexec/tlogger_view.py`, run with `/usr/bin/python3 -I`, does the work.
+  `python3-pyte` and replay through an escape-sequence filter, without tmux. Each takes a session
+  id, a path to a session folder or nothing for the newest session, and never writes the
+  evidence files. `libexec/tlogger_view.py`, run with `/usr/bin/python3 -I`, does the work.
+  - `render` writes `transcript.txt` (mode 0600, through `transcript.txt.part` and a rename) in
+    the session folder, or prints it with `--stdout`: the lines that scroll off the screen or
+    that `clear` erases, the screen at the end and one marker line for a full-screen program,
+    with no escape sequences. A note line ends the transcript when `output.raw` ends early or
+    holds more output than its timing covers, or when timing lines are malformed.
+  - `show` pages the transcript with `less` in secure mode. It renders it first when it is
+    missing, older than the logs, or not what `render` writes: its header line, and no control
+    byte but LF and HT.
+  - `replay` runs util-linux `scriptreplay`, with `--speed` and `--maxdelay`, through a filter
+    that keeps only an allow-list of what draws the screen. It drops `CSI 3 J`, which would
+    erase the scrollback of the terminal that replays, and `CSI S` and `CSI T` with more than one
+    parameter (xterm's highlight mouse tracking). At the end of its input, and on a signal after
+    dropping what it had not finished writing, it restores the terminal.
 - Tests of the renderer on synthetic logs, of the replay filter and of the three commands, and an
   end-to-end test that renders and replays a session recorded in a pseudo-terminal.
 

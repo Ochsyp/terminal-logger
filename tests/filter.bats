@@ -71,6 +71,11 @@ wait_for_size() {
     assert_filtered "$in" "$in"
 }
 
+@test "CSI S and T pass with one parameter or none; with more they are dropped (T with five is a mouse report)" {
+    assert_filtered 'a\e[2Sb\e[Sc\e[3Td\e[Te' 'a\e[2Sb\e[Sc\e[3Td\e[Te'
+    assert_filtered 'a\e[1;2;3;4;5Tb\e[1;2Sc\e[1:2Td\e[;Se\e[1;Tf' 'abcdef'
+}
+
 @test "ESC 7, ESC 8, ESC D, ESC E, ESC M and the G0 and G1 designations of B and 0 pass" {
     assert_filtered 'a\e7b\e8c\eDd\eEe\eMf\e(Bg\e(0h\e)Bi\e)0j' 'a\e7b\e8c\eDd\eEe\eMf\e(Bg\e(0h\e)Bi\e)0j'
 }
@@ -169,6 +174,58 @@ wait_for_size() {
     assert_filtered 'c\e[1;2' 'c'
     assert_filtered 'd\e' 'd'
     assert_filtered 'e\xc3' 'e'
+}
+
+@test "a signal that cuts a write short makes the filter write RESTORE alone, not the chunk again" {
+    # The harness runs the filter in-process, with an os.write that hands only CUT bytes of the
+    # first big write to the descriptor and then raises SIGINT, as a signal does that comes
+    # after a short write to a terminal. The cut falls inside ESC [ 6 m; sent again, the chunk
+    # would start with an n, and the terminal would read ESC [ 6 n, a cursor position request.
+    local code sgr full status=0
+    code='import os, signal, sys
+sys.path.insert(0, sys.argv[1])
+import tlogger_view
+cut = int(sys.argv[2])
+class Proxy:
+    fired = False
+    def __getattr__(self, name):
+        return getattr(os, name)
+    def write(self, fd, data):
+        if fd == 1 and not Proxy.fired and len(data) > cut:
+            Proxy.fired = True
+            os.write(fd, bytes(data[:cut]))
+            signal.raise_signal(signal.SIGINT)
+        return os.write(fd, data)
+tlogger_view.os = Proxy()
+sys.exit(tlogger_view.main(["filter"]))'
+    printf -v sgr '\e[6m%.0s' {1..3000}
+    full="n$sgr"
+    printf '%s' "$full" > "$BATS_TEST_TMPDIR/input"
+    "$PYTHON3" -I -B -c "$code" "$(dirname "$VIEW")" 404 < "$BATS_TEST_TMPDIR/input" > "$GOT" 2> "$ERRORS" || status=$?
+    printf '%s%s' "${full:0:404}" "$FILTER_RESTORE" > "$WANT"
+    [ "$status" -eq 130 ]
+    compare_filtered 0
+}
+
+@test "only the first stop signal raises Stop, so that a later one cannot cut the cleanup short" {
+    local code
+    code='import signal, sys
+sys.path.insert(0, sys.argv[1])
+import tlogger_view as v
+v._catch_signals()
+try:
+    v._on_signal(signal.SIGTERM, None)
+except v.Stop as stop:
+    print("first", stop.signum)
+print("second", v._on_signal(signal.SIGINT, None))
+v._catch_signals()
+try:
+    v._on_signal(signal.SIGINT, None)
+except v.Stop as stop:
+    print("again", stop.signum)'
+    run --separate-stderr "$PYTHON3" -I -B -c "$code" "$(dirname "$VIEW")" < /dev/null
+    [ "$status" -eq 0 ]
+    [ "${output//$'\r'/}" = "$(printf '%s\n' 'first 15' 'second None' 'again 2')" ]
 }
 
 @test "SIGINT, SIGQUIT and SIGTERM make the filter write the restore sequence and exit 128+n" {

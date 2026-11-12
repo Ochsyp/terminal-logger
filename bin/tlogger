@@ -2178,11 +2178,27 @@ run_render() {
 }
 
 # Succeed when SESSION_DIR/transcript.txt is a readable regular file of this user's, not a
-# symlink, and newer than output.raw and timing, so that show can page it as it is.
+# symlink, newer than output.raw and timing, with the header line that render writes for this
+# session and no control byte but LF and HT, so that show can page it as it is. The file sits in
+# a folder that a crafted session may have filled, so show prints it only when it looks like
+# render's own: no NUL or other C0 byte, no DEL and no UTF-8 C1 control (C2 80 to C2 9F).
 transcript_fresh() {
     local t=$SESSION_DIR/transcript.txt
+    local LC_ALL=C first chunk carry=''
     [[ -f $t && ! -L $t && -O $t && -r $t && $t -nt $SESSION_DIR/output.raw &&
-        $t -nt $SESSION_DIR/timing ]]
+        $t -nt $SESSION_DIR/timing ]] || return 1
+    IFS= read -r -n 512 first < "$t" || [[ -n $first ]] || return 1
+    [[ $first == "# DERIVED transcript of session $SESSION_ID; the evidence is output.raw with timing."* ]] ||
+        return 1
+    # tr deletes the bytes allowed; any byte left is a control byte.
+    (( $(LC_ALL=C tr -d '\11\12\40-\176\200-\377' < "$t" | head -c 1 | wc -c) == 0 )) || return 1
+    # A chunk is checked with the last byte of the one before, so that no pair is split.
+    while IFS= read -r -N 65536 chunk || [[ -n $chunk ]]; do
+        if [[ $carry$chunk == *$'\xc2'[$'\x80'-$'\x9f']* ]]; then
+            return 1
+        fi
+        carry=${chunk: -1}
+    done < "$t"
 }
 
 # Succeed when VALUE is a positive decimal number of at most 20 characters: DECIMAL_RE, with a

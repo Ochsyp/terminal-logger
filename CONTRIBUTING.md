@@ -254,7 +254,14 @@ without `pyte` skips the render tests, so CI is often the first place a change t
 - Expected errors print one `tlogger: ` line and no traceback: exit 2 for a usage error, 1 for
   the rest, and 128 plus the number for SIGHUP, SIGINT, SIGQUIT and SIGTERM. A SIGHUP that is
   ignored, as under `nohup`, stays ignored. `Stop`, which a signal raises, derives from
-  `BaseException`, so that no `except Exception` takes it for an error.
+  `BaseException`, so that no `except Exception` takes it for an error. Only the first signal
+  raises it and sets the exit status; later ones return, so that none cuts the cleanup short.
+- The timing parser takes at most six fraction digits in I, O and S lines, as `script` writes and
+  `scriptreplay` reads them. `render` warns and ends the transcript with a note line when
+  `output.raw` holds more than its timing covers: script's closing line (a newline, one line, a
+  newline, at most 1024 bytes, in any language) is no output.
+- `tlogger show` reuses `transcript.txt` only with render's header for the session and no
+  control byte but LF and HT, since the file sits in a folder that a crafted session may fill.
 - `render` opens the session folder with `O_DIRECTORY | O_NOFOLLOW` and every file through its
   descriptor, so it runs on Linux only; `filter`, `replay-timing` and `probe` also run on Git for
   Windows. Python there writes a CR before each LF of what goes through `sys.stderr`, so the tests
@@ -269,7 +276,8 @@ to it needs a test there and a line in the changelog. The filter passes:
 - CSI with the final `@`, `A` to `H`, `J`, `K`, `L`, `M`, `P`, `S`, `T`, `X`, `d`, `f`, `m`, `r`,
   `s`, `u` or `` ` ``, parameters of digits, `;` and `:` only, no private marker and no
   intermediate byte; but not ED 3, `CSI 3 J`, which erases the scrollback of the terminal that
-  replays;
+  replays, and `S` and `T` only with one number or none: `CSI T` with five parameters is
+  xterm's highlight mouse tracking;
 - CSI `h` and `l` for the mode 4 and the private modes 7, 12, 25, 47, 1047, 1048 and 1049, with
   every other mode taken out of the list;
 - `ESC 7`, `ESC 8`, `ESC D`, `ESC E`, `ESC M`, and `ESC (` or `ESC )` with `B` or `0`.
@@ -279,7 +287,9 @@ requests and window operations among them, every other escape sequence, the othe
 DEL and every C1 control, raw or in UTF-8. A sequence or string that reaches 4096 bytes without
 its end is dropped, and the filter starts afresh with the next character. At the end of its input
 and on SIGHUP, SIGINT, SIGQUIT or SIGTERM it writes one fixed restore sequence, which
-`FILTER_RESTORE` in `tests/helpers.bash` holds byte for byte.
+`FILTER_RESTORE` in `tests/helpers.bash` holds byte for byte. On a signal it first drops what
+it had not finished writing, so that a write the signal cut short is never sent again from its
+start; the restore sequence begins with ESC, which ends a sequence that the cut left open.
 
 ### Moving the Kali image
 

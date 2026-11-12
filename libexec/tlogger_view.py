@@ -54,8 +54,17 @@ _STOP_SIGNALS = tuple(getattr(signal, name)
                       if hasattr(signal, name))
 
 
+_stopping = False  # True once a signal has raised Stop
+
+
 def _on_signal(signum, frame):
-    """Turn a signal of _STOP_SIGNALS into Stop, so that every command cleans up on its way out."""
+    """Turn the first signal of _STOP_SIGNALS into Stop, so that every command cleans up on its
+    way out. Later ones return, so that none cuts that cleanup short; the first sets the status.
+    """
+    global _stopping
+    if _stopping:
+        return
+    _stopping = True
     raise Stop(signum)
 
 
@@ -65,6 +74,8 @@ def _catch_signals():
     A SIGHUP that is ignored already, as under nohup, stays ignored; the others are caught even
     then, as in a background job of a script, which ignores SIGINT and SIGQUIT.
     """
+    global _stopping
+    _stopping = False
     for signum in _STOP_SIGNALS:
         if signum != _SIGHUP or signal.getsignal(signum) != signal.SIG_IGN:
             signal.signal(signum, _on_signal)
@@ -382,8 +393,9 @@ def _filter_csi(params, inter, final, c1):
 
     CSI h and CSI l keep only the allowed modes among their parameters, written as plain
     decimal numbers. ED 3 (CSI 3 J) is dropped: it erases the saved lines, the scrollback of
-    the terminal that replays, which lies beyond the replayed screen. A sequence that U+009B
-    introduced is dropped, as every C1 control is.
+    the terminal that replays, which lies beyond the replayed screen. CSI S and CSI T pass
+    with one plain number or none. A sequence that U+009B introduced is dropped, as every C1
+    control is.
     """
     if c1 or inter:
         return ""
@@ -391,6 +403,10 @@ def _filter_csi(params, inter, final, c1):
         if not _PLAIN_PARAMS.fullmatch(params):
             return ""
         if final == "J" and params.split(";", 1)[0].split(":", 1)[0].lstrip("0") == "3":
+            return ""
+        # SU and SD take one parameter; CSI with five and the final T is xterm's highlight
+        # mouse tracking, which makes the terminal wait for a mouse report.
+        if final in "ST" and not params.isdigit() and params:
             return ""
         return "\x1b[" + params + final
     if final in ("h", "l"):
@@ -455,8 +471,13 @@ def cmd_filter(args):
         text = filter_tokens(tokenizer.feed(decoder.decode(b"", True)))
         tokenizer.finish()
         sink.write(text.encode("utf-8"))
+        sink.flush()
     finally:
         _ignore_signals()
+        # A signal can come after a short write, before flush has dropped what was written. Sent
+        # again, the chunk would start in the middle of whatever the cut left open. RESTORE
+        # starts with ESC, which ends that.
+        del sink.buf[:]
         try:
             sink.write(RESTORE)
             sink.flush()
@@ -474,9 +495,11 @@ def cmd_filter(args):
 # 'I|O <seconds>.<microseconds> <bytes>', 'S <delay> SIG<NAME>[ <message>]', where SIGWINCH
 # carries 'ROWS=<rows> COLS=<columns>', and 'H <delay> <name>[ <value>]', such as COLUMNS 80.
 # script prints the delay of an H line with %f, which writes a comma under a locale such as
-# de_DE; the other delays are integers around a literal dot.
-_IO_LINE = re.compile(rb"([IO]) [0-9]{1,15}\.[0-9]{1,9} ([0-9]{1,15})")
-_S_LINE = re.compile(rb"S [0-9]{1,15}\.[0-9]{1,9} SIG(\S+)(?: (.*))?", re.DOTALL)
+# de_DE; the other delays are integers around a literal dot. script writes at most 6 fraction
+# digits (microseconds) and scriptreplay 2.42 reads no more, so I, O and S lines allow 6 and
+# replay-timing drops a longer one rather than let scriptreplay stop there.
+_IO_LINE = re.compile(rb"([IO]) [0-9]{1,15}\.[0-9]{1,6} ([0-9]{1,15})")
+_S_LINE = re.compile(rb"S [0-9]{1,15}\.[0-9]{1,6} SIG(\S+)(?: (.*))?", re.DOTALL)
 _H_LINE = re.compile(rb"H [0-9]{1,15}[.,][0-9]{1,9} (\S+)(?: (.*))?", re.DOTALL)
 _WINCH = re.compile(rb"ROWS=([0-9]{1,5}) COLS=([0-9]{1,5})")
 
@@ -596,6 +619,30 @@ class RawLog:
             data, self.left = self.left[:size], self.left[size:]
             return data
         return os.read(self.fd, min(size, 65536))
+
+    def rest(self, limit):
+        """Return what is left of the file, at most LIMIT bytes."""
+        data = self.left[:limit]
+        self.left = b""
+        while len(data) < limit:
+            chunk = os.read(self.fd, limit - len(data))
+            if not chunk:
+                break
+            data += chunk
+        return data
+
+
+# What script writes at the end of output.raw after the last O entry's bytes: a newline, then
+# 'Script done on ...' with the exit status, in the language of its locale, and a newline.
+_TRAILER_MAX = 1024
+
+
+def _is_trailer(data):
+    """Succeed when DATA is nothing or script's trailer: a newline, one line, a newline."""
+    if not data:
+        return True
+    return (len(data) <= _TRAILER_MAX and data.startswith(b"\n") and data.endswith(b"\n")
+            and b"\n" not in data[1:-1] and len(data) > 1)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -723,9 +770,16 @@ def load_screen_class():
 
             pyte 0.8's draw adds it to the cell before the cursor, or at the left edge to the
             last cell of the row above. With the cursor past the last column, draw first wraps,
-            and that cell still holds what the last cell of the cursor's row holds now.
+            and that cell still holds what the last cell of the cursor's row holds now. Below
+            the scroll region, the wrap's cursor_down stops at the bottom margin, so the mark
+            joins the last cell of the row above the margin.
             """
             x, y = min(self.cursor.x, self.columns), self.cursor.y
+            if x >= self.columns and modes.DECAWM in self.mode:
+                bottom = self.margins.bottom if self.margins else self.lines - 1
+                if y > bottom:
+                    y = bottom
+                    x = 0
             if x > 0:
                 x -= 1
             elif y > 0:
@@ -755,6 +809,18 @@ def load_screen_class():
                     end = min(n, i + self.columns - self.cursor.x)
                     self.draw(run[i:end])
                     i = end
+
+        def insert_characters(self, count=None):
+            """Insert blanks as pyte does, and drop what that pushed past the last column.
+
+            pyte 0.8 keeps the pushed character in a cell at x == columns, where DCH or a wider
+            screen would bring it back. Draw in insert mode comes through here too.
+            """
+            super().insert_characters(count)
+            row = self.buffer.get(self.cursor.y)
+            if row:
+                for x in [x for x in row if x >= self.columns]:
+                    del row[x]
 
         def control(self, ch):
             """Act on the C0 control CH; BEL, SO, SI and the others leave the text as it is."""
@@ -1453,8 +1519,9 @@ def _transcribe(screen_class, sink, timing_fd, output_fd, sid, version):
     Only O entries carry output, taken in order from output.raw after its header line;
     H COLUMNS and LINES before the first output set the first size (80x24 by default) and
     SIGWINCH entries resize, all clamped. UTF-8 that a chunk boundary splits is decoded whole;
-    invalid bytes become U+FFFD. Output that ends before its timing gets one warning. Either
-    that or malformed timing lines also end the transcript with a note line each, so that a
+    invalid bytes become U+FFFD. Output that ends before its timing gets one warning, and so
+    does output.raw holding more than its timing covers, once past script's trailer. Either of
+    these or malformed timing lines also end the transcript with a note line each, so that a
     transcript that lacks output does not look complete.
     """
     def emit(line):
@@ -1501,6 +1568,11 @@ def _transcribe(screen_class, sink, timing_fd, output_fd, sid, version):
                  "transcript stops there" % sid)
             short = True
             break
+    extra = False
+    if not short and not _is_trailer(raw.rest(_TRAILER_MAX + 1)):
+        _say("warning: output.raw of session %s holds more output than its timing covers; the "
+             "transcript stops there" % sid)
+        extra = True
     if screen is None:
         screen = screen_class(columns, lines, emit)
     _dispatch(screen, tokenizer.feed(decoder.decode(b"", True)))
@@ -1511,6 +1583,8 @@ def _transcribe(screen_class, sink, timing_fd, output_fd, sid, version):
         emit("[%d malformed timing line%s skipped]" % (timing.bad, "" if timing.bad == 1 else "s"))
     if short:
         emit("[output.raw ends before its timing does; the transcript stops here]")
+    if extra:
+        emit("[output.raw holds more output than its timing covers; the transcript stops here]")
 
 
 def render(folder, version, to_stdout):
