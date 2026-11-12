@@ -52,6 +52,24 @@ All notable changes to this project are listed here. The format follows
   refuse auto mode when that fails.
 - Tests of the autostart guard in a real zsh, of `tlogger mode` and the smoke test with a stub
   recorder, and end to end in auto mode in a pseudo-terminal that zsh's `zpty` module drives.
+- Per-command UTC start stamps, a `commands.tsv` journal and a REC/NOREC/EXT prompt segment, with
+  VPN addresses. A recorded shell, nested shells included, appends an S line as each command
+  starts (time, pid, folder, VPN list and the command as typed, quoted so that it stays on one
+  line) and an E line with its exit status before the next prompt, and prints a dim
+  `-- <UTC> <VPN list> REC` stamp. Every shell with the plugin shows `[<UTC> <VPN list> <state>]`
+  at the end of the first line of a two-line prompt, or in front of a one-line one, and exports
+  it as `TLOGGER_SEGMENT` for prompt frameworks. Kali's prompt, its `precmd()` and the shell's
+  options stay untouched; the hooks fork nothing per command. The VPN list comes from
+  `/sys/class/net` and `ip`, which runs again when the VPN interfaces change or a minute has
+  passed, or 5 seconds after it showed a VPN interface without an address. A recorded shell
+  warns, at most every five minutes, when its log folder has less than `min_free_mb` free.
+- The config keys `prompt`, `stamp` and `stamp_vpn` (`on` or `off`, default `on`), `vpn_ifaces`
+  (default `tun* wg* tap*`) and `history_timestamps` (`yes` or `no`, default `no`, which turns on
+  zsh's `extended_history`), each with its `TLOGGER_<KEY>` preset. `tlogger status` shows
+  `prompt`, `stamp` and the VPN list.
+- Unit tests of the journal, the stamps, the VPN list and the segment in a real zsh, Kali's
+  `configure_prompt` in both Ctrl+P states included, and end-to-end tests of the journal, the
+  stamp and the segment, with Ctrl+P under the rc built from `/etc/skel/.zshrc`.
 
 ### Changed
 
@@ -64,6 +82,9 @@ All notable changes to this project are listed here. The format follows
   install sends there, exit 2 and say that they work only in a zsh terminal that has loaded the
   plugin.
 - The config that `install` writes for a new user names the optional keys `record_input`,
-  `min_free_mb`, `record_ssh` and `record_tmux` in its comments.
+  `min_free_mb`, `record_ssh` and `record_tmux` in its comments, and `prompt`, `stamp`,
+  `stamp_vpn`, `vpn_ifaces` and `history_timestamps` as well.
+- A session folder also holds `commands.tsv`, created empty with mode 0600 before the recording
+  starts; a session that never started, with nothing but empty logs, is still removed.
 
 [Unreleased]: https://github.com/Ochsyp/terminal-logger/commits/main
