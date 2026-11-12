@@ -2,7 +2,7 @@
 # Test helpers, sourced by every .bats file in tests/ through `load helpers`. Each test gets its
 # own home, so that neither the developer's git settings, denylist or zsh files can reach it.
 # Also: throwaway git repositories for the hook tests, need() for tests that only some machines
-# can run, and a zsh stub first on PATH where zsh is missing.
+# can run, a zsh stub first on PATH where zsh is missing, a fake sysfs and journal line checks.
 
 # The repository under test, and the synthetic term the denylist tests use.
 REPO_ROOT="${BATS_TEST_DIRNAME%/*}"
@@ -17,6 +17,11 @@ GOLDEN_BLOCK="$REPO_ROOT/tests/golden/rc-block.zsh"
 # the config's recorder=, so that they run without script; e2e-auto.bats runs the real one.
 # shellcheck disable=SC2034 # The .bats files use it.
 STUB_RECORDER="$REPO_ROOT/tests/stub-bin/tlogger-test-recorder"
+
+# A stand-in for ip that answers 'ip -o addr show' with fixed lines; journal.bats and
+# e2e-prompt.bats name it in TLOGGER_IP, since CI has no iproute2.
+# shellcheck disable=SC2034 # The .bats files use it.
+STUB_IP="$REPO_ROOT/tests/stub-bin/tlogger-test-ip"
 
 # The real zsh, found before the stub can shadow it, or empty. Without one, tests/stub-bin goes
 # first on PATH, so that bin/tlogger still gets answers to what it asks zsh; the stub refuses to
@@ -154,6 +159,56 @@ need() {
         return 1
     fi
     skip "$why"
+}
+
+# Create a fake sysfs at DIR for the plugin's VPN list, as TLOGGER_SYSFS names it: the folder
+# DIR/class/net, and for each NAME=IFINDEX argument a folder DIR/class/net/NAME with an ifindex
+# file. A NAME is data, never run, and may hold any character but / and =.
+fake_sysfs() {
+    local dir=$1 arg
+    shift
+    mkdir -p "$dir/class/net"
+    for arg in "$@"; do
+        mkdir -p "$dir/class/net/${arg%%=*}"
+        printf '%s\n' "${arg#*=}" > "$dir/class/net/${arg%%=*}/ifindex"
+    done
+}
+
+# Set FIELDS to the fields of the journal line LINE, split at each tab, empty fields kept.
+split_tabs() {
+    local line=$1
+    FIELDS=()
+    while [[ $line == *$'\t'* ]]; do
+        FIELDS+=("${line%%$'\t'*}")
+        line=${line#*$'\t'}
+    done
+    FIELDS+=("$line")
+}
+
+# Fail, naming the line, unless LINE is a journal S line of the shell PID with the folder PWD,
+# the VPN field VPN and the typed text TYPED, each as the journal writes it, and a UTC field
+# that is date -u's time for its epoch. Sets FIELDS.
+assert_s_line() {
+    split_tabs "$1"
+    if [[ ${#FIELDS[@]} -ne 7 || ${FIELDS[0]} != S || ! ${FIELDS[1]} =~ ^[0-9]+$ ||
+        ${FIELDS[2]} != "$(date -u -d "@${FIELDS[1]}" +%Y-%m-%dT%H:%M:%SZ)" ||
+        ${FIELDS[3]} != "$2" || ${FIELDS[4]} != "$3" || ${FIELDS[5]} != "$4" ||
+        ${FIELDS[6]} != "$5" ]]; then
+        printf 'expected the S line of pid %s for %s in %s, VPN %s; got:\n%s\n' \
+            "$2" "$5" "$3" "$4" "$1" >&2
+        return 1
+    fi
+}
+
+# Fail, naming the line, unless LINE is a journal E line of the shell PID with the exit status
+# STATUS. Sets FIELDS.
+assert_e_line() {
+    split_tabs "$1"
+    if [[ ${#FIELDS[@]} -ne 4 || ${FIELDS[0]} != E || ! ${FIELDS[1]} =~ ^[0-9]+$ ||
+        ${FIELDS[2]} != "$2" || ${FIELDS[3]} != "$3" ]]; then
+        printf 'expected the E line of pid %s with status %s; got:\n%s\n' "$2" "$3" "$1" >&2
+        return 1
+    fi
 }
 
 # Succeed when ln -s makes a real symlink, even to a missing target, as on Linux. Git for Windows

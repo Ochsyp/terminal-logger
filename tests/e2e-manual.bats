@@ -125,8 +125,9 @@ pty_end $start
 EOF
     one_session
     [ "$(stat -c %a "$DIR")" = 700 ]
-    # output.raw, input.raw, timing, recorder, started and exited, each a plain 0600 file.
-    [ "$(find "$DIR" -mindepth 1 | wc -l)" -eq 6 ]
+    # output.raw, input.raw, timing, commands.tsv, recorder, started and exited, each a plain
+    # 0600 file.
+    [ "$(find "$DIR" -mindepth 1 | wc -l)" -eq 7 ]
     [ -z "$(find "$DIR" -mindepth 1 \( ! -type f -o ! -perm 600 \))" ]
     grep -Eq '^H [0-9]+\.[0-9]+ COLUMNS 80$' "$DIR/timing"
     grep -Eq '^H [0-9]+\.[0-9]+ LINES 24$' "$DIR/timing"
