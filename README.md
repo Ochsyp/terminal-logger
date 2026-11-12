@@ -3,11 +3,12 @@
 A recorder for zsh terminal sessions on Kali Linux, keystrokes included, as evidence for
 penetration tests.
 
-> **Status:** phase 4. In auto mode every new zsh terminal records itself as its shell starts; in
+> **Status:** phase 5. In auto mode every new zsh terminal records itself as its shell starts; in
 > manual mode `tlogger start` records a terminal on request. `tlogger stop` pauses the recording,
 > and `tlogger mode` switches between the modes. A recorded shell journals each command with its
-> start time in UTC, and the prompt shows whether the terminal is recorded. `tlogger install`,
-> `uninstall` and `status` put the plugin in place and take it out again.
+> start time in UTC, and the prompt shows whether the terminal is recorded. `tlogger render`,
+> `show` and `replay` turn a session into a plain-text transcript, page it and replay it.
+> `tlogger install`, `uninstall` and `status` put the plugin in place and take it out again.
 > [CONTRIBUTING.md](CONTRIBUTING.md) describes the workflow, and [CHANGELOG.md](CHANGELOG.md)
 > lists what changed.
 
@@ -24,8 +25,10 @@ The finished `tlogger` command:
   UTC, and stamps each command in the recording, as
   [Command journal and prompt segment](#command-journal-and-prompt-segment) describes;
 - shows `REC`, `NOREC` or `EXT` in a segment of Kali's own prompt;
-- replays a session with `scriptreplay`;
-- renders a session as a plain-text transcript offline with `python3-pyte`, with no tmux anywhere;
+- replays a session with `scriptreplay`, through a filter that drops the escape sequences a
+  target could abuse, and renders it as a plain-text transcript offline with `python3-pyte`,
+  with no tmux anywhere; this version does both, as [Viewing a session](#viewing-a-session)
+  describes;
 - seals a finished session with SHA-256 sums, which expose a later change only while a copy of
   the sums is kept apart from the logs;
 - keeps its logs under `~/.local/state/tlogger`, with mode 0700 for directories and 0600 for
@@ -103,7 +106,7 @@ the rc backups, always stays: delete it by hand when the rules of the engagement
 | 0 | Done, or nothing to change |
 | 1 | An error or a refusal; a refusal changes nothing. For `status`: installed only in part |
 | 2 | A usage error, or `--mode` or `--yes` missing outside a terminal |
-| 3 | Not installed, or nothing to remove |
+| 3 | Not installed, nothing to remove, or no session to view |
 
 ## Recording
 
@@ -198,6 +201,7 @@ with mode 0700. Its files have mode 0600:
 | `timing` | When each piece of input and output came, in the advanced format of util-linux `script`, which `scriptreplay` reads |
 | `commands.tsv` | The journal: each command typed in the recorded shell and its nested shells, with its start and end, exit status, folder and VPN list |
 | `recorder`, `started`, `exited`, `stop-requested` | Markers: which `script` process recorded, and how the recording began and ended |
+| `transcript.txt` | Once `tlogger render` or `tlogger show` has made it: the plain-text transcript, derived from `output.raw` and `timing`, as [Viewing a session](#viewing-a-session) describes |
 
 The log folder is `~/.local/state/tlogger/sessions` unless the config names another one. The
 header of `output.raw`, the timing file, the journal, the stamps and the prompt segment use UTC;
@@ -355,6 +359,100 @@ notice too. In auto mode the terminal then stays open, and the rest of the rc lo
 > mount that volume before you open a terminal, in auto mode above all: while it is not mounted,
 > the logs can land unencrypted on the disk beneath its mount point.
 
+## Viewing a session
+
+`output.raw` with `timing` is the evidence: what the terminal showed, and when. tlogger never
+writes, moves or renames them. Three commands read them:
+
+| Command | What it does |
+|---|---|
+| `tlogger render [--stdout] [SESSION]` | Writes the plain-text transcript of the session to `transcript.txt` in its folder and names it, as in `tlogger: transcript ~/.local/state/tlogger/sessions/20261104T101500Z-a1B2c3/transcript.txt`; `--stdout` prints the transcript instead and writes nothing |
+| `tlogger show [SESSION]` | Pages the transcript with `less`, after rendering it when `transcript.txt` is missing or older than the logs; without a terminal on stdout, prints it |
+| `tlogger replay [--speed N] [--maxdelay S] [SESSION]` | Replays the session in this terminal at its recorded pace with util-linux `scriptreplay`, through a filter; `--speed 2` replays twice as fast and `--speed 0.5` at half the pace, and `--maxdelay 1` waits at most a second between two outputs. Space pauses, Up and Down change the speed, and Ctrl+C stops |
+
+`SESSION` is a session id, which names a folder in the log folder, such as
+`20261104T101500Z-a1B2c3`; or a path to a session folder anywhere, by any name, which holds a
+`/`, such as `./20261104T101500Z-a1B2c3` or `/media/evidence/case-1`; or nothing, for the newest
+session in the log folder. A session folder must be a real folder of yours, not a symlink, with
+`output.raw` and `timing` as regular files of yours. Without a log folder or a session in it, the
+commands exit 3; with a `SESSION` they cannot use, 1.
+
+`render` and `show` need `python3` and `python3-pyte` (`sudo apt install python3-pyte`), and
+`replay` needs `python3` and `scriptreplay`, which Kali installs by default. tlogger runs
+`/usr/bin/python3 -I`, so that neither the environment, your user site nor the working folder
+changes what runs.
+
+### The transcript
+
+The transcript is derived, and its first line says so: it names the session, the tlogger version
+and when it was rendered.
+
+```text
+# DERIVED transcript of session 20261104T101500Z-a1B2c3; the evidence is output.raw with timing. tlogger 0.1.0-dev, rendered 2026-11-04T11:00:00Z
+```
+
+`render` plays the output through `pyte`, a terminal emulator, at the size the recording had,
+resizes included, and writes out each line as it leaves the screen: lines that scroll off the
+top, the screen that `clear`, `tput clear` or `reset` erases, and at the end the screen as it
+was left. So the transcript holds what the screen showed, not the steps that drew it: a progress
+line that rewrites itself leaves its last state, and a line that the line editor redrew, or a
+paste erased before Enter, leaves what remained. A line that wrapped at the edge of the screen
+comes back as one line, unless the wrap fell on a space. A full-screen program on the alternate
+screen, such as `vim`, `less` or `htop`, leaves one line in its place, and the screen before it
+comes back as it was:
+
+```text
+[full-screen program: 24x80, not kept here; replay shows it]
+```
+
+When `output.raw` ends before its timing does, or the timing file holds malformed lines, `render`
+warns on stderr and ends the transcript with a note line, such as
+`[3 malformed timing lines skipped]`, so that a transcript with output missing does not look
+complete. Combining marks join a character until it holds 8 code points; the rest of a longer
+run of marks is dropped, so that such a run cannot slow the render down.
+
+The transcript holds no escape sequences: colours, titles and the other control sequences are
+gone, and each control character left in the text, like each byte that is not UTF-8, shows as
+`�` (U+FFFD). It holds nothing that was typed but not shown either: **passwords typed at hidden
+prompts are not in the transcript, but they are in `input.raw`**.
+
+`transcript.txt` has mode 0600. `render` writes a new `transcript.txt.part` and renames it over
+`transcript.txt` once it is complete, so a render cut short leaves the old transcript as it was.
+A `transcript.txt.part` that is already there is what a render that did not finish left: render
+refuses to go on until you remove it. It also refuses a `transcript.txt` that is a symlink or not
+a regular file. `render` reads the logs a part at a time and keeps only the screen, so a long
+session takes time but no more memory; Ctrl+C stops it. A stream full of escape sequences renders
+slowly. A target that switches to the alternate screen and never switches back hides the rest of
+the session from the transcript, though not from `replay`; the marker line shows where.
+
+`show` runs `less` in its secure mode, with `LESSSECURE=1`, without `-R` and without `LESS`,
+`LESSOPEN` and `LESSCLOSE`, so that no input preprocessor runs.
+
+### Replay and its filter
+
+A target can print anything, escape sequences included, and `output.raw` keeps them as they came.
+Sent to a terminal as they are, some make the terminal answer as if you had typed the answer: a
+request for the title, the size or the cursor position puts the reply into the input of the shell
+you replay in. Others set the clipboard (OSC 52), change the title, switch on mouse or
+bracketed-paste reporting, or change what the keypad sends. `tlogger replay` therefore sends the
+output through a filter that passes only what draws the screen: text, cursor movement, erasing,
+inserting and deleting, scroll regions, colours and attributes, the alternate screen and the DEC
+line graphics. It drops the rest: OSC, DCS, SOS, PM and APC strings, requests and reports, window
+operations, the mouse, focus, bracketed-paste and keypad modes, resets, every C1 control, and
+`CSI 3 J`, which would erase the scrollback of the terminal you replay in. When the replay ends,
+or Ctrl+C or Ctrl+\ stops it, the filter puts back the colours, the cursor, the scroll region and
+the normal screen, and turns mouse, focus and bracketed-paste reporting off. The filter writes
+UTF-8 and expects a UTF-8 terminal, as Kali's terminals are: a terminal set to an 8-bit character
+set such as Latin-1 can read bytes inside UTF-8 characters as C1 controls.
+
+`scriptreplay` reads a copy of the timing file, in a private temp folder, without its header
+lines: under a locale such as `de_DE`, `script` writes their delays with a comma, and
+`scriptreplay` stops at the first one.
+
+> **Warning:** never replay these logs with `scriptlive`: it runs the recorded input again, every
+> command of the session, in a new shell. Do not `cat` `output.raw` to a terminal either, which
+> sends the target's escape sequences to it unfiltered; use `tlogger replay` or `tlogger show`.
+
 ## Security
 
 The logs hold everything typed and shown in a recorded terminal, passwords included.
@@ -362,6 +460,9 @@ The logs hold everything typed and shown in a recorded terminal, passwords inclu
 - Keep the log folder on encrypted storage, such as a LUKS volume, with private permissions.
 - Record only systems and engagements you are authorized to test. Keep and destroy the logs
   under the engagement's rules.
+- Treat what a target printed as hostile: view a session with `tlogger show` or
+  `tlogger replay`, which filter it, and never with `scriptlive`, which runs the recorded input
+  again.
 
 [SECURITY.md](SECURITY.md) describes how to report a vulnerability.
 
@@ -384,11 +485,12 @@ bats tests/
 ```
 
 The ShellCheck test needs `shellcheck` on PATH and is skipped without it. Tests that need a real
-zsh, util-linux `script`, the Linux `/proc`, symlinks, POSIX file modes, hard links, mawk or gawk
-skip on a machine without them, and the tests tagged `root` skip unless run as root. The
-end-to-end tests record real sessions in a pseudo-terminal that zsh's `zpty` module drives. CI
-runs the whole suite on Kali Linux in a container, with ShellCheck 0.11.0, and fails when any
-test is skipped. [CONTRIBUTING.md](CONTRIBUTING.md) tells how to run the suite as CI does.
+zsh, util-linux `script` or `scriptreplay`, `python3` or `python3-pyte`, the Linux `/proc`,
+symlinks, POSIX file modes, hard links, mawk or gawk skip on a machine without them, and the tests
+tagged `root` skip unless run as root. The end-to-end tests record real sessions in a
+pseudo-terminal that zsh's `zpty` module drives, and render and replay one of them. CI runs the
+whole suite on Kali Linux in a container, with ShellCheck 0.11.0, and fails when any test is
+skipped. [CONTRIBUTING.md](CONTRIBUTING.md) tells how to run the suite as CI does.
 
 ## Licence
 

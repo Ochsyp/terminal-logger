@@ -74,12 +74,15 @@ bats tests/
 
 - The ShellCheck test uses `shellcheck` from PATH, which should be 0.11.0 as in CI, and is
   skipped when it is not installed.
-- Tests that need a real zsh, zsh's `zsh/zpty` module, util-linux `script` 2.35 or newer, the
-  Linux `/proc`, symlinks, POSIX file modes, hard links, mawk, gawk or `/etc/skel/.zshrc` call
-  `need` from `tests/helpers.bash`. They skip on a machine without them, such as Git for Windows,
-  and fail when `TLOGGER_CI=1` is set. Where zsh is missing, `tests/stub-bin/zsh` answers the
-  questions `bin/tlogger` asks zsh; the stub refuses to run under `TLOGGER_CI=1`. On Git for
-  Windows, `MSYS=winsymlinks:sys bats tests/` lets the symlink tests run.
+- Tests that need a real zsh, zsh's `zsh/zpty` module, util-linux `script` or `scriptreplay`
+  2.35 or newer, a `python3` that runs, a POSIX `python3` that kill can signal or that imports
+  `pyte`, the Linux `/proc`, symlinks, POSIX file modes, hard links, mawk, gawk or
+  `/etc/skel/.zshrc` call `need` from `tests/helpers.bash`. They skip on a machine without them,
+  such as Git for Windows, and fail when `TLOGGER_CI=1` is set. `need python3` runs the first
+  `python3` on PATH, so the stub that the Windows Store puts there, which only exits 9009, does
+  not count. Where zsh is missing, `tests/stub-bin/zsh` answers the questions `bin/tlogger` asks
+  zsh; the stub refuses to run under `TLOGGER_CI=1`. On Git for Windows,
+  `MSYS=winsymlinks:sys bats tests/` lets the symlink tests run.
 - `tests/config.bats` runs `lib/config.zsh` in `zsh -f`, checks every key, `prompt`, `stamp`,
   `stamp_vpn`, `vpn_ifaces` and `history_timestamps` included, and checks that it reads the same
   mode and logdir as the `read_config` of `bin/tlogger`. `tests/guard.bats` checks how the plugin
@@ -137,15 +140,44 @@ bats tests/
   the banner and the REC line have come, and finds the shell that zpty started, the parent of
   `script`, through `/proc`. `pty_wait_gone` waits until a closed terminal's shell has ended, and
   `pty_close` ends a terminal so that the next one can start.
+- `tests/view.bats` runs `libexec/tlogger_view.py` as `bin/tlogger` does, `python3 -I` on the
+  file, on synthetic sessions that each test builds with the `session_` functions of
+  `tests/helpers.bash` and `printf '%b'`: progress lines, an autosuggestion redraw, an erased
+  paste, `ESC ( B`, OSC 0, 2, 7 and 8, the alternate screen, `clear` and `reset`, resizes, long
+  lines, UTF-8 split across O entries, a long run of combining marks, malformed timing lines and
+  an `output.raw` shorter than its timing, requests such as `ESC [ c`, a sequence with thousands
+  of private markers, CHT and CBT, the size clamp, the header, `transcript.txt` with its mode,
+  `.part` and rename, the refusals, the evidence left byte for byte, more than 4 MiB of short
+  lines under a `ulimit -v` bound that a thousand lines kept as strings fit in and all of them do
+  not, and SIGINT, SIGQUIT and SIGTERM. Every transcript must hold no control character. It also
+  checks `probe`, `replay-timing` and the usage errors; a test runs the file with pyte blocked
+  from importing. Render tests need a POSIX `python3` with `pyte`, so they skip on Git for
+  Windows.
+- `tests/filter.bats` checks the replay filter as a pipe without a terminal: each class of the
+  allow-list below, passed or dropped, the size cap, sequences split across reads, and the
+  restore sequence, byte for byte, at the end of the input and on SIGINT, SIGQUIT and SIGTERM.
+- `tests/view-commands.bats` checks `tlogger render`, `show` and `replay` in `bin/tlogger`: which
+  session a `SESSION` names, the refusals, the usage errors and the messages for a missing
+  `python3`, `pyte`, `scriptreplay` or `libexec/tlogger_view.py`. `TLOGGER_PYTHON` and
+  `TLOGGER_SCRIPTREPLAY`, exported and not empty, name the `python3` and the `scriptreplay` that
+  `bin/tlogger` runs in place of `/usr/bin/python3` and `/usr/bin/scriptreplay`; they exist for
+  the tests only. The tests name stand-ins there: a `scriptreplay` that records its arguments
+  and prints a fixed replay, and `python3` stand-ins that fail as the Windows Store stub does or
+  lack `pyte`. One test replays through the real `scriptreplay`.
+- `tests/e2e-render.bats` records a session as `tests/e2e-manual.bats` does, with `clear` and an
+  OSC title, a cursor position request and mouse reporting in it, then renders, shows and
+  replays it with `/usr/bin/python3` and the real `scriptreplay`, and checks that neither the
+  transcript nor the replay keeps those sequences.
 - git stores the hooks, `bin/tlogger`, the stubs in `tests/stub-bin` and every `.bats` file as
-  executable files, and the sourced files as plain ones; a lint test checks the modes in the
-  index. Where `core.filemode` is false, as on Git for Windows, stage a new executable file with
-  `git add --chmod=+x`, and check the modes with `git ls-files -s`.
+  executable files, and the sourced files as plain ones, `libexec/tlogger_view.py` among them; a
+  lint test checks the modes in the index. Where `core.filemode` is false, as on Git for Windows,
+  stage a new executable file with `git add --chmod=+x`, and check the modes with
+  `git ls-files -s`.
 - Tests tagged `root` (`# bats test_tags=root`) run only as root and skip otherwise. The other
   tests expect a non-root user: tlogger refuses root with a HOME that is not root's, so a run as
   root fails them by design.
-- To run the suite as CI does, on Linux with zsh, util-linux, mawk and gawk installed, run the
-  untagged tests as yourself, then the root tests as root:
+- To run the suite as CI does, on Linux with zsh, util-linux, mawk, gawk, `python3` and
+  `python3-pyte` installed, run the untagged tests as yourself, then the root tests as root:
 
   ```bash
   TLOGGER_CI=1 bats --filter-tags '!root' tests/
@@ -155,10 +187,10 @@ bats tests/
 - `TLOGGER_SKEL` names the file that `bin/tlogger` seeds a missing rc from, in place of
   `/etc/skel/.zshrc`. It exists for the tests only.
 - CI runs the suite on every pull request and every push to `main`, in a `kalilinux/kali-rolling`
-  container with real zsh and util-linux. There the suite, the zsh-based tests included, runs as
-  a non-root user with `--filter-tags '!root'`, and the tests tagged root run afterwards as root.
-  CI fails when any test fails or is skipped, and when the two runs together do not run every
-  test that `bats --count tests/` counts.
+  container with real zsh, util-linux, `python3` and `python3-pyte`. There the suite, the
+  zsh-based tests included, runs as a non-root user with `--filter-tags '!root'`, and the tests
+  tagged root run afterwards as root. CI fails when any test fails or is skipped, and when the
+  two runs together do not run every test that `bats --count tests/` counts.
 
 ### zsh pitfalls
 
@@ -202,6 +234,52 @@ rules:
 - The prompt. A hook never replaces `PROMPT` wholesale: it takes out the exact text it added
   last time and inserts the new one, with every `%` doubled. It never touches `RPROMPT`,
   `PROMPT_CR` or `PROMPT_SP`, and Kali's `precmd()` stays as it is.
+
+### Python rules
+
+`libexec/tlogger_view.py` renders, filters and cleans the timing for `scriptreplay`. A machine
+without `pyte` skips the render tests, so CI is often the first place a change to it runs:
+
+- `bin/tlogger` runs it only as `"$PYTHON" -I "$SRC_ROOT/libexec/tlogger_view.py"`, where
+  `PYTHON` is `/usr/bin/python3`. `-I` keeps the `PYTHON*` variables, the user site, the script's
+  folder and the working folder out of `sys.path` and the interpreter, so nothing of the user's
+  or of the session folder's can run in it. A lint test checks every call.
+- It imports the standard library and `pyte` only, and `pyte` only to render or when
+  `probe --pyte` asks for it, so that `filter`, `replay-timing` and `probe` work without it; a
+  lint test checks the imports and compiles the file. It relies only on the `pyte` 0.8 `Screen`
+  methods that it checks for, as Debian and Kali package `python3-pyte`.
+- It is a plain file, mode 100644 in git, and no test writes bytecode beside it: run it as a
+  script, which writes none, and import it only with `-B`. `-I` ignores
+  `PYTHONDONTWRITEBYTECODE` and `PYTHONPYCACHEPREFIX`.
+- Expected errors print one `tlogger: ` line and no traceback: exit 2 for a usage error, 1 for
+  the rest, and 128 plus the number for SIGHUP, SIGINT, SIGQUIT and SIGTERM. A SIGHUP that is
+  ignored, as under `nohup`, stays ignored. `Stop`, which a signal raises, derives from
+  `BaseException`, so that no `except Exception` takes it for an error.
+- `render` opens the session folder with `O_DIRECTORY | O_NOFOLLOW` and every file through its
+  descriptor, so it runs on Linux only; `filter`, `replay-timing` and `probe` also run on Git for
+  Windows. Python there writes a CR before each LF of what goes through `sys.stderr`, so the tests
+  remove CRs from its messages.
+
+### The replay filter
+
+The allow-list of the replay filter is a contract: `tests/filter.bats` checks it, and a change
+to it needs a test there and a line in the changelog. The filter passes:
+
+- text, valid UTF-8 above ASCII included, and the controls BS, HT, LF and CR;
+- CSI with the final `@`, `A` to `H`, `J`, `K`, `L`, `M`, `P`, `S`, `T`, `X`, `d`, `f`, `m`, `r`,
+  `s`, `u` or `` ` ``, parameters of digits, `;` and `:` only, no private marker and no
+  intermediate byte; but not ED 3, `CSI 3 J`, which erases the scrollback of the terminal that
+  replays;
+- CSI `h` and `l` for the mode 4 and the private modes 7, 12, 25, 47, 1047, 1048 and 1049, with
+  every other mode taken out of the list;
+- `ESC 7`, `ESC 8`, `ESC D`, `ESC E`, `ESC M`, and `ESC (` or `ESC )` with `B` or `0`.
+
+It drops everything else: OSC, DCS, SOS, PM and APC strings up to their end, every other CSI,
+requests and window operations among them, every other escape sequence, the other C0 controls,
+DEL and every C1 control, raw or in UTF-8. A sequence or string that reaches 4096 bytes without
+its end is dropped, and the filter starts afresh with the next character. At the end of its input
+and on SIGHUP, SIGINT, SIGQUIT or SIGTERM it writes one fixed restore sequence, which
+`FILTER_RESTORE` in `tests/helpers.bash` holds byte for byte.
 
 ### Moving the Kali image
 

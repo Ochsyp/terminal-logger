@@ -70,6 +70,20 @@ All notable changes to this project are listed here. The format follows
 - Unit tests of the journal, the stamps, the VPN list and the segment in a real zsh, Kali's
   `configure_prompt` in both Ctrl+P states included, and end-to-end tests of the journal, the
   stamp and the segment, with Ctrl+P under the rc built from `/etc/skel/.zshrc`.
+- `tlogger render`, `show` and `replay`, which build a derived plain-text transcript with
+  `python3-pyte` and replay through an escape-sequence filter, without tmux. `render` writes
+  `transcript.txt` (mode 0600, through `transcript.txt.part` and a rename) in the session folder,
+  or prints it with `--stdout`: the lines that scroll off the screen or that `clear` erases, the
+  screen at the end, one marker line for a full-screen program, and a note line when
+  `output.raw` ends early or timing lines are malformed, with no escape sequences. `show` pages
+  it with `less` in secure mode, rendering it first when it is missing or older than the logs.
+  `replay` runs util-linux `scriptreplay`, with `--speed` and `--maxdelay`, and passes its output
+  through a filter that keeps only an allow-list of what draws the screen, without `CSI 3 J`,
+  which would erase the scrollback of the terminal that replays. Each takes
+  a session id, a path to a session folder or nothing for the newest session, and never writes
+  the evidence files. `libexec/tlogger_view.py`, run with `/usr/bin/python3 -I`, does the work.
+- Tests of the renderer on synthetic logs, of the replay filter and of the three commands, and an
+  end-to-end test that renders and replays a session recorded in a pseudo-terminal.
 
 ### Changed
 
@@ -86,5 +100,7 @@ All notable changes to this project are listed here. The format follows
   `stamp_vpn`, `vpn_ifaces` and `history_timestamps` as well.
 - A session folder also holds `commands.tsv`, created empty with mode 0600 before the recording
   starts; a session that never started, with nothing but empty logs, is still removed.
+- CI installs `python3` and `python3-pyte` and prints the versions of `scriptreplay`, `python3`
+  and `python3-pyte`. A release holds `libexec/tlogger_view.py` as well.
 
 [Unreleased]: https://github.com/Ochsyp/terminal-logger/commits/main
