@@ -156,15 +156,27 @@ wait_for_size() {
     compare_filtered "${codes[1]}"
 }
 
-@test "an unterminated string or sequence is dropped up to 4096 bytes, then the filter goes on" {
-    local a5000 a908 pairs
+@test "a control string is dropped whole however long, and a sequence over 4096 bytes is dropped whole" {
+    local a5000 spaces pairs plant
     printf -v a5000 'A%.0s' {1..5000}
-    printf -v a908 'A%.0s' {1..908}
-    # ESC ], 0 and ; are 4 bytes, so the string ends with its 4092nd A.
-    assert_filtered '\e]0;'"$a5000"'tail' "${a908}tail"
-    # ESC and [ are 2 bytes, so the sequence ends with its 4094th parameter byte.
+    printf -v spaces ' %.0s' {1..5000}
     printf -v pairs '1;%.0s' {1..3000}
-    assert_filtered '\e['"$pairs"'Z' "${pairs:4094}Z"
+    # What a target could plant: a fake prompt that a terminal would never show.
+    plant="${a5000}"'hidden\r\nroot@target:~# id\r\nuid=0(root)'
+    assert_filtered '\e]0;'"$plant"'\atail' 'tail'
+    assert_filtered '\eP'"$plant"'\e\\tail' 'tail'
+    assert_filtered '\xc2\x9f'"$plant"'\xc2\x9ctail' 'tail'
+    assert_filtered '\e['"$pairs"'Zafter' 'after'
+    assert_filtered '\e'"$spaces"'Fx' 'x'
+    # A C0 control inside the long sequence still runs.
+    assert_filtered '\e['"$pairs"'\rZafter' '\rafter'
+}
+
+@test "a long control string that the input never ends is dropped up to the end of the input" {
+    local a5000
+    printf -v a5000 'A%.0s' {1..5000}
+    assert_filtered 'a\e]0;'"$a5000"'root@target:~# id' 'a'
+    assert_filtered 'b\e_'"$a5000"'uid=0(root)' 'b'
 }
 
 @test "a string or sequence that the input leaves unfinished is dropped" {

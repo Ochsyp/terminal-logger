@@ -416,8 +416,10 @@ the render down.
 
 The transcript holds no escape sequences: colours, titles and the other control sequences are
 gone, and each control character left in the text, like each byte that is not UTF-8, shows as
-`�` (U+FFFD). It holds nothing that was typed but not shown either: **passwords typed at hidden
-prompts are not in the transcript, but they are in `input.raw`**.
+`�` (U+FFFD). OSC, DCS, SOS, PM and APC strings leave no text, however long, as on a terminal;
+a control sequence over 4096 bytes is dropped whole. It holds nothing that was typed but not
+shown either: **passwords typed at hidden prompts are not in the transcript, but they are in
+`input.raw`**.
 
 `transcript.txt` has mode 0600. `render` writes a new `transcript.txt.part` and renames it over
 `transcript.txt` once it is complete, so a render cut short leaves the old transcript as it was.
@@ -444,9 +446,10 @@ you replay in. Others set the clipboard (OSC 52), change the title, switch on mo
 bracketed-paste reporting, or change what the keypad sends. `tlogger replay` therefore sends the
 output through a filter that passes only what draws the screen: text, cursor movement, erasing,
 inserting and deleting, scroll regions, colours and attributes, the alternate screen and the DEC
-line graphics. It drops the rest: OSC, DCS, SOS, PM and APC strings, requests and reports, window
-operations, the mouse, focus, bracketed-paste and keypad modes, resets, every C1 control, and
-`CSI 3 J`, which would erase the scrollback of the terminal you replay in. It passes `CSI S` and
+line graphics. It drops the rest: OSC, DCS, SOS, PM and APC strings (up to their end, however
+long, as a terminal shows none of their text), requests and reports, window operations, the
+mouse, focus, bracketed-paste and keypad modes, resets, every C1 control, and `CSI 3 J`, which
+would erase the scrollback of the terminal you replay in. It passes `CSI S` and
 `CSI T` (scroll) with one number or none only: with five parameters, `CSI T` is xterm's
 highlight mouse tracking, which makes a terminal wait for a mouse report. When the replay ends,
 or Ctrl+C or Ctrl+\ stops it, the filter puts back the colours, the cursor, the scroll region and

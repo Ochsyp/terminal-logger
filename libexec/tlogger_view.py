@@ -139,8 +139,9 @@ class Sink:
 # Token kinds: printable text, a C0 control, an escape sequence and a control sequence (CSI).
 TEXT, CTRL, ESC, CSI = range(4)
 
-# A sequence or control string that reaches this many UTF-8 bytes without its end, counted from
-# its first byte, is dropped, and parsing goes on in the ground state with the next character.
+# An escape or control sequence that reaches this many bytes, counted from its first byte, stops
+# keeping its parameter and intermediate bytes, so that memory stays bounded. It is still read on
+# to its end and then dropped whole. Control strings are not counted: they keep nothing.
 CAP = 4096
 
 # Tokenizer states: ground, escape, control sequence, control string and an ESC inside a string.
@@ -155,16 +156,6 @@ _STRING_STOP = re.compile("[\x18\x1a\x1b\x90\x98\x9b-\x9f]")
 _OSC_STOP = re.compile("[\x07\x18\x1a\x1b\x90\x98\x9b-\x9f]")
 
 
-def _u8len(ch):
-    """Return the number of bytes the character CH takes in UTF-8."""
-    code = ord(ch)
-    if code < 0x80:
-        return 1
-    if code < 0x800:
-        return 2
-    return 3 if code < 0x10000 else 4
-
-
 class Tokenizer:
     """Split terminal output, decoded to str, into tokens, keeping its state across feed calls.
 
@@ -175,8 +166,10 @@ class Tokenizer:
     for OSC, yield nothing. DEL, CAN, SUB, a stray ST and every other C1 control are dropped. A
     C0 control inside a sequence is executed: its token comes before the sequence's, as on a
     DEC terminal. ESC, CAN, SUB, a C1 control or a character above ASCII inside a sequence ends
-    it unfinished; such a character is then read again in the ground state. A sequence or string
-    that reaches CAP bytes is dropped, and the next character starts afresh in the ground state.
+    it unfinished; such a character is then read again in the ground state. A control string is
+    dropped whole, however long, as a terminal shows none of it; the tokenizer keeps none of its
+    bytes. A sequence that reaches CAP bytes stops keeping its bytes, is read on to its end and
+    is dropped whole, as a malformed one is.
     """
 
     def __init__(self):
@@ -195,14 +188,14 @@ class Tokenizer:
         self.inter = ""
         self.params = ""
         self.c1 = c1
-        self.bad = False
+        self.bad = size >= CAP
         self.osc = osc
 
     def _grow(self, count):
-        """Count COUNT more bytes of the sequence; drop it at the cap. Returns False."""
+        """Count COUNT more bytes of the sequence; at the cap mark it bad. Returns False."""
         self.size += count
         if self.size >= CAP:
-            self.state = _GROUND
+            self.bad = True
         return False
 
     def _control(self, ch, out):
@@ -245,7 +238,9 @@ class Tokenizer:
         """Read CH after ESC and its intermediates. Returns True to read CH again."""
         code = ord(ch)
         if 0x20 <= code <= 0x2F:
-            self.inter += ch
+            # Past the cap keep one intermediate, so that ESC SP [ is not read as CSI.
+            if not self.bad or not self.inter:
+                self.inter += ch
             return self._grow(1)
         if 0x30 <= code <= 0x7E:
             if not self.inter:
@@ -258,7 +253,8 @@ class Tokenizer:
                 if ch in "PX^_":
                     self._begin(_STRING, self.size + 1)
                     return False
-            out.append((ESC, self.inter, ch))
+            if not self.bad:
+                out.append((ESC, self.inter, ch))
             self.state = _GROUND
             return False
         return self._interrupt(ch, out)
@@ -270,11 +266,12 @@ class Tokenizer:
             # A parameter byte after an intermediate byte makes the sequence malformed.
             if self.inter:
                 self.bad = True
-            else:
+            elif not self.bad:
                 self.params += ch
             return self._grow(1)
         if 0x20 <= code <= 0x2F:
-            self.inter += ch
+            if not self.bad:
+                self.inter += ch
             return self._grow(1)
         if 0x40 <= code <= 0x7E:
             if not self.bad:
@@ -284,26 +281,17 @@ class Tokenizer:
         return self._interrupt(ch, out)
 
     def _string(self, text, i, out):
-        """Read the control string in TEXT from index I on. Returns the next index to read."""
+        """Read the control string in TEXT from index I on, keeping none of it.
+
+        Returns the next index to read.
+        """
         match = (_OSC_STOP if self.osc else _STRING_STOP).search(text, i)
-        end = len(text) if match is None else match.start()
-        if end > i:
-            run = text[i:end]
-            size = self.size + len(run.encode("utf-8", "surrogatepass"))
-            if size >= CAP:
-                size = self.size
-                for k, ch in enumerate(run):
-                    size += _u8len(ch)
-                    if size >= CAP:
-                        self.state = _GROUND
-                        return i + k + 1
-            self.size = size
         if match is None:
-            return end
+            return len(text)
+        end = match.start()
         ch = text[end]
         if ch == "\x1b":
             self.state = _STRING_ESC
-            self._grow(1)
             return end + 1
         self.state = _GROUND
         if ch not in "\x07\x18\x1a\x9c":

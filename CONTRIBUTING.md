@@ -284,12 +284,14 @@ to it needs a test there and a line in the changelog. The filter passes:
 
 It drops everything else: OSC, DCS, SOS, PM and APC strings up to their end, every other CSI,
 requests and window operations among them, every other escape sequence, the other C0 controls,
-DEL and every C1 control, raw or in UTF-8. A sequence or string that reaches 4096 bytes without
-its end is dropped, and the filter starts afresh with the next character. At the end of its input
-and on SIGHUP, SIGINT, SIGQUIT or SIGTERM it writes one fixed restore sequence, which
-`FILTER_RESTORE` in `tests/helpers.bash` holds byte for byte. On a signal it first drops what
-it had not finished writing, so that a write the signal cut short is never sent again from its
-start; the restore sequence begins with ESC, which ends a sequence that the cut left open.
+DEL and every C1 control, raw or in UTF-8. A string is dropped whole up to its end, however
+long, as a terminal shows none of it; text past 4096 bytes must not come out as plain text. A
+sequence that reaches 4096 bytes stops keeping its bytes, is read on to its final byte and is
+dropped whole. At the end of its input and on SIGHUP, SIGINT, SIGQUIT or SIGTERM it writes one
+fixed restore sequence, which `FILTER_RESTORE` in `tests/helpers.bash` holds byte for byte. On a
+signal it first drops what it had not finished writing, so that a write the signal cut short is
+never sent again from its start; the restore sequence begins with ESC, which ends a sequence that
+the cut left open.
 
 ### Moving the Kali image
 

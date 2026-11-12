@@ -400,6 +400,23 @@ wait_for() {
     [ ! -s "$ERRORS" ]
 }
 
+@test "a control string longer than 4096 bytes hides its whole payload, lines that fake a root shell included" {
+    need pyte
+    local pad plant
+    printf -v pad 'A%.0s' {1..5000}
+    plant="${pad}"'root@target:~# id\r\nuid=0(root) gid=0(root)\r\n'
+    session_new "$SESSION"
+    session_out '$ cat banner.txt\r\n'
+    # shellcheck disable=SC1003 # \\ is the backslash of ST for printf %b.
+    session_out '\e]0;'"$plant"'\a$ ls\r\n'
+    session_out '\eP'"$plant"'\e\\$ pwd\r\n'
+    session_out '\e_'"$plant"'\xc2\x9c$ id\r\n'
+    session_end
+    render_stdout
+    assert_lines '$ cat banner.txt' '$ ls' '$ pwd' '$ id'
+    [ ! -s "$ERRORS" ]
+}
+
 @test "CHT and CBT move the cursor between tab stops, and CHT stops at the last column" {
     need pyte
     local want

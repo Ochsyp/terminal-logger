@@ -85,8 +85,9 @@ All notable changes to this project are listed here. The format follows
   - `replay` runs util-linux `scriptreplay`, with `--speed` and `--maxdelay`, through a filter
     that keeps only an allow-list of what draws the screen. It drops `CSI 3 J`, which would
     erase the scrollback of the terminal that replays, and `CSI S` and `CSI T` with more than one
-    parameter (xterm's highlight mouse tracking). At the end of its input, and on a signal after
-    dropping what it had not finished writing, it restores the terminal.
+    parameter (xterm's highlight mouse tracking). Control strings are dropped whole however
+    long, and a sequence over 4096 bytes is dropped whole. At the end of its input, and on a
+    signal after dropping what it had not finished writing, it restores the terminal.
 - Tests of the renderer on synthetic logs, of the replay filter and of the three commands, and an
   end-to-end test that renders and replays a session recorded in a pseudo-terminal.
 
