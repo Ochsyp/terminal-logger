@@ -133,8 +133,13 @@ pty_close() {
     return 0
 }
 
-# Type LINE and Enter into the terminal.
+# Type LINE and Enter into the terminal; an empty LINE types Enter alone. zpty -w cannot do that
+# itself: it fails on an empty string, of which it writes nothing, and then sends no newline either.
 pty_send() {
+    if [[ -z $1 ]]; then
+        zpty -wn $PTY_NAME $'\n' || pty_fail 'cannot type Enter into the terminal'
+        return 0
+    fi
     zpty -w $PTY_NAME "$1" || pty_fail "cannot type into the terminal: $1"
 }
 

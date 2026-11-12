@@ -244,8 +244,9 @@ EOF
     # The rc that install builds from Kali's own: the block, then /etc/skel/.zshrc as it is, with
     # its precmd, its Ctrl+P widget and the line editor on. Under TERM=dumb it starts with its
     # plain one-line prompt; Ctrl+P builds the one-line, then the two-line prompt, each without
-    # the segment, which the next precmd adds at the end of the first line. Only the segment and
-    # the line end after it are matched, so that the redraws of the line editor do not matter.
+    # the segment, which the next precmd adds at the end of the first line. The test reads PROMPT
+    # itself, not the screen: under TERM=dumb the line editor runs in single-line mode and scrolls
+    # long lines sideways, so what it draws of a two-line prompt is no reliable text.
     cat "$GOLDEN_BLOCK" /etc/skel/.zshrc > "$HOME/.zshrc"
     E2E_SYS=$SYS_NONE drive << 'EOF'
 pty_shell TLOGGER_SYSFS=$E2E_SYS
@@ -253,9 +254,12 @@ pty_run 'prompt_lines=(${(f)PROMPT}); print -r -- "$PROMPT_ALTERNATIVE $#prompt_
 pty_out_is 'twoline 1' || pty_fail "the rc starts with: $PTY_OUT"
 pty_type $'\x10'
 pty_type $'\x10'
+# Enter on the empty line runs precmd, which puts the segment back into the PROMPT that Ctrl+P
+# rebuilt; the next command prints the end of PROMPT's first line, as long as the segment, and
+# TLOGGER_SEGMENT, which that precmd exported.
 pty_send ''
-pty_segment NOREC $'\r\n'
-pty_run 'prompt_lines=(${(f)PROMPT}); print -r -- "$PROMPT_ALTERNATIVE $#prompt_lines"'
-pty_out_is 'twoline 2' || pty_fail "after Ctrl+P twice the shell has: $PTY_OUT"
+pty_run 'prompt_lines=(${(f)PROMPT}); print -r -- "$PROMPT_ALTERNATIVE $#prompt_lines ${prompt_lines[1][-$#TLOGGER_SEGMENT,-1]}|$TLOGGER_SEGMENT"'
+[[ $PTY_OUT == (#b)'twoline 2 '(*)'|'(*)$'\n' && $match[1] == "$match[2]" &&
+    $match[2] == '['*' NOREC]' ]] || pty_fail "after Ctrl+P twice the shell has: $PTY_OUT"
 EOF
 }
