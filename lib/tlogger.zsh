@@ -1,7 +1,7 @@
-# tlogger plugin for zsh, sourced by the tlogger block at the top of the zsh rc. tlogger start
+# tlogger plugin for zsh, sourced by the tlogger block at the top of the zsh rc: tlogger start
 # records this terminal with util-linux script, tlogger stop pauses, tlogger status shows the
-# state, and in auto mode each new terminal records itself; other subcommands go to the release's
-# bin/tlogger. It changes no zsh option outside its functions and never touches PROMPT.
+# state, auto mode records each new terminal, and its hooks journal the commands of a recorded
+# shell and put a REC, NOREC or EXT segment into PROMPT. Other subcommands go to bin/tlogger.
 
 # Only an interactive shell gets the command.
 [[ -o interactive ]] || return 0
@@ -18,12 +18,20 @@ fi
 typeset -g _tlogger_release=${${(%):-%x}:A:h:h}
 
 # A session folder is <logdir>/<UTC time>-<6 random characters>, mode 0700. script writes
-# output.raw, input.raw (unless record_input=no) and timing into it, mode 0600. The recorded
-# shells add markers, mode 0600 each: recorder ('<script pid> <starttime> <boot_id> <tty_nr>')
-# and started from the handshake, exited from an exit of the main recorded shell while its
-# recorder and terminal last, and stop-requested from tlogger stop. A marker always holds a line.
-# TLOGGER_SESSION names the folder in every recorded shell. TLOGGER_PROC, default /proc, exists
-# only so that the tests can point the process walk at a fake tree; production never sets it.
+# output.raw, input.raw (unless record_input=no) and timing into it, and the recorded shells
+# append to commands.tsv, all mode 0600. The recorded shells add markers, mode 0600 each:
+# recorder ('<script pid> <starttime> <boot_id> <tty_nr>') and started from the handshake,
+# exited from an exit of the main recorded shell while its recorder and terminal last, and
+# stop-requested from tlogger stop. A marker always holds a line. TLOGGER_SESSION names the
+# folder in every recorded shell. TLOGGER_PROC (default /proc), TLOGGER_SYSFS (default /sys) and
+# TLOGGER_IP exist only so that the tests can point the process walk, the interface list and ip
+# at fakes; production never sets them.
+
+# commands.tsv, the command journal, holds lines of fields separated by tabs. The preexec hook
+# of a recorded shell appends 'S <epoch> <UTC> <pid> <PWD> <vpn> <typed>' as a command starts,
+# and its precmd hook 'E <epoch> <pid> <status>' once it has ended. UTC is %Y-%m-%dT%H:%M:%SZ;
+# PWD and typed are quoted as the (q+) flag quotes, so that a tab or a newline in them stays
+# inside its line; vpn is the VPN list, or - when the list is empty or stamp_vpn=off.
 
 # Print 'tlogger: MESSAGE' on stderr, in COLOR (red or yellow; plain for none) when stderr is a
 # terminal and NO_COLOR is empty. The colour wraps the whole line, so the text stays one piece.
@@ -51,12 +59,12 @@ _tlogger_shown() {
     fi
 }
 
-# Set the parameter named NAME to the time now in UTC, as strftime FORMAT writes it.
-# NAME must not be TZ, which is local here; zsh/datetime must be loaded.
+# Set the parameter named NAME to the time EPOCH, default now, in UTC, as strftime FORMAT writes
+# it. NAME must not be TZ, which is local here; zsh/datetime must be loaded.
 _tlogger_utc() {
     emulate -L zsh
     local -x TZ=UTC0
-    strftime -s $1 $2 $EPOCHSECONDS
+    strftime -s $1 $2 ${3:-$EPOCHSECONDS}
 }
 
 # Create FILE with mode 0600 and the line TEXT, without a fork. Returns 1 when FILE exists, even
@@ -80,6 +88,26 @@ _tlogger_write_new() {
         command rm -f -- $1 2> /dev/null
         return 1
     fi
+}
+
+# Append the line TEXT to FILE, created with mode 0600 when it is missing, without a fork. A
+# symlink is never followed, and the open never waits, as it would for a FIFO without a reader.
+# Returns 1, and prints nothing, when FILE cannot be opened or written, so that a hook never shows
+# an error, hangs or stops the shell. zsh/system must be loaded.
+_tlogger_append() {
+    emulate -L zsh
+    local fd
+    local -i rc
+    if ! sysopen -a -o creat,nofollow,cloexec,nonblock -m 600 -u fd $1 2> /dev/null; then
+        return 1
+    fi
+    {
+        print -r -u $fd -- $2 2> /dev/null
+        rc=$?
+    } always {
+        exec {fd}>&-
+    }
+    return $rc
 }
 
 # Set reply to the comm, ppid, tty_nr and starttime of process PID from <proc>/PID/stat, read
@@ -237,8 +265,9 @@ _tlogger_df() {
     return 1
 }
 
-# Remove the session folder DIR when it holds nothing but empty output.raw, input.raw and timing
-# files, as a recording that never started leaves it. Returns 0 when DIR is gone, 1 when it stays.
+# Remove the session folder DIR when it holds nothing but empty output.raw, input.raw, timing and
+# commands.tsv files, as a recording that never started leaves it. Returns 0 when DIR is gone, 1
+# when it stays.
 _tlogger_drop_empty() {
     emulate -L zsh
     local f
@@ -246,7 +275,7 @@ _tlogger_drop_empty() {
     entries=($1/*(DN))
     for f in $entries; do
         case ${f:t} in
-            output.raw | input.raw | timing)
+            output.raw | input.raw | timing | commands.tsv)
                 if [[ -L $f || ! -f $f || -s $f ]]; then
                     return 1
                 fi
@@ -362,8 +391,9 @@ _tlogger_preflight() {
         REPLY="cannot create a session folder in $shown_dir"
         return 1
     fi
-    # script opens the logs with fopen "w", which keeps the mode of a file that exists.
-    if ! (umask 077 && : >| $dir/output.raw && : >| $dir/timing &&
+    # script opens the logs with fopen "w", which keeps the mode of a file that exists, and the
+    # recorded shells append their journal to commands.tsv.
+    if ! (umask 077 && : >| $dir/output.raw && : >| $dir/timing && : >| $dir/commands.tsv &&
         if [[ $_tlogger_cfg[record_input] == yes ]]; then : >| $dir/input.raw; fi) 2> /dev/null
     then
         _tlogger_drop_empty $dir
@@ -503,13 +533,18 @@ _tlogger_stop() {
     fi
 }
 
-# tlogger status: print on stdout the plugin version, this terminal's state, its session and the
-# config values mode, logdir (in the ~ form) and record_input. Config warnings go to stderr.
+# tlogger status: print on stdout the plugin version, this terminal's state, its session, the
+# config values mode, logdir (in the ~ form), record_input, prompt and stamp, and the VPN list,
+# shown as none when it is empty and as off when stamp_vpn=off. Config warnings go to stderr.
 _tlogger_status() {
     emulate -L zsh
-    local REPLY version=unknown state session=none
+    local REPLY version=unknown state session=none vpn=off
     _tlogger_load_config
     _tlogger_tty_state
+    if [[ $_tlogger_cfg[stamp_vpn] == on ]]; then
+        _tlogger_vpn_update
+        vpn=${_tlogger_vpn:-none}
+    fi
     if [[ -r $_tlogger_release/VERSION ]]; then
         IFS= read -r version < $_tlogger_release/VERSION || :
     fi
@@ -521,7 +556,8 @@ _tlogger_status() {
     _tlogger_shown $_tlogger_cfg[logdir]
     print -r -- "tlogger plugin ${version:-unknown}"
     printf '  %-13s %s\n' state: "$state" session: "$session" mode: "$_tlogger_cfg[mode]" \
-        logdir: "$REPLY" record_input: "$_tlogger_cfg[record_input]"
+        logdir: "$REPLY" record_input: "$_tlogger_cfg[record_input]" \
+        prompt: "$_tlogger_cfg[prompt]" stamp: "$_tlogger_cfg[stamp]" vpn: "$vpn"
 }
 
 # zshexit hook: in the main recorded shell, write exited into the session folder, so that the
@@ -565,16 +601,194 @@ _tlogger_zshexit() {
     return 0
 }
 
+# Set _tlogger_vpn to the VPN list: each counted interface in name order, followed by its address
+# when ip shows one, as in 'tun0 192.0.2.10 wg0 198.51.100.7'; the names alone without ip or
+# without addresses; empty when no interface counts. An interface counts when <sysfs>/class/net
+# holds it, sysfs being TLOGGER_SYSFS (default /sys), and its name matches a vpn_ifaces pattern
+# and ^[A-Za-z0-9_.:-]{1,15}$; any other name is skipped, and no name is ever run. Its address is
+# its first IPv4 address without the prefix length, else its first IPv6 address, and counts only
+# when it holds address characters alone. The list is a cache: ip (_tlogger_ip, never looked up in
+# PATH) runs once, and only when the counted names and their ifindex files differ from
+# _tlogger_vpn_key or 60 seconds have passed since _tlogger_vpn_time, never while no interface
+# counts. When ip ran and showed no address for a counted interface, _tlogger_vpn_time goes 55
+# seconds back, so that ip runs again 5 seconds later, and no sooner. Reads sysfs without a fork
+# and prints nothing. Needs _tlogger_cfg filled.
+_tlogger_vpn_update() {
+    emulate -L zsh
+    setopt extendedglob
+    local net=${TLOGGER_SYSFS:-/sys}/class/net name pat idx key= out= line addr IFS=$' \t\n'
+    local -a pats counted words
+    local -A v4 v6
+    local -i now=$EPOCHSECONDS
+    pats=(${(s: :)_tlogger_cfg[vpn_ifaces]})
+    for name in $net/*(DN:t); do
+        if [[ $name != [A-Za-z0-9_.:-](#c1,15) ]]; then
+            continue
+        fi
+        for pat in $pats; do
+            if [[ $name == ${~pat} ]]; then
+                idx=
+                { idx=$(<$net/$name/ifindex); } 2> /dev/null
+                counted+=($name)
+                key+="$name/$idx "
+                break
+            fi
+        done
+    done
+    if [[ $key == "${_tlogger_vpn_key-}" ]] &&
+        (( now - _tlogger_vpn_time < 60 && now >= _tlogger_vpn_time )); then
+        return 0
+    fi
+    _tlogger_vpn_key=$key _tlogger_vpn_time=$now _tlogger_vpn=
+    if (( $#counted == 0 )); then
+        return 0
+    fi
+    if [[ -n ${_tlogger_ip-} ]]; then
+        out=$($_tlogger_ip -o addr show < /dev/null 2> /dev/null)
+    fi
+    # One line per address: '<index>: <name>    inet <address>/<length> ...', or inet6.
+    for line in ${(f)out}; do
+        words=(${=line})
+        name=${${words[2]-}%%@*}
+        addr=${${words[4]-}%%/*}
+        if [[ -z $name ]] || (( ! ${counted[(Ie)$name]} )); then
+            continue
+        fi
+        if [[ ${words[3]-} == inet && -z ${v4[$name]-} &&
+            $addr == [0-9](#c1,3).[0-9](#c1,3).[0-9](#c1,3).[0-9](#c1,3) ]]; then
+            v4[$name]=$addr
+        elif [[ ${words[3]-} == inet6 && -z ${v6[$name]-} && $addr == *:* &&
+            $addr == [0-9A-Fa-f:.](#c2,45) ]]; then
+            v6[$name]=$addr
+        fi
+    done
+    for name in $counted; do
+        addr=${v4[$name]:-${v6[$name]-}}
+        _tlogger_vpn+="${_tlogger_vpn:+ }$name${addr:+ $addr}"
+        # A tunnel that has just come up may get its address a moment after the prompt returns;
+        # without ip there is no address to wait for.
+        if [[ -z $addr && -n ${_tlogger_ip-} ]]; then
+            _tlogger_vpn_time=$(( now - 55 ))
+        fi
+    done
+}
+
+# Put the segment SEG into PROMPT, as _tlogger_precmd does before every prompt. First remove the
+# text added last time, which _tlogger_seg keeps, where PROMPT still holds it; then, unless
+# prompt=off, insert ' SEG' before the first newline of PROMPT, at the end of its first line, or
+# 'SEG ' in front of a PROMPT without one, with every % doubled so that prompt expansion shows it
+# as it is, and keep the inserted text in _tlogger_seg. Never replaces PROMPT wholesale, and
+# leaves a read-only PROMPT and every other prompt parameter as they are.
+_tlogger_prompt() {
+    emulate -L zsh
+    local text=${1//[%]/%%}
+    if [[ ${(t)PROMPT} == *readonly* ]]; then
+        return 0
+    fi
+    if [[ -n ${_tlogger_seg-} && $PROMPT == *"$_tlogger_seg"* ]]; then
+        PROMPT=${PROMPT/"$_tlogger_seg"}
+    fi
+    _tlogger_seg=
+    if [[ ${_tlogger_cfg[prompt]-} == off ]]; then
+        return 0
+    fi
+    if [[ $PROMPT == *$'\n'* ]]; then
+        text=" $text"
+        PROMPT=${PROMPT%%$'\n'*}$text$'\n'${PROMPT#*$'\n'}
+    else
+        text="$text "
+        PROMPT=$text$PROMPT
+    fi
+    _tlogger_seg=$text
+}
+
+# preexec hook: zsh runs it as each command line starts, with what the user typed, a short form
+# and the full text as its arguments. Acts only in a REC shell (_tlogger_state REC and
+# TLOGGER_SESSION set), nested ones included: appends the S line for ${1:-$3} to the journal,
+# keeps the session folder in _tlogger_cmd for the E line of _tlogger_precmd and, with stamp=on
+# and stderr a terminal, prints the stamp '-- <UTC> <vpn> REC' on stderr, dim while NO_COLOR is
+# empty, without <vpn> when the list is empty or stamp_vpn=off. A journal it cannot write stays
+# silent. Forks only for ip, at the rate _tlogger_vpn_update keeps.
+_tlogger_preexec() {
+    emulate -L zsh
+    local utc vpn= on= off=
+    local -a f
+    local -i now=$EPOCHSECONDS
+    if [[ ${_tlogger_state-} != REC || -z ${TLOGGER_SESSION-} ]]; then
+        return 0
+    fi
+    if [[ ${_tlogger_cfg[stamp_vpn]-} == on ]]; then
+        _tlogger_vpn_update
+        vpn=$_tlogger_vpn
+    fi
+    _tlogger_utc utc '%Y-%m-%dT%H:%M:%SZ' $now
+    f=(S $now $utc $$ ${(q+)PWD} ${vpn:--} ${(q+)${1:-$3}})
+    _tlogger_append $TLOGGER_SESSION/commands.tsv ${(pj:\t:)f}
+    _tlogger_cmd=$TLOGGER_SESSION
+    if [[ ${_tlogger_cfg[stamp]-} == on && -t 2 ]]; then
+        if [[ -z ${NO_COLOR-} ]]; then
+            on=$'\e[2m' off=$'\e[0m'
+        fi
+        print -ru2 -- "$on-- $utc${vpn:+ $vpn} REC$off"
+    fi
+}
+
+# precmd hook: zsh runs it before every prompt, after a precmd function such as Kali's. It reads
+# $? first. zsh hands each hook function the status of the user's command: callhookfunc
+# (Src/utils.c) runs each one through doshfunc (Src/exec.c) with noreturnval set, which saves
+# lastval before the function and restores it after, so the status Kali's precmd() ends with does
+# not count. Then appends the E line of the command that _tlogger_preexec journaled, if any;
+# works out this terminal's state again with _tlogger_tty_state; in a REC shell checks the free
+# space of the session at most every 300 seconds (_tlogger_df_time) and below min_free_mb warns
+# in yellow; exports the segment '[<UTC> <vpn> <state>]' as TLOGGER_SEGMENT, without <vpn> when
+# the list is empty or stamp_vpn=off; and puts it into PROMPT with _tlogger_prompt. Prints nothing
+# else, and forks only for df and ip, at their rates.
+_tlogger_precmd() {
+    local -i st=$?
+    emulate -L zsh
+    local REPLY utc vpn= min
+    local -a reply f
+    local -i now=$EPOCHSECONDS
+    if [[ -n ${_tlogger_cmd-} ]]; then
+        f=(E $now $$ $st)
+        _tlogger_append $_tlogger_cmd/commands.tsv ${(pj:\t:)f}
+        _tlogger_cmd=
+    fi
+    _tlogger_tty_state
+    if [[ $_tlogger_state == REC && -n ${TLOGGER_SESSION-} ]] &&
+        (( now - _tlogger_df_time >= 300 || now < _tlogger_df_time )); then
+        _tlogger_df_time=$now
+        min=${_tlogger_cfg[min_free_mb]-}
+        if [[ $min != <-> ]]; then
+            min=200
+        fi
+        # _tlogger_df forks df, which the 300 seconds keep rare.
+        if _tlogger_df k $TLOGGER_SESSION && (( reply[2] < min * 1024 )); then
+            _tlogger_shown ${_tlogger_cfg[logdir]-}
+            _tlogger_say yellow "warning: less than $min MB free in $REPLY; the recording goes on"
+        fi
+    fi
+    if [[ ${_tlogger_cfg[stamp_vpn]-} == on ]]; then
+        _tlogger_vpn_update
+        vpn=$_tlogger_vpn
+    fi
+    _tlogger_utc utc '%Y-%m-%dT%H:%M:%SZ' $now
+    export TLOGGER_SEGMENT="[$utc${vpn:+ $vpn} $_tlogger_state]"
+    _tlogger_prompt $TLOGGER_SEGMENT
+}
+
 # In a shell that script started for a recording, restore TZ and unset TLOGGER_HS* before
 # anything can fail, so that no failure leaves them to this shell and its children, and keep the
 # session folder that TLOGGER_HS named in _tlogger_hs, empty in every other shell, so that
 # autostart never runs in a shell that a recorder started. Then load the zsh modules and
-# lib/config.zsh, read the config, run the handshake there, work out this terminal's state and add
-# the zshexit hook. Runs once, when the plugin is sourced. Returns 0, or prints one warning and
-# returns 1 when a module or lib/config.zsh is missing.
+# lib/config.zsh, read the config, run the handshake there, work out this terminal's state, pick
+# ip, reset the caches of the hooks and add the zshexit, precmd and preexec hooks, in that order.
+# Runs once, when the plugin is sourced. Returns 0, or prints one warning and returns 1, with no
+# hook added, when a module or lib/config.zsh is missing.
 _tlogger_init() {
     emulate -L zsh
-    local REPLY hs=${TLOGGER_HS-}
+    local REPLY hs=${TLOGGER_HS-} ip
+    local -a ips
     # TLOGGER_HS_TZSET is 1 when TZ was exported outside the recording, and 0 when it was not.
     if [[ -n $hs ]]; then
         case ${TLOGGER_HS_TZSET-} in
@@ -601,11 +815,41 @@ _tlogger_init() {
         _tlogger_handshake $hs
     fi
     _tlogger_tty_state
-    # add-zsh-hook leaves hooks of others, such as Kali's precmd, as they are.
+    # ip comes from a fixed list of absolute paths, never from PATH; TLOGGER_IP, for the tests,
+    # replaces the list.
+    ips=(/usr/sbin/ip /sbin/ip /usr/bin/ip)
+    if [[ -n ${TLOGGER_IP-} ]]; then
+        ips=($TLOGGER_IP)
+    fi
+    typeset -g _tlogger_ip=
+    for ip in $ips; do
+        if [[ $ip == /* && -f $ip && -x $ip ]]; then
+            _tlogger_ip=$ip
+            break
+        fi
+    done
+    # The state of the hooks: the VPN cache, the session of the command whose E line is due, the
+    # text last put into PROMPT and the time of the last free-space check, which puts the first
+    # one 300 seconds after the start. When the plugin is sourced again, as by 'source ~/.zshrc',
+    # _tlogger_cmd and _tlogger_seg keep their values, so that the E line of that command still
+    # comes and the segment PROMPT may still hold is replaced, not doubled.
+    typeset -g _tlogger_vpn= _tlogger_vpn_key= _tlogger_cmd=${_tlogger_cmd-}
+    typeset -g _tlogger_seg=${_tlogger_seg-}
+    typeset -gi _tlogger_vpn_time=0 _tlogger_df_time=$EPOCHSECONDS
+    # add-zsh-hook leaves hooks of others as they are, and zsh runs a precmd function, such as
+    # Kali's, before the functions in precmd_functions.
     autoload -Uz add-zsh-hook
     if ! add-zsh-hook zshexit _tlogger_zshexit 2> /dev/null; then
         typeset -ga zshexit_functions
         zshexit_functions=(${zshexit_functions:#_tlogger_zshexit} _tlogger_zshexit)
+    fi
+    if ! add-zsh-hook precmd _tlogger_precmd 2> /dev/null; then
+        typeset -ga precmd_functions
+        precmd_functions=(${precmd_functions:#_tlogger_precmd} _tlogger_precmd)
+    fi
+    if ! add-zsh-hook preexec _tlogger_preexec 2> /dev/null; then
+        typeset -ga preexec_functions
+        preexec_functions=(${preexec_functions:#_tlogger_preexec} _tlogger_preexec)
     fi
     return 0
 }
@@ -708,9 +952,14 @@ function tlogger {
 
 # Loading never ends the rc early: an error inside _tlogger_init or the autostart is caught here
 # and reported in one warning, and the rest of the rc runs as usual. Only an autostarted recording
-# that ended normally ends this shell, from inside _tlogger_autostart.
+# that ended normally ends this shell, from inside _tlogger_autostart. history_timestamps=yes sets
+# extended_history here, outside every function, so that it outlasts the plugin's emulate -L; it
+# is the only option the plugin sets for the shell.
 {
     if _tlogger_init; then
+        if [[ ${_tlogger_cfg[history_timestamps]-} == yes ]]; then
+            setopt extended_history
+        fi
         _tlogger_autostart
     fi
 } always {

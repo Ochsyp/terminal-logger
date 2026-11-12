@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Stand-in for iproute2's ip in the tests of the plugin's VPN list, which name it in TLOGGER_IP.
+# It answers only 'ip -o addr show', with fixed lines in that format for lo, eth0, tun0, wg0, tap0
+# and wg1, some of them with addresses the plugin must refuse; any other call exits 2.
+
+set -u
+
+if [[ $# -ne 3 || $1 != -o || $2 != addr || $3 != show ]]; then
+    printf 'tlogger-test-ip: only -o addr show is supported, not: %s\n' "$*" >&2
+    exit 2
+fi
+# With TLOGGER_TEST_IP_LOG set, each run appends a line to that file, so that a test can count
+# the runs.
+if [[ -n ${TLOGGER_TEST_IP_LOG:-} ]]; then
+    printf 'run\n' >> "$TLOGGER_TEST_IP_LOG" || exit 1
+fi
+# One line per address, as ip -o prints them: a backslash stands for each line break of the long
+# form. The IPv6 addresses are IPv4-mapped ones from the documentation ranges.
+cat << 'EOF'
+1: lo    inet 127.0.0.1/8 scope host lo\       valid_lft forever preferred_lft forever
+2: eth0    inet 198.51.100.20/24 brd 198.51.100.255 scope global eth0\       valid_lft forever preferred_lft forever
+5: tun0    inet $(id)/24 scope global tun0\       valid_lft forever preferred_lft forever
+5: tun0    inet 192.0.2.10/24 scope global tun0\       valid_lft forever preferred_lft forever
+5: tun0    inet 192.0.2.11/24 scope global secondary tun0\       valid_lft forever preferred_lft forever
+5: tun0    inet6 ::ffff:192.0.2.12/128 scope global \       valid_lft forever preferred_lft forever
+6: wg0    inet 198.51.100.7/32 scope global wg0\       valid_lft forever preferred_lft forever
+7: tap0    inet6 ::ffff:198.51.100.8%tap0/128 scope link \       valid_lft forever preferred_lft forever
+7: tap0    inet6 ::ffff:198.51.100.9/128 scope global \       valid_lft forever preferred_lft forever
+8: wg1@NONE    inet 203.0.113.5/32 scope global wg1\       valid_lft forever preferred_lft forever
+EOF

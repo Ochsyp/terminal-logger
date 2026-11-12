@@ -3,11 +3,13 @@
 A recorder for zsh terminal sessions on Kali Linux, keystrokes included, as evidence for
 penetration tests.
 
-> **Status:** phase 3. In auto mode every new zsh terminal records itself as its shell starts; in
+> **Status:** phase 4. In auto mode every new zsh terminal records itself as its shell starts; in
 > manual mode `tlogger start` records a terminal on request. `tlogger stop` pauses the recording,
-> and `tlogger mode` switches between the modes. `tlogger install`, `uninstall` and `status` put
-> the plugin in place and take it out again. [CONTRIBUTING.md](CONTRIBUTING.md) describes the
-> workflow, and [CHANGELOG.md](CHANGELOG.md) lists what changed.
+> and `tlogger mode` switches between the modes. A recorded shell journals each command with its
+> start time in UTC, and the prompt shows whether the terminal is recorded. `tlogger install`,
+> `uninstall` and `status` put the plugin in place and take it out again.
+> [CONTRIBUTING.md](CONTRIBUTING.md) describes the workflow, and [CHANGELOG.md](CHANGELOG.md)
+> lists what changed.
 
 ## What it will do
 
@@ -18,8 +20,10 @@ The finished `tlogger` command:
   and records on request in manual mode, as [Recording](#recording) describes;
 - captures passwords typed at hidden prompts, and everything inside reverse shells, unstable
   shells and subshells, because `script` wraps the outer terminal;
-- keeps a command journal with the start time of each command in UTC;
-- shows a `REC` or `NOREC` marker in Kali's own prompt;
+- keeps a journal of the commands typed in a recorded terminal, with the start time of each in
+  UTC, and stamps each command in the recording, as
+  [Command journal and prompt segment](#command-journal-and-prompt-segment) describes;
+- shows `REC`, `NOREC` or `EXT` in a segment of Kali's own prompt;
 - replays a session with `scriptreplay`;
 - renders a session as a plain-text transcript offline with `python3-pyte`, with no tmux anywhere;
 - seals a finished session with SHA-256 sums, which expose a later change only while a copy of
@@ -109,7 +113,7 @@ In a zsh terminal with the plugin loaded:
 |---|---|
 | `tlogger start` | Records this terminal: runs util-linux `script` in the foreground with a new zsh inside it |
 | `tlogger stop` | Pauses: ends the recording and returns to the shell that started it |
-| `tlogger status` | Shows this terminal's state and session, the plugin version, the mode, the log folder and `record_input` |
+| `tlogger status` | Shows this terminal's state and session, the plugin version, the mode, the log folder, `record_input`, `prompt`, `stamp` and the VPN list (`none` without VPN interfaces, `off` with `stamp_vpn=off`) |
 | `tlogger mode` | Prints the mode in the config; `tlogger mode auto` or `tlogger mode manual` sets it |
 
 A recording prints one line before it starts, and the recorded shell confirms that it records:
@@ -192,10 +196,102 @@ with mode 0700. Its files have mode 0600:
 | `input.raw` | Every keystroke, passwords typed at prompts that do not show them included (`sudo`, `ssh`, `read -s`) |
 | `output.raw` | Everything the terminal showed |
 | `timing` | When each piece of input and output came, in the advanced format of util-linux `script`, which `scriptreplay` reads |
+| `commands.tsv` | The journal: each command typed in the recorded shell and its nested shells, with its start and end, exit status, folder and VPN list |
 | `recorder`, `started`, `exited`, `stop-requested` | Markers: which `script` process recorded, and how the recording began and ended |
 
 The log folder is `~/.local/state/tlogger/sessions` unless the config names another one. The
-header of `output.raw` and the timing file use UTC; the recorded shell keeps your own time zone.
+header of `output.raw`, the timing file, the journal, the stamps and the prompt segment use UTC;
+the recorded shell keeps your own time zone.
+
+### Command journal and prompt segment
+
+The journal, `commands.tsv`, holds one line per event, with its fields separated by tabs:
+
+| Line | Fields |
+|---|---|
+| `S` | `S`, the start in seconds since 1970, the same time in UTC (`2026-11-11T10:00:00Z`), the shell's pid, its working folder, the VPN list or `-`, and the command as typed |
+| `E` | `E`, the end in seconds since 1970, the shell's pid and the command's exit status |
+
+```text
+S	1794391200	2026-11-11T10:00:00Z	4242	/home/kali	tun0 192.0.2.10	'nmap -sV 192.0.2.20'
+E	1794391260	4242	0
+```
+
+The S line is written as a command starts and its E line before the next prompt, so a command
+that ends its shell, such as `exit`, has none. The folder and the command are quoted as zsh's
+`(q+)` flag quotes a word: plain text as it is, text with spaces or special characters in single
+quotes, and text with a tab, a newline or another control character in the `$'...'` form, so that
+every line holds one event. Nested shells write their own lines, with their own pid. A shell that
+is not recorded writes nothing.
+
+As each command starts, the recorded shell also prints a dim stamp, which `output.raw` keeps
+with the rest of the screen:
+
+```text
+-- 2026-11-11T10:00:00Z tun0 192.0.2.10 REC
+```
+
+With `NO_COLOR` set to a non-empty value, the stamp is plain; `stamp=off` leaves it out.
+
+Every shell where the plugin loaded shows a segment in its prompt, `[<UTC time> <VPN list>
+<state>]`, which it builds again before each prompt:
+
+```text
+┌──(kali㉿kali)-[~] [2026-11-11T10:00:00Z tun0 192.0.2.10 REC]
+└─$
+```
+
+- `REC`: tlogger records this terminal; `NOREC`: nothing records it; `EXT`: another `script`
+  process records it.
+- In a prompt of more than one line, such as Kali's two-line one, a space and the segment end the
+  first line; a one-line prompt gets the segment and a space in front. Kali's prompt and its
+  `precmd()` stay as they are, and so do the shell's options, unless `history_timestamps=yes`:
+  the plugin adds its hooks with `add-zsh-hook`, which run after Kali's `precmd()`, takes out the
+  segment it added last time and puts in the new one. It never touches `RPROMPT`, `PROMPT_CR` or
+  `PROMPT_SP`. Ctrl+P, which switches Kali's prompt between one and two lines, builds a prompt
+  without the segment; the segment is back from the next prompt on.
+- `prompt=off` leaves the prompt alone.
+- `TLOGGER_SEGMENT` holds the plain segment, exported, for prompt frameworks that build their own
+  prompt, such as powerlevel10k or starship: show it from a segment of the framework's own and
+  set `prompt=off`.
+- The plugin takes out only the exact text it added last time. A prompt that something saves
+  with a segment in it and puts back later, as a Python venv's `activate` and `deactivate` do in
+  a prompt other than Kali's colour one, keeps that old segment, with its old time and state,
+  beside the new one until the prompt is set again. `prompt=off` avoids it.
+- The segment goes before the first line break of `PROMPT`, even when that line break lies inside
+  `$(...)`, `${...}` or `%(...)`, where the segment would become part of that code. With such a
+  prompt, set `prompt=off` and show `TLOGGER_SEGMENT` instead.
+
+The VPN list names each interface under `/sys/class/net` whose name matches a `vpn_ifaces`
+pattern, `tun* wg* tap*` by default, in name order, with its IPv4 address, or its first IPv6
+address when it has none, as `ip -o addr show` reports it: `tun0 192.0.2.10 wg0 198.51.100.7`.
+Without `ip`, which the plugin takes from `/usr/sbin/ip`, `/sbin/ip` or `/usr/bin/ip` and never
+from PATH, it holds the names alone. Only names of letters, digits, `_`, `.`, `:` and `-`, at most
+15 characters long, count. The list is kept, and `ip` runs again when the VPN interfaces change
+or a minute has passed. While `ip` shows a VPN interface without an address, as `tun0` can be when
+`openvpn` gives it its address after the prompt has come back, it runs again 5 seconds later
+instead of a minute, and no sooner, so that the address shows soon without a run at every
+prompt. An address that changes while its interface stays, as on a reconnect that keeps the
+tunnel, shows from the next run of `ip` on: for up to a minute, the list can show the old
+address.
+
+> **Note:** the evidence holds the stamp lines and the VPN addresses. The stamps and the prompt
+> segments in `output.raw` and the S lines in `commands.tsv` name the addresses, and so does a
+> screenshot of the prompt. `stamp_vpn=off` keeps the addresses out of all of them, and
+> `tlogger status` then shows `vpn: off`; `stamp=off` keeps the stamp lines out.
+
+None of this slows the prompt noticeably: the hooks start no process for a command. `ip` runs only
+at the rate above, and `df` at most every five minutes, to check the free space of the session's
+file system: below `min_free_mb` the recorded shell warns in yellow, at most every five minutes,
+and records on:
+
+```text
+tlogger: warning: less than 200 MB free in ~/.local/state/tlogger/sessions; the recording goes on
+```
+
+With `history_timestamps=yes`, the plugin also turns on zsh's `extended_history`, in every shell
+where it loads, so that the history file keeps the start time and the duration of each command.
+It is the only option tlogger ever sets.
 
 ### Modes and settings
 
@@ -220,11 +316,16 @@ never runs it.
 | `min_free_mb` | The free space in MB that a recording needs in the log folder | `200` |
 | `record_ssh` | `yes`, or `no` so that an SSH login does not record itself in auto mode | `yes` |
 | `record_tmux` | `yes`, or `no` so that a tmux pane does not record itself in auto mode | `yes` |
+| `prompt` | `on`, or `off` for no segment in the prompt | `on` |
+| `stamp` | `on`, or `off` for no stamp as each recorded command starts | `on` |
+| `stamp_vpn` | `on`, or `off` to keep the VPN list out of the stamps, the segment, the journal and `tlogger status` | `on` |
+| `vpn_ifaces` | The patterns of the VPN interface names, separated by spaces or commas, each of letters, digits, `_`, `.`, `-` and the wildcard `*` | `tun* wg* tap*` |
+| `history_timestamps` | `yes` to turn on zsh's `extended_history`, which keeps the start time of each command in the history file | `no` |
 
-An exported `TLOGGER_<KEY>` variable, such as `TLOGGER_LOGDIR=/home/kali/evidence`, wins over the
-file in the shell that has it and in the shells that shell starts. An invalid value gets its
-default and one warning. The config also takes `recorder`, the path of the `script` binary, which
-exists for the tests.
+An exported `TLOGGER_<KEY>` variable, such as `TLOGGER_LOGDIR=/home/kali/evidence` or
+`TLOGGER_PROMPT=off`, wins over the file in the shell that has it and in the shells that shell
+starts. An invalid value gets its default and one warning. The config also takes `recorder`, the
+path of the `script` binary, which exists for the tests.
 
 These variables give a terminal profile a policy of its own: set them in the environment that the
 profile, or the launcher that opens it, gives the shell. `TLOGGER_MODE=manual` makes the

@@ -60,8 +60,9 @@ up to date with `git switch main` and `git pull --ff-only`.
 ## Privacy
 
 Test data is synthetic only. Never commit a real session log, `.zshrc`, VPN profile or
-screenshot. Examples use the user `kali@kali`, the home `/home/kali` and addresses from
-`192.0.2.0/24`.
+screenshot. Examples use the user `kali@kali`, the home `/home/kali` and addresses from the
+documentation ranges `192.0.2.0/24`, `198.51.100.0/24` and `203.0.113.0/24`, such as `tun0`
+`192.0.2.10` and `wg0` `198.51.100.7`.
 
 ## Testing
 
@@ -79,12 +80,13 @@ bats tests/
   and fail when `TLOGGER_CI=1` is set. Where zsh is missing, `tests/stub-bin/zsh` answers the
   questions `bin/tlogger` asks zsh; the stub refuses to run under `TLOGGER_CI=1`. On Git for
   Windows, `MSYS=winsymlinks:sys bats tests/` lets the symlink tests run.
-- `tests/config.bats` runs `lib/config.zsh` in `zsh -f`, and checks that it reads the same mode and
-  logdir as the `read_config` of `bin/tlogger`. `tests/guard.bats` checks how the plugin sees its
-  terminal over a fake process tree: `tests/helpers/fakeproc.zsh` writes made-up `stat` and
-  `cmdline` files and a boot id into the folder that `TLOGGER_PROC` names. `TLOGGER_PROC`, default
-  `/proc`, exists for the tests only, as do the config key `recorder` and `TLOGGER_RECORDER`, which
-  name the `script` binary.
+- `tests/config.bats` runs `lib/config.zsh` in `zsh -f`, checks every key, `prompt`, `stamp`,
+  `stamp_vpn`, `vpn_ifaces` and `history_timestamps` included, and checks that it reads the same
+  mode and logdir as the `read_config` of `bin/tlogger`. `tests/guard.bats` checks how the plugin
+  sees its terminal over a fake process tree: `tests/helpers/fakeproc.zsh` writes made-up `stat`
+  and `cmdline` files and a boot id into the folder that `TLOGGER_PROC` names. `TLOGGER_PROC`,
+  default `/proc`, exists for the tests only, as do the config key `recorder` and
+  `TLOGGER_RECORDER`, which name the `script` binary.
 - `tests/autostart.bats` checks the autostart guard, `_tlogger_autostart_why`, in a real zsh
   without a terminal: each reason it gives, in the order of its contract, the presets and config
   keys it reads, and that it prints nothing. It runs the guard from a script file with
@@ -108,6 +110,26 @@ bats tests/
   line editor off, and in one test the rc built from `/etc/skel/.zshrc`. These tests need Linux,
   zsh with the `zsh/zpty` and `zsh/zselect` modules, util-linux `script`, symlinks, POSIX modes
   and a non-root user.
+- `tests/journal.bats` checks the command journal, the UTC stamps, the VPN list and the prompt
+  segment in a real zsh without a terminal. `zsh -c` runs no hook by itself, so most tests call
+  `_tlogger_preexec` and `_tlogger_precmd` themselves; the test of `$?` after a `precmd()` that
+  ends with another status runs `zsh -f +o promptsp -i -s` on a file of commands instead, where
+  zsh runs the hooks before each prompt. The fake `/proc` of `fakeproc.zsh` sets the state, and a
+  test that forces REC by hand, with `_tlogger_state` and `TLOGGER_SESSION`, says so.
+  `fake_sysfs` in `tests/helpers.bash` builds a fake `/sys/class/net` for `TLOGGER_SYSFS`, and
+  `tests/stub-bin/tlogger-test-ip` stands in for `ip -o addr show` through `TLOGGER_IP`, with
+  addresses the plugin must refuse among its lines; it counts its runs in the file that
+  `TLOGGER_TEST_IP_LOG` names. `TLOGGER_SYSFS` (default `/sys`) and `TLOGGER_IP` exist for the
+  tests only. One test calls the `configure_prompt` of `/etc/skel/.zshrc` in both of its Ctrl+P
+  states. Its helper `run_hooks` runs zsh under `timeout`, so that a hook that hangs, as on a
+  FIFO in place of the journal, fails its test instead of holding up the suite.
+- `tests/e2e-prompt.bats` drives recorded and unrecorded terminals as `tests/e2e-manual.bats`
+  does and checks the S and E lines in `commands.tsv`, the dim stamp in `output.raw`, the
+  journal of a nested zsh, the REC, NOREC and EXT segments, `prompt=off`, `stamp=off`,
+  `NO_COLOR`, and the segment after Ctrl+P twice under the rc built from `/etc/skel/.zshrc`, with
+  the line editor on. It matches only whole notices, the segment and the line end after it, so
+  that the redraws of the line editor do not matter. CI has no iproute2, and its container may
+  have tunnel devices of its own, so each test names a fake sysfs.
 - `tests/e2e-auto.bats` does the same for auto mode, on `tests/fixtures/e2e-auto-zshrc`, which
   sets `E2E_RC_DONE` after the tlogger block, so that a test can tell which shell loaded the rest
   of the rc. In auto mode `script` passes on what was typed before it started, so a line typed
@@ -156,6 +178,30 @@ Check new code against these rules and the zsh documentation before it gets ther
 - With job control on, a foreground job that a signal kills can leave the terminal raw: no echo,
   and no CR before LF. A test driver does not depend on either afterwards.
 - `$(<file)` reads a file without a fork; every other command substitution forks.
+- `zsh -c` runs no `precmd` or `preexec` hook. `zsh -i FILE` runs `preexec` for each command of
+  the file but never `precmd`; `zsh -i -s` with commands on stdin runs both, and prints its
+  prompts on stderr. Without a terminal, as in CI, it also writes its `PROMPT_SP` mark there
+  before each prompt: a `%` (`#` for root), spaces and CRs. Start it with `+o promptsp`.
+
+### Hook rules
+
+The `precmd` and `preexec` hooks run on every prompt and every command, so they follow these
+rules:
+
+- No fork per command. Builtins and `$(<file)` only; `sysopen`, `print -u` and closing the file
+  descriptor append to the journal. Only `ip` and `df` fork, at a rate that bounds them: `ip` when
+  the VPN interfaces change or a minute has passed, or 5 seconds after it showed a VPN interface
+  without an address; `df` at most every five minutes.
+- `$?` first. `_tlogger_precmd` reads `$?` in its first statement: zsh hands each hook function
+  the status of the user's command, since `callhookfunc` (`Src/utils.c`) runs it through
+  `doshfunc` (`Src/exec.c`) with `noreturnval` set, which restores `lastval` after each function,
+  Kali's `precmd()` included. Any statement before it would put its own status there.
+- Silence. A missing session folder, a read-only file or a failed write prints nothing and stops
+  nothing; a hook never changes `$?`, the options or the traps of the user. The journal is opened
+  nonblocking, so that a FIFO in its place cannot hold up a prompt.
+- The prompt. A hook never replaces `PROMPT` wholesale: it takes out the exact text it added
+  last time and inserts the new one, with every `%` doubled. It never touches `RPROMPT`,
+  `PROMPT_CR` or `PROMPT_SP`, and Kali's `precmd()` stays as it is.
 
 ### Moving the Kali image
 

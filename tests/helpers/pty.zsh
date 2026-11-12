@@ -1,7 +1,7 @@
-# Drives an interactive shell in a pseudo-terminal through zsh's own zsh/zpty module, for
-# tests/e2e-manual.bats and tests/e2e-auto.bats: types lines and keys, waits for output or for the
-# end of a process against a hard deadline, and frames commands with markers that give their output
-# and exit status. A wait that fails ends the driver with a report of the output; no tmux involved.
+# Drives an interactive shell in a pseudo-terminal through zsh's own zsh/zpty module, for the
+# e2e-*.bats tests: types lines and keys, waits for output, a prompt segment or the end of a
+# process against a hard deadline, and frames commands with markers that give their output and
+# exit status. A wait that fails ends the driver with a report of the output; no tmux involved.
 
 if ! zmodload zsh/zpty zsh/zselect zsh/datetime 2> /dev/null; then
     print -ru2 -- 'pty: this zsh lacks the zsh/zpty, zsh/zselect or zsh/datetime module'
@@ -133,8 +133,13 @@ pty_close() {
     return 0
 }
 
-# Type LINE and Enter into the terminal.
+# Type LINE and Enter into the terminal; an empty LINE types Enter alone. zpty -w cannot do that
+# itself: it fails on an empty string, of which it writes nothing, and then sends no newline either.
 pty_send() {
+    if [[ -z $1 ]]; then
+        zpty -wn $PTY_NAME $'\n' || pty_fail 'cannot type Enter into the terminal'
+        return 0
+    fi
     zpty -w $PTY_NAME "$1" || pty_fail "cannot type into the terminal: $1"
 }
 
@@ -190,6 +195,16 @@ pty_out_has() {
 # Succeed when PTY_OUT is TEXT followed by one line end.
 pty_out_is() {
     [[ $PTY_OUT == "$1"$'\n' ]]
+}
+
+# Wait at most SECONDS for the prompt segment of STATE (REC, NOREC or EXT) without a VPN list,
+# '[<UTC> STATE]', followed by TAIL, such as ' e2e% ' or the line end of a two-line prompt. Ends
+# the driver unless a UTC time opens the segment. Consumes the output up to the end of TAIL and sets
+# PTY_BEFORE to the part before ' STATE]'.
+pty_segment() {
+    pty_expect " $1]$2" $3
+    [[ $PTY_BEFORE == *'['[0-9](#c4)-[0-9](#c2)-[0-9](#c2)T[0-9](#c2):[0-9](#c2):[0-9](#c2)Z ]] ||
+        pty_fail "no [<UTC> opens the $1 segment: ${(V)PTY_BEFORE[-80,-1]}"
 }
 
 # Wait for the banner of a recording and the REC line of the recorded shell; set PTY_BANNER to

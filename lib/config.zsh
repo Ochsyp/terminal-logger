@@ -3,20 +3,21 @@
 # never runs or expands a value. bin/tlogger's read_config follows the same line rules.
 
 # Fill the global associative array _tlogger_cfg with mode, logdir, record_input, min_free_mb,
-# recorder, record_ssh and record_tmux, and with config_dir, the folder that holds the config and
-# the disable file. Lines are key=value, blank or '#' comments; whitespace around a value is
-# trimmed, a repeated key keeps its first value and an unknown key is ignored. An exported
-# TLOGGER_<KEY in upper case> that is not empty wins over the file. An invalid value, or a line
-# that is not key=value, gets one warning on stderr, and the key keeps its default. A file that is
-# a symlink, not a regular file, another user's or unreadable is not read. recorder= and
-# TLOGGER_RECORDER exist for the tests. Always returns 0, and runs no command.
+# recorder, record_ssh, record_tmux, prompt, stamp, stamp_vpn, vpn_ifaces and history_timestamps,
+# and with config_dir, the folder that holds the config and the disable file. Lines are key=value,
+# blank or '#' comments; whitespace around a value is trimmed, a repeated key keeps its first
+# value and an unknown key is ignored. An exported TLOGGER_<KEY in upper case> that is not empty
+# wins over the file. An invalid value, or a line that is not key=value, gets one warning on
+# stderr, and the key keeps its default. vpn_ifaces is kept as its patterns joined by single
+# spaces. A file that is a symlink, not a regular file, another user's or unreadable is not read.
+# recorder= and TLOGGER_RECORDER exist for the tests. Always returns 0, and runs no command.
 _tlogger_load_config() {
     emulate -L zsh
     setopt extendedglob
     local home=${${HOME-}%%/##} base cfg_dir state_dir file shown_file content line key value why
     local shown_default name
     local -i n
-    local -a lines keys
+    local -a lines keys pats bad
     local -A def raw origin
 
     # XDG base folders: unset, empty or relative values fall back to the defaults under HOME.
@@ -37,9 +38,11 @@ _tlogger_load_config() {
     done
     state_dir=$base/tlogger
     # The keys in the order of their checks, and so of their warnings.
-    keys=(mode logdir record_input min_free_mb recorder record_ssh record_tmux)
+    keys=(mode logdir record_input min_free_mb recorder record_ssh record_tmux prompt stamp
+        stamp_vpn vpn_ifaces history_timestamps)
     def=(mode manual logdir "$state_dir/sessions" record_input yes min_free_mb 200
-        recorder /usr/bin/script record_ssh yes record_tmux yes)
+        recorder /usr/bin/script record_ssh yes record_tmux yes prompt on stamp on stamp_vpn on
+        vpn_ifaces 'tun* wg* tap*' history_timestamps no)
 
     file=$cfg_dir/config
     shown_file=$file
@@ -105,9 +108,26 @@ _tlogger_load_config() {
                     why='must be auto or manual'
                 fi
                 ;;
-            record_input | record_ssh | record_tmux)
+            record_input | record_ssh | record_tmux | history_timestamps)
                 if [[ $value != (yes|no) ]]; then
                     why='must be yes or no'
+                fi
+                ;;
+            prompt | stamp | stamp_vpn)
+                if [[ $value != (on|off) ]]; then
+                    why='must be on or off'
+                fi
+                ;;
+            vpn_ifaces)
+                # Spaces, tabs and commas separate the patterns. A pattern holds only letters,
+                # digits, _ . - and the wildcard *, so that the plugin can match interface names
+                # with it as it is, and nothing in it can run.
+                pats=(${(s:,:)${value//[[:space:]]/,}})
+                bad=(${pats:#[A-Za-z0-9_.*-]##})
+                if (( $#pats == 0 || $#bad )); then
+                    why='must list interface name patterns made of letters, digits, _ . - and *'
+                else
+                    value=${(j: :)pats}
                 fi
                 ;;
             min_free_mb)

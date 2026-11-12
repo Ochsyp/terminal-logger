@@ -43,6 +43,18 @@ load_policies() {
         "$REPO_ROOT/lib/config.zsh" < /dev/null
 }
 
+# Load the config as load_config does, but print prompt, stamp, stamp_vpn, vpn_ifaces and
+# history_timestamps, in that order, separated by |.
+load_display() {
+    # zsh expands these, not bash.
+    # shellcheck disable=SC2016
+    run --separate-stderr zsh -f -c '
+        source "$1" || exit 1
+        _tlogger_load_config || exit 1
+        print -r -- "$_tlogger_cfg[prompt]|$_tlogger_cfg[stamp]|$_tlogger_cfg[stamp_vpn]|$_tlogger_cfg[vpn_ifaces]|$_tlogger_cfg[history_timestamps]"' \
+        zsh "$REPO_ROOT/lib/config.zsh" < /dev/null
+}
+
 # Fail unless the last load_config exited 0 and printed MODE, LOGDIR, RECORD_INPUT, MIN_FREE_MB
 # and RECORDER, with the default config folder.
 assert_config() {
@@ -186,6 +198,53 @@ bash_mode_logdir() {
     [ "${stderr_lines[1]}" = 'tlogger: warning: TLOGGER_RECORD_TMUX: record_tmux must be yes or no; using yes' ]
 }
 
+@test "prompt, stamp, stamp_vpn, vpn_ifaces and history_timestamps take the config and the presets, trimmed" {
+    load_display
+    [ "$status" -eq 0 ]
+    [ "$output" = 'on|on|on|tun* wg* tap*|no' ]
+    [ -z "$stderr" ]
+    # Spaces, tabs and commas separate the patterns, which are kept joined by single spaces.
+    printf '%s\n' prompt=off 'stamp= off ' $'stamp_vpn=off\t' 'vpn_ifaces= tun*, wg0 ,ppp* ' \
+        history_timestamps=yes > "$CONFIG"
+    load_display
+    [ "$status" -eq 0 ]
+    [ "$output" = 'off|off|off|tun* wg0 ppp*|yes' ]
+    [ -z "$stderr" ]
+    TLOGGER_PROMPT=on TLOGGER_STAMP=' on ' TLOGGER_STAMP_VPN=on TLOGGER_VPN_IFACES=$'wg*,\ttun0' \
+        TLOGGER_HISTORY_TIMESTAMPS=no load_display
+    [ "$status" -eq 0 ]
+    [ "$output" = 'on|on|on|wg* tun0|no' ]
+    [ -z "$stderr" ]
+}
+
+@test "an invalid prompt, stamp, stamp_vpn, vpn_ifaces or history_timestamps gets its default and one warning" {
+    local value
+    printf '%s\n' prompt=yes stamp=1 stamp_vpn=no 'vpn_ifaces=tun0;id' history_timestamps=on \
+        > "$CONFIG"
+    load_display
+    [ "$status" -eq 0 ]
+    [ "$output" = 'on|on|on|tun* wg* tap*|no' ]
+    [ "${#stderr_lines[@]}" -eq 5 ]
+    [ "${stderr_lines[0]}" = 'tlogger: warning: ~/.config/tlogger/config line 1: prompt must be on or off; using on' ]
+    [ "${stderr_lines[1]}" = 'tlogger: warning: ~/.config/tlogger/config line 2: stamp must be on or off; using on' ]
+    [ "${stderr_lines[2]}" = 'tlogger: warning: ~/.config/tlogger/config line 3: stamp_vpn must be on or off; using on' ]
+    [ "${stderr_lines[3]}" = 'tlogger: warning: ~/.config/tlogger/config line 4: vpn_ifaces must list interface name patterns made of letters, digits, _ . - and *; using tun* wg* tap*' ]
+    [ "${stderr_lines[4]}" = 'tlogger: warning: ~/.config/tlogger/config line 5: history_timestamps must be yes or no; using no' ]
+    # No pattern at all, or a character that could run or glob, makes the list invalid; nothing
+    # in it runs.
+    rm "$CONFIG"
+    mkdir -p "$BATS_TEST_TMPDIR/work"
+    cd "$BATS_TEST_TMPDIR/work"
+    # shellcheck disable=SC2016 # Values that must stay text.
+    for value in ' , ' 'tun[0-9]' 'wg?' 'tun0|wg0' 'tun0,$(touch pwned-vpn)' '`touch pwned-tick`'; do
+        TLOGGER_VPN_IFACES=$value load_display
+        [ "$status" -eq 0 ]
+        [ "$output" = 'on|on|on|tun* wg* tap*|no' ]
+        [ "$stderr" = 'tlogger: warning: TLOGGER_VPN_IFACES: vpn_ifaces must list interface name patterns made of letters, digits, _ . - and *; using tun* wg* tap*' ]
+    done
+    [ -z "$(find "$BATS_TEST_TMPDIR" -name 'pwned*')" ]
+}
+
 @test "min_free_mb takes 1 to 12 digits only, and logdir no control character" {
     local value
     for value in -5 1e3 0x10 ' ' 1234567890123 '1 000'; do
@@ -269,7 +328,7 @@ bash_mode_logdir() {
         [plain]=$'mode=auto\nlogdir=/home/kali/evidence\n'
         [spaced]=$'# a comment\n\n   # an indented comment\n\t \nmode= manual \t\nlogdir=/home/kali/ev//  \n'
         [crlf]=$'mode=auto\r\nlogdir=/home/kali/crlf\r\n'
-        [plugin-keys]=$'record_input=no\nmin_free_mb=500\nrecorder=/usr/bin/script\nrecord_ssh=no\nrecord_tmux=no\nengagement=demo\nmode=auto\n'
+        [plugin-keys]=$'record_input=no\nmin_free_mb=500\nrecorder=/usr/bin/script\nrecord_ssh=no\nrecord_tmux=no\nprompt=off\nstamp=off\nstamp_vpn=off\nvpn_ifaces=tun*, wg0\nhistory_timestamps=yes\nengagement=demo\nmode=auto\n'
         [root]=$'logdir=/\n'
         [no-final-newline]='mode=auto'
         [empty]=''
