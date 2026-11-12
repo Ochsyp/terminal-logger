@@ -37,7 +37,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends ca-certificates curl xz-utils git zsh bats \
-            bsdutils util-linux coreutils diffutils gawk mawk
+            bsdutils util-linux coreutils diffutils gawk mawk python3 python3-pyte
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -59,6 +59,9 @@ jobs:
           bats --version
           shellcheck --version | sed -n 2p
           script --version
+          scriptreplay --version
+          python3 --version
+          dpkg-query -W python3-pyte
           git --version
           diff --version | sed -n 1p
           gawk --version | sed -n 1p
