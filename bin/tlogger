@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # tlogger: install, remove and report the zsh plugin that records terminal sessions as evidence
-# for penetration tests, and set its mode. It manages a 4-line block at the top of the zsh rc,
-# the plugin files, the config and the state folders; the plugin does the recording, on tlogger
-# start or, in auto mode, in every new terminal.
+# for penetration tests, set its mode, and render, show and replay the sessions. It manages a
+# 4-line block at the top of the zsh rc, the plugin files, the config and the state folders; the
+# plugin does the recording, on tlogger start or, in auto mode, in every new terminal.
 
 # Exit status: 0 done or nothing to change; 1 error or refusal, and for status an install in part;
-# 2 usage error, or --mode or --yes missing where no terminal can answer; 3 not installed or
-# nothing to remove. Executing the file runs main; sourcing it only sets the globals and defines
-# the functions, for tests.
-# TLOGGER_SKEL, the file a missing rc is seeded from, exists for tests; production never sets it.
+# 2 usage error, or --mode or --yes missing where no terminal can answer; 3 not installed, nothing
+# to remove or no session to view. Executing the file runs main; sourcing it only sets the
+# globals and defines the functions, for tests.
+# TLOGGER_SKEL, the file a missing rc is seeded from, exists for tests, as do TLOGGER_PYTHON and
+# TLOGGER_SCRIPTREPLAY, which name the python3 and scriptreplay that render, show and replay run;
+# production never sets them.
 
 # =======================================================
 #                    GLOBAL SETTINGS
@@ -20,8 +22,10 @@ SRC_ROOT=$(readlink -f -- "${BASH_SOURCE[0]}" 2> /dev/null) || SRC_ROOT=
 SRC_ROOT=${SRC_ROOT%/*}
 SRC_ROOT=${SRC_ROOT%/*}
 
-# The files of a release, relative to the source tree. bin/tlogger is the only executable one.
-RELEASE_FILES=(bin/tlogger lib/config.zsh lib/tlogger.zsh libexec/rcblock.awk VERSION)
+# The files of a release, relative to the source tree. bin/tlogger is the only executable one;
+# python3 -I runs libexec/tlogger_view.py.
+RELEASE_FILES=(bin/tlogger lib/config.zsh lib/tlogger.zsh libexec/rcblock.awk
+    libexec/tlogger_view.py VERSION)
 
 # The marker lines around the block; libexec/rcblock.awk holds the same two lines.
 START_MARK='# >>> tlogger >>>'
@@ -38,6 +42,14 @@ MANIFEST_RE='^[0-9a-f]{64} [ *]([A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z
 # The name backup_rc gives an rc backup: the UTC time, then the 6 characters mktemp picks. Only
 # names of this form are pruned, so a file of the user's own in rc-backups stays.
 BACKUP_NAME_RE='^zshrc\.[0-9]{8}T[0-9]{6}Z\.[A-Za-z0-9]{6}$'
+
+# The name of a session folder, as the plugin's _tlogger_preflight gives it: the UTC time the
+# recording started, then the 6 characters mktemp picks. The names sort in time order.
+SESSION_NAME_RE='^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9]{6}$'
+
+# A positive decimal number as replay's --speed and --maxdelay take it, such as 2, 0.5 or .25;
+# positive_decimal also wants a digit other than 0.
+DECIMAL_RE='^([0-9]+(\.[0-9]+)?|\.[0-9]+)$'
 
 # The zsh code that prints the paths tlogger needs, one 'TLOGGER_Q:' line each. It runs without
 # -f, so the user's .zshenv applies, and the prefix sets its lines apart from anything .zshenv
@@ -124,6 +136,20 @@ CONFIG_ERROR=
 RECORDER=
 SMOKE_DIR=
 
+# The session that render, show and replay work on, set by resolve_session: its folder, an
+# absolute path, and its id, the folder's name.
+SESSION_DIR=
+SESSION_ID=
+
+# The interpreter that runs libexec/tlogger_view.py, set by require_python, and the scriptreplay
+# that replay runs, set by require_scriptreplay.
+PYTHON=
+SCRIPTREPLAY=
+
+# The terminal settings, as stty -g prints them, that replay changes while scriptreplay runs;
+# restore_tty puts them back, and so does cleanup.
+TTY_SAVED=
+
 # Temp state that cleanup removes: the private work folder, which a dry run never creates, single
 # temp files and links, a backup being written, and a release folder being built or replaced,
 # removed through its MANIFEST. ASIDE_RELEASE is an old release that place_release has moved
@@ -202,12 +228,26 @@ Commands:
   mode       Print the mode in the config, auto or manual. tlogger mode auto|manual sets it;
              auto first runs a smoke test of the recorder.
   status     Show whether tlogger is installed and where its files are.
+  render     Write the plain-text transcript of a session to transcript.txt in its folder.
+  show       Page the transcript of a session, rendered first when it is missing or older
+             than the logs.
+  replay     Replay a session in this terminal at its recorded pace, through a filter that
+             drops the escape sequences a target could abuse.
   version    Print the version.
   help       Show this help; -h and --help do the same.
 
 In a zsh terminal with the plugin loaded, tlogger start records that terminal, tlogger stop
 pauses the recording and tlogger status shows whether the terminal is recorded. In auto mode
 every new terminal records itself as its shell starts.
+
+render, show and replay take one SESSION: a session id, which names a folder in the log folder;
+a path to a session folder, which holds a /; or nothing, for the newest session. output.raw
+with timing is the evidence; the transcript is derived from it and holds no keystrokes typed at
+hidden prompts. render and show need python3 and python3-pyte, replay python3 and scriptreplay.
+  render --stdout      Print the transcript instead of writing transcript.txt.
+  replay --speed N     Replay N times as fast; N is a positive number, such as 2 or 0.5.
+  replay --maxdelay S  Wait at most S seconds between two outputs.
+During a replay, Space pauses, Up and Down change the speed and Ctrl+C stops.
 
 Install options:
   --mode auto|manual  Record every new terminal (auto) or only on request, with tlogger start
@@ -223,7 +263,8 @@ Uninstall options:
   --purge-config      Remove the config as well.
 
 Exit status: 0 done or nothing to change; 1 error or refusal (status: installed only in part);
-2 usage error, or --mode or --yes missing outside a terminal; 3 not installed or nothing to remove.
+2 usage error, or --mode or --yes missing outside a terminal; 3 not installed, nothing to remove
+or no session to view.
 EOF
 }
 
@@ -236,10 +277,11 @@ usage_error() {
 
 # Remove what this run made and did not keep: the work folder, the smoke test's folder, temp
 # files and links, a partial backup and a release folder being built or replaced, after moving a
-# release that was set aside back into place. Runs from the EXIT trap, ignores every failure and
-# never changes the exit status.
+# release that was set aside back into place; and put back the terminal settings that replay
+# changed. Runs from the EXIT trap, ignores every failure and never changes the exit status.
 cleanup() {
     local p
+    restore_tty
     remove_smoke_dir
     for p in "${TEMP_PATHS[@]}"; do
         rm -f -- "$p" 2> /dev/null || true
@@ -1969,6 +2011,401 @@ cmd_version() {
 }
 
 # =======================================================
+#                  RENDER, SHOW AND REPLAY
+# =======================================================
+
+# Exit 1 unless DIR is a session folder that tlogger may read: a real folder of this user's, not
+# a symlink, holding output.raw and timing as readable regular files of this user's, neither a
+# symlink. Messages name DIR in the ~ form.
+check_session_dir() {
+    local dir=$1 f
+    if [[ -L $dir ]]; then
+        die 1 "$(shown "$dir") is a symlink, which tlogger does not follow"
+    fi
+    if [[ ! -e $dir ]]; then
+        die 1 "$(shown "$dir") does not exist"
+    fi
+    if [[ ! -d $dir ]]; then
+        die 1 "$(shown "$dir") is not a folder"
+    fi
+    if [[ ! -O $dir ]]; then
+        die 1 "$(shown "$dir") belongs to another user"
+    fi
+    for f in output.raw timing; do
+        if [[ -L $dir/$f ]]; then
+            die 1 "$(shown "$dir/$f") is a symlink, which tlogger does not follow"
+        fi
+        if [[ ! -e $dir/$f ]]; then
+            die 1 "$(shown "$dir") holds no $f, so it is not a session folder"
+        fi
+        if [[ ! -f $dir/$f ]]; then
+            die 1 "$(shown "$dir/$f") is not a regular file"
+        fi
+        if [[ ! -O $dir/$f ]]; then
+            die 1 "$(shown "$dir/$f") belongs to another user"
+        fi
+        if [[ ! -r $dir/$f ]]; then
+            die 1 "cannot read $(shown "$dir/$f")"
+        fi
+    done
+}
+
+# Set SESSION_DIR and SESSION_ID from the SESSION argument of render, show and replay. An
+# argument with a / is a path to a session folder anywhere, made absolute without resolving
+# symlinks, whose last part must be neither '.' nor '..'. Any other argument must be a session
+# id, a folder in the log folder; none picks the newest session there by name, which starts
+# with the UTC time, among the real folders named like sessions. The log folder is the config's
+# logdir, else the default. Exits 3 when the log folder is missing or holds no session, 1 for an
+# argument that is no id, an id without a folder, an unsafe log folder or config, or a folder
+# that check_session_dir refuses.
+resolve_session() {
+    local arg=$1 logdir dir entry name best=''
+    if [[ $arg == */* ]]; then
+        dir=$(strip_slashes "$arg")
+        if [[ $dir != /* ]]; then
+            dir=${PWD%/}/$dir
+        fi
+        case ${dir##*/} in
+            . | ..) die 1 "name the session folder itself in the path, not . or .." ;;
+        esac
+        check_session_dir "$dir"
+        SESSION_DIR=$dir SESSION_ID=${dir##*/}
+        return 0
+    fi
+    if [[ -n $arg && ! $arg =~ $SESSION_NAME_RE ]]; then
+        die 1 "'$arg' is not a session id; name a session folder elsewhere by a path with a /"
+    fi
+    resolve_paths
+    read_config
+    if [[ -n $CONFIG_ERROR ]]; then
+        die 1 "the config $(shown "$CONFIG_FILE") $CONFIG_ERROR; fix it by hand"
+    fi
+    logdir=${CONFIG_LOGDIR:-$SESSIONS_DIR}
+    if [[ -L $logdir ]]; then
+        die 1 "the log folder $(shown "$logdir") is a symlink, which tlogger does not follow"
+    fi
+    if [[ ! -e $logdir ]]; then
+        die 3 "no sessions: the log folder $(shown "$logdir") does not exist"
+    fi
+    if [[ ! -d $logdir ]]; then
+        die 1 "the log folder $(shown "$logdir") is not a folder"
+    fi
+    if [[ ! -O $logdir ]]; then
+        die 1 "the log folder $(shown "$logdir") belongs to another user"
+    fi
+    if [[ -n $arg ]]; then
+        dir=$logdir/$arg
+        if [[ ! -e $dir && ! -L $dir ]]; then
+            die 1 "there is no session $arg in $(shown "$logdir")"
+        fi
+    else
+        # Byte order, so that the locale cannot reorder the names.
+        local LC_ALL=C
+        for entry in "$logdir"/*; do
+            name=${entry##*/}
+            if [[ $name =~ $SESSION_NAME_RE && -d $entry && ! -L $entry && $name > $best ]]; then
+                best=$name
+            fi
+        done
+        if [[ -z $best ]]; then
+            die 3 "no sessions in $(shown "$logdir")"
+        fi
+        dir=$logdir/$best
+    fi
+    check_session_dir "$dir"
+    SESSION_DIR=$dir SESSION_ID=${dir##*/}
+}
+
+# Set PYTHON to the interpreter that runs libexec/tlogger_view.py, /usr/bin/python3, run as
+# '-I' so that neither the environment, the user site nor the working folder reaches it. Exit 1
+# with 'CMD cannot read ...' when that file is missing or unreadable, with 'CMD needs python3'
+# unless the interpreter runs the file's probe, and, when WANT is pyte, with
+# 'CMD needs python3-pyte (...)' when pyte does not import. TLOGGER_PYTHON, exported and not
+# empty, names another interpreter; it exists for the tests, and production never sets it.
+require_python() {
+    local cmd=$1 want=${2-} out
+    local view=$SRC_ROOT/libexec/tlogger_view.py
+    local -a probe=(probe)
+    if [[ ! -f $view || ! -r $view ]]; then
+        die 1 "$cmd cannot read $(shown "$view"); install tlogger again"
+    fi
+    PYTHON=/usr/bin/python3
+    if [[ -n ${TLOGGER_PYTHON-} && ${TLOGGER_PYTHON@a} == *x* ]]; then
+        PYTHON=$TLOGGER_PYTHON
+    fi
+    if [[ $want == pyte ]]; then
+        probe+=(--pyte)
+    fi
+    if [[ ! -f $PYTHON || ! -x $PYTHON ]]; then
+        die 1 "$cmd needs python3"
+    fi
+    out=$("$PYTHON" -I "$SRC_ROOT/libexec/tlogger_view.py" "${probe[@]}" < /dev/null 2> /dev/null) ||
+        out=
+    case $out in
+        ok) ;;
+        no-pyte) die 1 "$cmd needs python3-pyte (apt install python3-pyte)" ;;
+        *) die 1 "$cmd needs python3" ;;
+    esac
+}
+
+# Set SCRIPTREPLAY to util-linux scriptreplay, /usr/bin/scriptreplay, and exit 1 when it is
+# missing or not executable. TLOGGER_SCRIPTREPLAY, exported and not empty, names another one; it
+# exists for the tests, and production never sets it.
+require_scriptreplay() {
+    SCRIPTREPLAY=/usr/bin/scriptreplay
+    if [[ -n ${TLOGGER_SCRIPTREPLAY-} && ${TLOGGER_SCRIPTREPLAY@a} == *x* ]]; then
+        SCRIPTREPLAY=$TLOGGER_SCRIPTREPLAY
+    fi
+    if [[ ! -f $SCRIPTREPLAY || ! -x $SCRIPTREPLAY ]]; then
+        die 1 "replay needs scriptreplay, from util-linux"
+    fi
+}
+
+# Render the transcript of SESSION_DIR with libexec/tlogger_view.py: into transcript.txt there,
+# or with TO set to stdout, onto stdout. Needs PYTHON and VERSION_STR. The Python code prints its
+# own messages; when it fails, this exits with its status.
+run_render() {
+    local to=${1-} status=0
+    local -a opts=(--version "$VERSION_STR")
+    if [[ $to == stdout ]]; then
+        opts+=(--stdout)
+    fi
+    "$PYTHON" -I "$SRC_ROOT/libexec/tlogger_view.py" render "${opts[@]}" -- "$SESSION_DIR" \
+        < /dev/null || status=$?
+    if (( status )); then
+        exit "$status"
+    fi
+}
+
+# Succeed when SESSION_DIR/transcript.txt is a readable regular file of this user's, not a
+# symlink, newer than output.raw and timing, with the header line that render writes for this
+# session and no control byte but LF and HT, so that show can page it as it is. The file sits in
+# a folder that a crafted session may have filled, so show prints it only when it looks like
+# render's own: no NUL or other C0 byte, no DEL and no UTF-8 C1 control (C2 80 to C2 9F).
+transcript_fresh() {
+    local t=$SESSION_DIR/transcript.txt
+    local LC_ALL=C first chunk carry=''
+    [[ -f $t && ! -L $t && -O $t && -r $t && $t -nt $SESSION_DIR/output.raw &&
+        $t -nt $SESSION_DIR/timing ]] || return 1
+    IFS= read -r -n 512 first < "$t" || [[ -n $first ]] || return 1
+    [[ $first == "# DERIVED transcript of session $SESSION_ID; the evidence is output.raw with timing."* ]] ||
+        return 1
+    # tr deletes the bytes allowed; any byte left is a control byte.
+    (( $(LC_ALL=C tr -d '\11\12\40-\176\200-\377' < "$t" | head -c 1 | wc -c) == 0 )) || return 1
+    # A chunk is checked with the last byte of the one before, so that no pair is split.
+    while IFS= read -r -N 65536 chunk || [[ -n $chunk ]]; do
+        if [[ $carry$chunk == *$'\xc2'[$'\x80'-$'\x9f']* ]]; then
+            return 1
+        fi
+        carry=${chunk: -1}
+    done < "$t"
+}
+
+# Succeed when VALUE is a positive decimal number of at most 20 characters: DECIMAL_RE, with a
+# digit other than 0 in it.
+positive_decimal() {
+    [[ ${#1} -le 20 && $1 =~ $DECIMAL_RE && $1 == *[1-9]* ]]
+}
+
+# Put back the terminal settings that replay changed, if any. Ignores every failure, so that
+# cleanup can call it at any time.
+restore_tty() {
+    if [[ -n $TTY_SAVED ]]; then
+        stty "$TTY_SAVED" < /dev/tty > /dev/null 2>&1 || true
+        TTY_SAVED=
+    fi
+}
+
+# Run SCRIPTREPLAY with the arguments given, its stdout piped through the filter of
+# tlogger_view.py, and exit unless both succeed: with the filter's status, or 1 after
+# scriptreplay's messages, home paths shown as ~. scriptreplay sets raw mode only on a terminal
+# stdout, which a pipe is not, so on a terminal its keys come from a new open of /dev/tty in
+# non-canonical mode without echo, and the O_NONBLOCK it sets on its stdin, which it puts back
+# only on a terminal stdout, stays off the shell's own terminal file. Without a stdin terminal
+# and a /dev/tty that opens, it reads /dev/null, never a stdin it may share with the calling
+# shell. Needs WORK for scriptreplay's messages; restore_tty undoes the stty.
+replay_through_filter() {
+    local -i tty=0 replay filter
+    local -a codes
+    local line home
+    if [[ -t 0 ]] && { : < /dev/tty; } 2> /dev/null; then
+        exec {tty}< /dev/tty
+        TTY_SAVED=$(stty -g <&"$tty" 2> /dev/null) || TTY_SAVED=
+        if [[ -n $TTY_SAVED ]]; then
+            stty -icanon -echo min 1 time 0 <&"$tty" 2> /dev/null || true
+        fi
+        msg "replaying session $SESSION_ID: Space pauses, Up and Down change the speed, Ctrl+C stops"
+    else
+        exec {tty}< /dev/null
+    fi
+    if "$SCRIPTREPLAY" "$@" <&"$tty" 2> "$WORK/scriptreplay.err" |
+        "$PYTHON" -I "$SRC_ROOT/libexec/tlogger_view.py" filter; then
+        codes=("${PIPESTATUS[@]}")
+    else
+        codes=("${PIPESTATUS[@]}")
+    fi
+    restore_tty
+    if (( tty )); then
+        exec {tty}<&-
+    fi
+    replay=${codes[0]:-1} filter=${codes[1]:-1}
+    if (( filter )); then
+        exit "$filter"
+    fi
+    if (( replay )); then
+        home=$(strip_slashes "${HOME-}")
+        while IFS= read -r line; do
+            if [[ -n $home && $home != / ]]; then
+                line=${line//"$home/"/\~/}
+            fi
+            msg "scriptreplay: $line"
+        done < "$WORK/scriptreplay.err"
+        die 1 "the replay of session $SESSION_ID failed: scriptreplay exited with status $replay"
+    fi
+}
+
+# tlogger render [--stdout] [SESSION]: write the plain-text transcript of a session, as
+# resolve_session picks it, to transcript.txt in its folder, mode 0600, through
+# transcript.txt.part and a rename, and name it on stderr; --stdout prints it instead and writes
+# nothing. Exits 0 when done, 1 for a bad session, a missing python3 or pyte or a failed render,
+# 2 for a usage error and 3 when there is no session.
+cmd_render() {
+    local to='' session=''
+    local -i count=0
+    while (( $# )); do
+        case $1 in
+            --stdout) to=stdout ;;
+            -h | --help) usage; exit 0 ;;
+            --)
+                shift
+                count+=$#
+                if (( $# )); then
+                    session=$1
+                fi
+                break
+                ;;
+            -?*) usage_error "unknown option for render: $1" ;;
+            *) session=$1; count+=1 ;;
+        esac
+        shift
+    done
+    (( count <= 1 )) || usage_error "render takes one session at most"
+    refuse_foreign_root
+    read_version
+    resolve_session "$session"
+    require_python render pyte
+    run_render "$to"
+    if [[ $to != stdout ]]; then
+        msg "transcript $(shown "$SESSION_DIR/transcript.txt")"
+    fi
+}
+
+# tlogger show [SESSION]: page the transcript of a session with less, without -R and in its
+# secure mode, with LESS, LESSOPEN and LESSCLOSE unset; when stdout is not a terminal, or less
+# is missing, print it. transcript.txt is rendered first unless transcript_fresh finds it newer
+# than the logs. Exits as render does, or with less's status.
+cmd_show() {
+    local session=''
+    local -i count=0
+    while (( $# )); do
+        case $1 in
+            -h | --help) usage; exit 0 ;;
+            --)
+                shift
+                count+=$#
+                if (( $# )); then
+                    session=$1
+                fi
+                break
+                ;;
+            -?*) usage_error "unknown option for show: $1" ;;
+            *) session=$1; count+=1 ;;
+        esac
+        shift
+    done
+    (( count <= 1 )) || usage_error "show takes one session at most"
+    refuse_foreign_root
+    resolve_session "$session"
+    if ! transcript_fresh; then
+        read_version
+        require_python show pyte
+        run_render
+    fi
+    if [[ -t 1 ]] && command -v less > /dev/null 2>&1; then
+        env -u LESS -u LESSOPEN -u LESSCLOSE LESSSECURE=1 less -- "$SESSION_DIR/transcript.txt"
+    else
+        cat -- "$SESSION_DIR/transcript.txt"
+    fi
+}
+
+# tlogger replay [--speed N] [--maxdelay S] [SESSION]: replay a session's output.raw at the pace
+# of its timing with util-linux scriptreplay, its output filtered as replay_through_filter says.
+# scriptreplay reads a copy of the timing in WORK that tlogger_view.py's replay-timing cleans:
+# without the H lines, whose comma under a locale such as de_DE stops scriptreplay 2.42, and
+# without malformed lines. N becomes --divisor and S --maxdelay; both must be positive decimal
+# numbers. input.raw is never replayed, and scriptlive is never run. Exits 0 when done, 1 for a
+# bad session, a missing scriptreplay or python3 or a failed replay, 2 for a usage error, 3 when
+# there is no session, and 128 plus the signal number after SIGHUP, SIGINT, SIGQUIT or SIGTERM;
+# bash ignores SIGQUIT, and the filter's status 131 passes it on.
+cmd_replay() {
+    local speed='' maxdelay='' session='' opt value
+    local -i count=0 status=0
+    local -a args
+    while (( $# )); do
+        case $1 in
+            --speed | --maxdelay | --speed=* | --maxdelay=*)
+                opt=${1%%=*}
+                if [[ $1 == *=* ]]; then
+                    value=${1#*=}
+                else
+                    (( $# >= 2 )) || usage_error "$opt needs a value: a positive decimal number"
+                    shift
+                    value=$1
+                fi
+                positive_decimal "$value" ||
+                    usage_error "$opt takes a positive decimal number, not '$value'"
+                if [[ $opt == --speed ]]; then
+                    speed=$value
+                else
+                    maxdelay=$value
+                fi
+                ;;
+            -h | --help) usage; exit 0 ;;
+            --)
+                shift
+                count+=$#
+                if (( $# )); then
+                    session=$1
+                fi
+                break
+                ;;
+            -?*) usage_error "unknown option for replay: $1" ;;
+            *) session=$1; count+=1 ;;
+        esac
+        shift
+    done
+    (( count <= 1 )) || usage_error "replay takes one session at most"
+    refuse_foreign_root
+    resolve_session "$session"
+    require_scriptreplay
+    require_python replay
+    make_work
+    "$PYTHON" -I "$SRC_ROOT/libexec/tlogger_view.py" replay-timing \
+        < "$SESSION_DIR/timing" > "$WORK/timing" || status=$?
+    if (( status )); then
+        exit "$status"
+    fi
+    args=(--log-timing "$WORK/timing" --log-out "$SESSION_DIR/output.raw")
+    if [[ -n $speed ]]; then
+        args+=(--divisor "$speed")
+    fi
+    if [[ -n $maxdelay ]]; then
+        args+=(--maxdelay "$maxdelay")
+    fi
+    replay_through_filter "${args[@]}"
+}
+
+# =======================================================
 #                           MAIN
 # =======================================================
 
@@ -1992,6 +2429,9 @@ main() {
         uninstall) cmd_uninstall "$@" ;;
         mode) cmd_mode "$@" ;;
         status) cmd_status "$@" ;;
+        render) cmd_render "$@" ;;
+        show) cmd_show "$@" ;;
+        replay) cmd_replay "$@" ;;
         version | --version) cmd_version "$@" ;;
         help | -h | --help) usage ;;
         start | stop)

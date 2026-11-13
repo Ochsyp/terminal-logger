@@ -28,6 +28,10 @@ wg*.conf
 # Screenshots, which show hosts, users and targets.
 Screenshot*
 
+# Python bytecode, which an import or py_compile writes beside libexec/tlogger_view.py.
+__pycache__/
+*.pyc
+
 # Editor, OS and tool files.
 .vscode/
 .idea/
