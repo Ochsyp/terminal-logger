@@ -2809,11 +2809,14 @@ positive_decimal() {
     [[ ${#1} -le 20 && $1 =~ $DECIMAL_RE && $1 == *[1-9]* ]]
 }
 
-# Put back the terminal settings that replay changed, if any. Ignores every failure, so that
-# cleanup can call it at any time.
+# Put back the terminal settings that replay changed, if any, then discard the keys still queued:
+# scriptreplay leaves those it has not read, and the shell would run them as a command. Ignores
+# every failure, so that cleanup can call it at any time.
 restore_tty() {
     if [[ -n $TTY_SAVED ]]; then
         stty "$TTY_SAVED" < /dev/tty > /dev/null 2>&1 || true
+        "$PYTHON" -I -c 'import termios; termios.tcflush(0, termios.TCIFLUSH)' \
+            2> /dev/null < /dev/tty > /dev/null || true
         TTY_SAVED=
     fi
 }

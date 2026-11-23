@@ -365,7 +365,8 @@ EOF
 @test "keys still queued when a replay ends do not reach the shell" {
     timed_session 0.100000 late-one 3.000000 late-two
     # scriptreplay reads the terminal only when its key buffer is empty and takes one key per
-    # 100 ms. The 60 keys last past the end of the replay, so the line typed after them stays queued.
+    # 100 ms. The 60 keys last past the end of the replay, so the line typed after them stays
+    # queued.
     drive << 'EOF'
 term_shell
 pty_begin "tty-replay $ID"

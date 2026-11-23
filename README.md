@@ -405,7 +405,7 @@ writes, moves or renames them. Three commands read them:
 |---|---|
 | `tlogger render [--stdout] [SESSION]` | Writes the plain-text transcript of the session to `transcript.txt` in its folder and names it, as in `tlogger: transcript ~/.local/state/tlogger/sessions/20261104T101500Z-a1B2c3/transcript.txt`; `--stdout` prints the transcript instead and writes nothing |
 | `tlogger show [SESSION]` | Pages the transcript with `less`, after rendering it when `transcript.txt` is missing, older than the logs, or not what `render` writes (see below); without a terminal on stdout, prints it |
-| `tlogger replay [--speed N] [--maxdelay S] [SESSION]` | Replays the session in this terminal at its recorded pace with util-linux `scriptreplay`, through a filter; `--speed 2` replays twice as fast and `--speed 0.5` at half the pace, and `--maxdelay 1` waits at most a second between two outputs. Space pauses, Up and Down change the speed, and Ctrl+C stops |
+| `tlogger replay [--speed N] [--maxdelay S] [SESSION]` | Replays the session in this terminal at its recorded pace with util-linux `scriptreplay`, through a filter; `--speed 2` replays twice as fast and `--speed 0.5` at half the pace, and `--maxdelay 1` waits at most a second between two outputs. Space pauses, Up and Down change the speed, and Ctrl+C stops. Keys typed during a replay never reach the shell |
 
 `SESSION` is a session id, which names a folder in the log folder, such as
 `20261104T101500Z-a1B2c3`; or a path to a session folder anywhere, by any name, which holds a
