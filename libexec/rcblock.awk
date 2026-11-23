@@ -12,6 +12,10 @@
 # The exit status is 1 when an error line is printed, else 0.
 
 BEGIN {
+    # Lines RCBLOCK_SKIP_FROM to RCBLOCK_SKIP_TO are about to be cut, so the altered and script
+    # checks skip them; exact markers still count. Empty or 0 means no range.
+    skip_from = ENVIRON["RCBLOCK_SKIP_FROM"] + 0
+    skip_to = ENVIRON["RCBLOCK_SKIP_TO"] + 0
     start_mark = "# >>> tlogger >>>"
     end_mark = "# <<< tlogger <<<"
     # A line holding either text without being exactly its marker is an altered marker.
@@ -63,6 +67,8 @@ function runs_script(text) {
         n_end++
         end_line[n_end] = NR
         inside = 0
+    } else if (skip_from > 0 && NR >= skip_from && NR <= skip_to) {
+        next
     } else if (index(line, start_text) || index(line, end_text)) {
         add_error("altered", NR)
     } else if (!inside && runs_script(line)) {

@@ -77,8 +77,8 @@ round_trip() {
 # so that a test can install a release other than the repository's own.
 make_source_tree() {
     local dir=$1 version=$2 f
-    for f in bin/tlogger lib/config.zsh lib/tlogger.zsh libexec/rcblock.awk \
-        libexec/tlogger_view.py; do
+    for f in bin/tlogger lib/config.zsh lib/tlogger.zsh libexec/legacyblock.awk \
+        libexec/rcblock.awk libexec/tlogger_view.py; do
         mkdir -p "$dir/${f%/*}"
         cp "$REPO_ROOT/$f" "$dir/$f"
     done
@@ -110,11 +110,11 @@ list_releases() {
     tail -n +5 "$RC" | cmp - "$BATS_TEST_TMPDIR/original"
     [ -L "$DATA/current" ]
     [ "$(readlink "$DATA/current")" = "releases/$VERSION_TEXT" ]
-    for f in bin/tlogger lib/config.zsh lib/tlogger.zsh libexec/rcblock.awk \
-        libexec/tlogger_view.py VERSION; do
+    for f in bin/tlogger lib/config.zsh lib/tlogger.zsh libexec/legacyblock.awk \
+        libexec/rcblock.awk libexec/tlogger_view.py VERSION; do
         cmp "$REPO_ROOT/$f" "$RELEASE/$f"
     done
-    [ "$(wc -l < "$RELEASE/MANIFEST")" -eq 6 ]
+    [ "$(wc -l < "$RELEASE/MANIFEST")" -eq 7 ]
     (cd "$RELEASE" && sha256sum --quiet --check MANIFEST)
     grep -qx 'mode=manual' "$CONF/config"
     grep -qxF "logdir=$STATE/sessions" "$CONF/config"
@@ -146,6 +146,7 @@ list_releases() {
     [ "$(stat -c %a "$RELEASE/bin/tlogger")" = 755 ]
     [ "$(stat -c %a "$RELEASE/lib/config.zsh")" = 644 ]
     [ "$(stat -c %a "$RELEASE/lib/tlogger.zsh")" = 644 ]
+    [ "$(stat -c %a "$RELEASE/libexec/legacyblock.awk")" = 644 ]
     [ "$(stat -c %a "$RELEASE/libexec/rcblock.awk")" = 644 ]
     [ "$(stat -c %a "$RELEASE/VERSION")" = 644 ]
     [ "$(stat -c %a "$RELEASE/MANIFEST")" = 644 ]

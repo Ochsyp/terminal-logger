@@ -24,7 +24,8 @@ SRC_ROOT=${SRC_ROOT%/*}
 
 # The files of a release, relative to the source tree. bin/tlogger is the only executable one;
 # python3 -I runs libexec/tlogger_view.py.
-RELEASE_FILES=(bin/tlogger lib/config.zsh lib/tlogger.zsh libexec/rcblock.awk
+RELEASE_FILES=(bin/tlogger lib/config.zsh lib/tlogger.zsh
+    libexec/legacyblock.awk libexec/rcblock.awk
     libexec/tlogger_view.py VERSION)
 
 # The marker lines around the block; libexec/rcblock.awk holds the same two lines.
@@ -82,6 +83,16 @@ OPT_YES=0
 OPT_PRINT_ONLY=0
 OPT_PURGE_CONFIG=0
 
+# The migration options of install: --remove-block and its two marker lines, --block-sha256 and
+# --quarantine. OPT_QUARANTINE is an absolute path once parse_install_options has checked it.
+OPT_REMOVE=0
+OPT_LEGACY_START=
+OPT_LEGACY_END=
+OPT_BLOCK_SHA=
+OPT_BLOCK_SHA_SET=0
+OPT_QUARANTINE=
+OPT_QUARANTINE_SET=0
+
 # Paths, set by resolve_paths from what zsh reports.
 ZDOT=
 DATA_HOME=
@@ -96,6 +107,7 @@ CONFIG_DIR=
 CONFIG_FILE=
 STATE_DIR=
 BACKUP_DIR=
+QUARANTINE_DIR=
 SESSIONS_DIR=
 
 # The version of the source tree, the block, the chosen mode, the backup made, if any, and what
@@ -122,6 +134,24 @@ SCAN_START=0
 SCAN_END=0
 SCAN_FOREIGN=()
 SCAN_ERRORS=()
+
+# The old logger's block in OLD_RC, as find_legacy_block found it: its first and last line, 0 when
+# there is none, and the sha256 of its exact bytes. SAVED_BLOCK is the private copy of those bytes.
+LEGACY_FROM=0
+LEGACY_TO=0
+LEGACY_SHA=
+SAVED_BLOCK=
+
+# The sha256 of a dry run's OLD_RC, which is the live rc, as it was first read.
+DRY_RUN_RC_SHA=
+
+# The stale backup as check_stale_file found it: device, inode, size and mtime, which the move
+# compares again, its mode, size and date for the plan, and where the move put it.
+STALE_ID=
+STALE_MODE=
+STALE_SIZE=
+STALE_DATE=
+STALE_MOVED=
 
 # What read_config found in the config: CONFIG_RECORDER is the recorder= value, unchecked, and
 # CONFIG_RECORDER_LINE its line number, 0 when there is none.
@@ -256,6 +286,15 @@ Install options:
   --dry-run           Show the plan and the change to the rc, and write nothing.
   --print-only        Print the block to add by hand, and write nothing.
   --yes               Do not ask for confirmation; needed outside a terminal.
+
+Moving from an older logger, with install:
+  --remove-block START END  Remove the lines from START to END, two whole lines of the rc given
+                      exactly, in quotes. The bytes are saved first, in the quarantine folder.
+  --block-sha256 HASH Go on only if that block is the one the dry run showed. --yes needs it,
+                      outside a dry run.
+  --quarantine FILE   Move the older logger's stale backup into the quarantine folder,
+                      ~/.local/state/tlogger/quarantine, with mode 0600.
+--remove-block and --quarantine also work alone. --print-only takes none of the three.
 
 Uninstall options:
   --dry-run           Show the change to the rc and the files to remove, and write nothing.
@@ -479,6 +518,7 @@ resolve_paths() {
     CONFIG_FILE=$CONFIG_DIR/config
     STATE_DIR=$STATE_HOME/tlogger
     BACKUP_DIR=$STATE_DIR/rc-backups
+    QUARANTINE_DIR=$STATE_DIR/quarantine
     SESSIONS_DIR=$STATE_DIR/sessions
     refuse_foreign_root_paths
 }
@@ -576,15 +616,16 @@ seed_rc() {
     fi
 }
 
-# Scan FILE with rcblock.awk and set SCAN_START and SCAN_END (0 when there is no block),
-# SCAN_FOREIGN (line numbers) and SCAN_ERRORS ('kind line' items). Messages name SCANNED, else
-# the rc. Exits 1 when the scan fails for any reason other than malformed markers.
+# Scan FILE with rcblock.awk into SCAN_START and SCAN_END (0 without a block), SCAN_FOREIGN (lines)
+# and SCAN_ERRORS ('kind line'). Lines FROM to TO are about to be cut. Both are always passed, so
+# the user's environment cannot hide a line. Exits 1 when the scan fails other than on bad markers.
 scan_file() {
-    local file=$1 name out line status=0
+    local file=$1 from=${2:-} to=${3:-} name out line status=0
     name=$(shown "${SCANNED:-$RC}")
     SCAN_START=0 SCAN_END=0
     SCAN_FOREIGN=() SCAN_ERRORS=()
-    out=$({ LC_ALL=C awk -f "$SRC_ROOT/libexec/rcblock.awk" < "$file"; } 2> /dev/null) || status=$?
+    out=$({ RCBLOCK_SKIP_FROM=$from RCBLOCK_SKIP_TO=$to LC_ALL=C \
+        awk -f "$SRC_ROOT/libexec/rcblock.awk" < "$file"; } 2> /dev/null) || status=$?
     while IFS= read -r line; do
         case $line in
             '' | none) ;;
@@ -639,23 +680,40 @@ refuse_foreign_recorder() {
     die 1 "another session recorder appears to be set up in $name at lines ${lines// /, }; remove it first"
 }
 
-# Print to stdout the rc built from SOURCE for ACTION: put adds the block first when there is
-# none and swaps it in place when there is one; strip cuts it out. Uses the last scan of SOURCE.
-# head and tail copy every byte outside the block, CR bytes and a missing final newline included.
+# Print lines FROM to TO of FILE, byte for byte; nothing when FROM is past TO. head comes first in
+# the pipe, because a head after tail would die of SIGPIPE, which pipefail turns into a failure.
+emit_lines() {
+    local file=$1 from=$2 to=$3
+    if (( from > to )); then
+        return 0
+    fi
+    head -n "$to" -- "$file" | tail -n "+$from"
+}
+
+# Print the rc built from SOURCE for ACTION, using its last scan: put adds the block first or swaps
+# it in place, strip cuts it out. Lines LEGACY_FROM to LEGACY_TO, if any, stay out. head and tail
+# copy every other byte, CR bytes and a missing final newline included.
 emit_rc() {
-    local action=$1 source=$2
-    if (( SCAN_START == 0 )); then
+    local action=$1 source=$2 next=1
+    if (( SCAN_START == 0 )) && [[ $action == put ]]; then
+        printf '%s' "$BLOCK" || return 1
+    fi
+    if (( LEGACY_FROM && ( SCAN_START == 0 || LEGACY_FROM < SCAN_START ) )); then
+        emit_lines "$source" 1 "$(( LEGACY_FROM - 1 ))" || return 1
+        next=$(( LEGACY_TO + 1 ))
+    fi
+    if (( SCAN_START )); then
+        emit_lines "$source" "$next" "$(( SCAN_START - 1 ))" || return 1
         if [[ $action == put ]]; then
             printf '%s' "$BLOCK" || return 1
         fi
-        cat -- "$source" || return 1
-        return 0
+        next=$(( SCAN_END + 1 ))
+        if (( LEGACY_FROM > SCAN_START )); then
+            emit_lines "$source" "$next" "$(( LEGACY_FROM - 1 ))" || return 1
+            next=$(( LEGACY_TO + 1 ))
+        fi
     fi
-    head -n "$(( SCAN_START - 1 ))" -- "$source" || return 1
-    if [[ $action == put ]]; then
-        printf '%s' "$BLOCK" || return 1
-    fi
-    tail -n "+$(( SCAN_END + 1 ))" -- "$source" || return 1
+    tail -n "+$next" -- "$source" || return 1
 }
 
 # Write the rc built from OLD_RC for ACTION (put or strip) to WORK/new-rc, the file write_rc
@@ -716,6 +774,310 @@ print_by_hand() {
     printf '%s' "$BLOCK"
 }
 
+# =======================================================
+#                 MOVING FROM AN OLDER LOGGER
+# =======================================================
+
+# Print PATH as shown prints it, quoted so that it can be pasted into a shell. The ~ stays outside
+# the quoting, where the shell expands it.
+shown_arg() {
+    local p
+    p=$(shown "$1")
+    # shellcheck disable=SC2088 # The ~ is text here, printed for the shell that pastes it.
+    if [[ $p == '~/'* ]]; then
+        printf '~/%q\n' "${p#'~/'}"
+    else
+        printf '%q\n' "$p"
+    fi
+}
+
+# Print on stderr the command that moves the stale backup later, when --quarantine was given. It
+# names this copy of tlogger: nothing is installed yet, and an older release lacks the option.
+note_quarantine_followup() {
+    if (( OPT_QUARANTINE_SET )); then
+        msg "the stale backup was not moved; afterwards, run: $(shown_arg "$SRC_ROOT/bin/tlogger") install --quarantine $(shown_arg "$OPT_QUARANTINE")"
+    fi
+}
+
+# Print MESSAGE and the --quarantine follow-up on stderr, then exit 3: there is no old block.
+refuse_no_block() {
+    msg "$1"
+    note_quarantine_followup
+    exit 3
+}
+
+# Set LEGACY_FROM, LEGACY_TO and LEGACY_SHA from the two given markers in OLD_RC, and check the
+# fingerprint when one was given. Exits 3 when neither marker is there and 1 for any odd pairing
+# or another block than the fingerprint names. Messages give line numbers, never the marker text.
+find_legacy_block() {
+    local out line item kind what status=0 sum
+    local -a errors=()
+    out=$({ LEGACY_START=$OPT_LEGACY_START LEGACY_END=$OPT_LEGACY_END LC_ALL=C \
+        awk -f "$SRC_ROOT/libexec/legacyblock.awk" < "$OLD_RC"; } 2> /dev/null) || status=$?
+    while IFS= read -r line; do
+        case $line in
+            '') ;;
+            none) refuse_no_block "$(shown "$RC") holds neither marker line, so there is no old block to remove" ;;
+            'block '*) read -r _ LEGACY_FROM LEGACY_TO <<< "$line" ;;
+            'error '*) errors+=("${line#error }") ;;
+            *) die 1 "legacyblock.awk printed an unexpected line for $(shown "$RC")" ;;
+        esac
+    done <<< "$out"
+    if (( ${#errors[@]} )); then
+        msg "the old block's marker lines in $(shown "$RC") do not pair:"
+        for item in "${errors[@]}"; do
+            kind=${item% *}
+            case $kind in
+                unpaired) what="a marker without its partner" ;;
+                duplicate) what="a marker that appears more than once" ;;
+                reversed) what="the end marker comes before the start marker" ;;
+                altered) what="a line that holds a marker with changed or extra text" ;;
+                *) what="a marker problem" ;;
+            esac
+            msg "  line ${item##* }: $kind, $what"
+        done
+        die 1 "fix those lines or remove the block by hand, then run tlogger again; nothing changed"
+    fi
+    if (( status != 0 )) || [[ ! $LEGACY_FROM =~ ^[1-9][0-9]*$ || ! $LEGACY_TO =~ ^[1-9][0-9]*$ ]]; then
+        die 1 "cannot scan $(shown "$RC") for the old block (awk exit status $status)"
+    fi
+    sum=$({ emit_lines "$OLD_RC" "$LEGACY_FROM" "$LEGACY_TO" | sha256sum; } 2> /dev/null) ||
+        die 1 "cannot compute the fingerprint of the old block"
+    LEGACY_SHA=${sum%% *}
+    if (( OPT_BLOCK_SHA_SET )) && [[ ${OPT_BLOCK_SHA,,} != "$LEGACY_SHA" ]]; then
+        die 1 "the old block at lines $LEGACY_FROM-$LEGACY_TO does not match the --block-sha256 fingerprint; look at it with --dry-run; nothing changed"
+    fi
+}
+
+# Exit 1 unless a tlogger block found by the last scan lies wholly before or wholly after the old
+# block, so that neither of the two is cut in half.
+refuse_block_overlap() {
+    if (( SCAN_START && SCAN_END >= LEGACY_FROM && SCAN_START <= LEGACY_TO )); then
+        die 1 "the tlogger block at lines $SCAN_START-$SCAN_END overlaps the old block at lines $LEGACY_FROM-$LEGACY_TO; separate them by hand, then run tlogger again; nothing changed"
+    fi
+}
+
+# Print the line the saved block goes back to once tlogger's lines are out of the rc: its own
+# first line, less the size of a tlogger block above it.
+legacy_return_line() {
+    local line=$LEGACY_FROM
+    if (( SCAN_START && SCAN_START < LEGACY_FROM )); then
+        line=$(( line - ( SCAN_END - SCAN_START + 1 ) ))
+    fi
+    printf '%s\n' "$line"
+}
+
+# Succeed when the tlogger block found by the last scan already holds exactly BLOCK. The x keeps
+# the command substitution from dropping the block's last newline.
+own_block_current() {
+    local current
+    (( SCAN_START )) || return 1
+    current=$(emit_lines "$OLD_RC" "$SCAN_START" "$SCAN_END" 2> /dev/null; printf x) || return 1
+    [[ ${current%x} == "$BLOCK" ]]
+}
+
+# For a foreign rc holding the old block, which tlogger never edits: print the edits on stderr,
+# highest lines first so that each number stays right while they are made, and the 4 lines of
+# the block on stdout unless the rc already holds them.
+print_cut_by_hand() {
+    local cut="delete lines $LEGACY_FROM-$LEGACY_TO, the old block" put='' i=0 edit
+    local -a edits=()
+    if (( SCAN_START == 0 )); then
+        put="add the 4 lines printed on stdout at the very top"
+        edits=("$cut" "$put")
+    elif own_block_current; then
+        edits=("$cut")
+    else
+        put="replace lines $SCAN_START-$SCAN_END with the 4 lines printed on stdout"
+        if (( SCAN_START > LEGACY_TO )); then
+            edits=("$put" "$cut")
+        else
+            edits=("$cut" "$put")
+        fi
+    fi
+    msg "$(shown "$RC") $RC_WHY, so tlogger does not edit it."
+    msg "Make these edits in the file (for a symlink, the file it points to), in this order:"
+    for edit in "${edits[@]}"; do
+        i=$(( i + 1 ))
+        msg "  $i. $edit"
+    done
+    msg "then run tlogger install again; with the old block gone and the tlogger block in place it sets up the rest without editing the file."
+    if [[ -n $put ]]; then
+        printf '%s' "$BLOCK"
+    fi
+}
+
+# Save the old block's exact bytes as quarantine/removed-block.L<line>.<UTC>.<random>, mode 0600,
+# and set SAVED_BLOCK. It stays in TEMP_PATHS until write_rc starts to write the rc, so that a run
+# that stops earlier leaves no copy of a block that is still in the rc.
+save_removed_block() {
+    local stamp sum
+    stamp=$(date -u +%Y%m%dT%H%M%SZ 2> /dev/null) || die 1 "cannot read the clock"
+    SAVED_BLOCK=$(mktemp "$QUARANTINE_DIR/removed-block.L$(legacy_return_line).$stamp.XXXXXX" 2> /dev/null) ||
+        die 1 "cannot create a file in $(shown "$QUARANTINE_DIR")"
+    TEMP_PATHS+=("$SAVED_BLOCK")
+    chmod 600 -- "$SAVED_BLOCK" 2> /dev/null ||
+        die 1 "cannot set mode 0600 on $(shown "$SAVED_BLOCK")"
+    { emit_lines "$OLD_RC" "$LEGACY_FROM" "$LEGACY_TO" > "$SAVED_BLOCK"; } 2> /dev/null ||
+        die 1 "cannot save the old block in $(shown "$QUARANTINE_DIR")"
+    sum=$({ sha256sum < "$SAVED_BLOCK"; } 2> /dev/null) || sum=
+    if [[ ${sum%% *} != "$LEGACY_SHA" ]]; then
+        die 1 "the saved copy of the old block does not match it; $(shown "$RC") was not written"
+    fi
+}
+
+# Take PATH out of TEMP_PATHS, so that cleanup keeps it. An empty PATH does nothing.
+forget_temp() {
+    local p
+    local -a kept=()
+    for p in "${TEMP_PATHS[@]}"; do
+        if [[ $p != "$1" ]]; then
+            kept+=("$p")
+        fi
+    done
+    TEMP_PATHS=("${kept[@]}")
+}
+
+# Print on stdout where the old block went and the commands that put it back. The full path works
+# in a terminal without the plugin, and && keeps a failed uninstall from reaching the restore.
+print_undo() {
+    local n rc saved
+    n=$(legacy_return_line)
+    rc=$(shown_arg "$RC")
+    saved=$(shown_arg "$SAVED_BLOCK")
+    printf 'The old block is out of %s and saved in %s.\n' "$(shown "$RC")" "$(shown "$SAVED_BLOCK")"
+    printf 'To put it back, paste these lines; if tlogger is already uninstalled, leave out the first:\n'
+    printf '  %s uninstall &&\n' "$(shown_arg "$CURRENT_LINK/bin/tlogger")"
+    printf '  ( umask 077\n'
+    printf '    { head -n %s %s; cat %s; tail -n +%s %s; } > %s.undo &&\n' \
+        "$(( n - 1 ))" "$rc" "$saved" "$n" "$rc" "$rc"
+    printf '    cat %s.undo > %s && rm %s.undo )\n' "$rc" "$rc" "$rc"
+}
+
+# Print SIZE in bytes the way the plan shows it, such as 21 bytes or 2.1 KiB.
+human_size() {
+    local size=$1 tenths i=0
+    local -a units=(KiB MiB GiB TiB)
+    if (( size < 1024 )); then
+        printf '%s bytes\n' "$size"
+        return 0
+    fi
+    tenths=$(( size * 10 / 1024 ))
+    while (( tenths >= 10240 && i < 3 )); do
+        tenths=$(( tenths / 1024 ))
+        i=$(( i + 1 ))
+    done
+    printf '%s.%s %s\n' "$(( tenths / 10 ))" "$(( tenths % 10 ))" "${units[i]}"
+}
+
+# Exit 1 with REASON for the file --quarantine names.
+refuse_stale() {
+    die 1 "cannot quarantine $(shown "$OPT_QUARANTINE"): $1; nothing changed"
+}
+
+# Exit 1 unless the file --quarantine names can be moved safely: this user's readable regular file
+# with one link, in a folder it can leave, in HOME or ZDOT, and no start-up, tlogger or log file.
+# Records what the move compares. Call after read_config, which sets CONFIG_LOGDIR.
+check_stale_file() {
+    local file=$OPT_QUARANTINE real dir name target links info logdir parent
+    local -a own=("$DATA_DIR" "$SRC_ROOT" "$CONFIG_DIR" "$STATE_DIR" "$SESSIONS_DIR")
+    if [[ $file == *[[:cntrl:]]* ]]; then
+        die 1 "cannot quarantine the file: its path holds a control character; move it by hand; nothing changed"
+    fi
+    if [[ -L $file ]]; then
+        refuse_stale "it is a symlink"
+    fi
+    if [[ ! -e $file ]]; then
+        refuse_stale "it does not exist"
+    fi
+    if [[ ! -f $file ]]; then
+        refuse_stale "it is not a regular file"
+    fi
+    if [[ ! -O $file ]]; then
+        refuse_stale "it belongs to another user"
+    fi
+    if [[ ! -r $file ]]; then
+        refuse_stale "it cannot be read"
+    fi
+    parent=${file%/*}
+    if [[ ! -w ${parent:-/} || ! -x ${parent:-/} ]]; then
+        refuse_stale "its folder does not let tlogger remove it"
+    fi
+    links=$(stat -c %h -- "$file" 2> /dev/null) || refuse_stale "tlogger cannot read its details"
+    if (( links > 1 )); then
+        refuse_stale "it has $links hard links, so another name would keep its content"
+    fi
+    real=$(readlink -f -- "$file" 2> /dev/null) || refuse_stale "tlogger cannot resolve its path"
+    if ! under_dir "$real" "$HOME" && ! under_dir "$real" "$ZDOT"; then
+        refuse_stale "it lies outside the home and zsh folders"
+    fi
+    for dir in "$ZDOT" "$HOME"; do
+        for name in .zshenv .zprofile .zshrc .zlogin .zlogout; do
+            target=$(readlink -f -- "$dir/$name" 2> /dev/null) || target=
+            if [[ -n $target && $target == "$real" ]]; then
+                refuse_stale "it is a zsh start-up file, or the real file behind one"
+            fi
+        done
+    done
+    if [[ -n $CONFIG_LOGDIR ]]; then
+        own+=("$CONFIG_LOGDIR")
+    fi
+    # Trimmed as lib/config.zsh trims it, so that this is the folder the plugin records into.
+    if [[ -n ${TLOGGER_LOGDIR-} && ${TLOGGER_LOGDIR@a} == *x* ]]; then
+        logdir=$TLOGGER_LOGDIR
+        logdir=${logdir#"${logdir%%[![:space:]]*}"}
+        logdir=${logdir%"${logdir##*[![:space:]]}"}
+        if [[ -n $logdir ]]; then
+            own+=("$logdir")
+        fi
+    fi
+    for dir in "${own[@]}"; do
+        if under_dir "$real" "$dir"; then
+            refuse_stale "it lies in one of tlogger's own code, config, state or log folders"
+        fi
+    done
+    info=$(stat -c '%d:%i:%s:%.9Y %a %s %Y' -- "$file" 2> /dev/null) ||
+        refuse_stale "tlogger cannot read its details"
+    read -r STALE_ID STALE_MODE STALE_SIZE name <<< "$info"
+    STALE_DATE=$(date -u -d "@$name" +%F 2> /dev/null) || STALE_DATE=unknown
+}
+
+# Exit 1 for a move that failed with REASON, naming the command that finishes the job. The code is
+# installed by now, and the plugin's tlogger command may not exist in this terminal.
+die_move() {
+    die 1 "$(shown "$OPT_QUARANTINE") was not moved: $1; to finish, run: $(shown_arg "$CURRENT_LINK/bin/tlogger") install --quarantine $(shown_arg "$OPT_QUARANTINE")"
+}
+
+# Move the stale backup to quarantine/<name>.<UTC>.<random>, mode 0600, keeping its mtime. The copy
+# is finished, compared and renamed before the source goes, so a stop leaves two copies at worst.
+# Sets STALE_MOVED.
+move_stale() {
+    local file=$OPT_QUARANTINE stamp tmp final
+    stamp=$(date -u +%Y%m%dT%H%M%SZ 2> /dev/null) || die_move "cannot read the clock"
+    tmp=$(mktemp "$QUARANTINE_DIR/.moving.XXXXXX" 2> /dev/null) ||
+        die_move "cannot create a file in $(shown "$QUARANTINE_DIR")"
+    TEMP_PATHS+=("$tmp")
+    chmod 600 -- "$tmp" 2> /dev/null || die_move "cannot set mode 0600 on the copy"
+    { cat -- "$file" > "$tmp"; } 2> /dev/null || die_move "cannot copy it"
+    touch -r "$file" -- "$tmp" 2> /dev/null || die_move "cannot keep its timestamp"
+    cmp -s -- "$file" "$tmp" 2> /dev/null || die_move "the copy differs from it"
+    if [[ $(stat -c '%d:%i:%s:%.9Y' -- "$file" 2> /dev/null) != "$STALE_ID" ]]; then
+        die_move "it changed while tlogger was copying it"
+    fi
+    final=$(mktemp "$QUARANTINE_DIR/${file##*/}.$stamp.XXXXXX" 2> /dev/null) ||
+        die_move "cannot create a file in $(shown "$QUARANTINE_DIR")"
+    TEMP_PATHS+=("$final")
+    mv -T -f -- "$tmp" "$final" 2> /dev/null || die_move "cannot rename the copy"
+    forget_temp "$tmp"
+    forget_temp "$final"
+    STALE_MOVED=$final
+    rm -f -- "$file" 2> /dev/null || true
+    # Running the move again would only add another copy, so this asks for the one step left.
+    if [[ -e $file || -L $file ]]; then
+        die 1 "$(shown "$file") is copied to $(shown "$final"), but the original cannot be deleted; delete it by hand"
+    fi
+}
+
 # Copy the rc to rc-backups/zshrc.<UTC time>.<random> with mode 0600, and set BACKUP to it. With
 # PRUNE set to prune, keep the five newest backups; uninstall passes keep and deletes none.
 backup_rc() {
@@ -758,12 +1120,14 @@ prune_backups() {
     done
 }
 
-# Replace the rc with the file NEW, backing it up first (PRUNE as for backup_rc). Keeps the mode
-# through chmod --reference and a hard-linked rc's inode by writing in place; a missing rc is
-# created with mode 0644 and nothing to back up. Exits 1 when the rc changed since it was read,
-# and when it does not hold NEW afterwards.
+# Replace the rc with the file NEW after a backup (PRUNE as for backup_rc; keep means uninstall).
+# Keeps the mode and a hard-linked rc's inode; a missing rc is created with mode 0644. Exits 1 when
+# the rc changed since it was read or lacks NEW afterwards. The first write keeps SAVED_BLOCK.
 write_rc() {
-    local new=$1 prune=$2 tmp links
+    local new=$1 prune=$2 tmp links left="the code and config may already be updated"
+    if [[ $prune == keep ]]; then
+        left="nothing was removed"
+    fi
     if [[ $RC_STATE == missing ]]; then
         tmp=$(mktemp "$ZDOT/.zshrc.tlogger.XXXXXX" 2> /dev/null) ||
             die 1 "cannot create a temp file in $(shown "$ZDOT")"
@@ -779,26 +1143,29 @@ write_rc() {
                 mv -n -T -- "$tmp" "$RC" 2> /dev/null || true
             fi
             if [[ -e $tmp ]]; then
-                die 1 "cannot create $(shown "$RC"), or it appeared while tlogger was working; nothing changed, run it again"
+                die 1 "cannot create $(shown "$RC"), or it appeared while tlogger was working, so tlogger did not write it; $left; run the command again"
             fi
         fi
         check_written "$new"
         return 0
     fi
     if [[ -L $RC || ! -f $RC ]] || ! cmp -s -- "$OLD_RC" "$RC" 2> /dev/null; then
-        die 1 "$(shown "$RC") changed while tlogger was working; nothing changed, run it again"
+        die 1 "$(shown "$RC") changed while tlogger was working, so tlogger did not write it; $left; run the command again"
     fi
     backup_rc "$prune"
     links=$(stat -c %h -- "$RC" 2> /dev/null) || die 1 "cannot read the link count of $(shown "$RC")"
     if (( links > 1 )); then
-        # A rename would split the hard links, so the bytes go into the same inode. HUP, INT and
-        # TERM are ignored meanwhile, so that no signal leaves the rc cut short.
-        trap '' HUP INT TERM
+        # A rename would split the hard links, so the bytes go into the same inode. HUP, INT, QUIT
+        # and TERM are ignored meanwhile, so that no signal leaves the rc cut short.
+        trap '' HUP INT QUIT TERM
+        forget_temp "$SAVED_BLOCK"
         if ! { cat -- "$new" > "$RC"; } 2> /dev/null; then
             set_signal_traps
+            trap - QUIT
             die 1 "cannot write $(shown "$RC"); the backup is $(shown "$BACKUP")"
         fi
         set_signal_traps
+        trap - QUIT
         check_written "$new"
         return 0
     fi
@@ -808,6 +1175,7 @@ write_rc() {
     TEMP_PATHS+=("$tmp")
     { cat -- "$new" > "$tmp"; } 2> /dev/null || die 1 "cannot write a temp file in $(shown "$ZDOT")"
     chmod --reference="$RC" -- "$tmp" 2> /dev/null || die 1 "cannot copy the mode of $(shown "$RC")"
+    forget_temp "$SAVED_BLOCK"
     mv -T -f -- "$tmp" "$RC" 2> /dev/null ||
         die 1 "cannot replace $(shown "$RC"); the backup is $(shown "$BACKUP")"
     check_written "$new"
@@ -1418,6 +1786,9 @@ check_targets() {
     for dir in "$DATA_DIR" "$RELEASES_DIR" "$CONFIG_DIR" "$STATE_DIR" "$BACKUP_DIR" "$SESSIONS_DIR"; do
         check_dir_safe "$dir"
     done
+    if (( OPT_REMOVE || OPT_QUARANTINE_SET )); then
+        check_dir_safe "$QUARANTINE_DIR"
+    fi
     if [[ -e $CURRENT_LINK && ! -L $CURRENT_LINK ]]; then
         die 1 "$(shown "$CURRENT_LINK") is not a symlink; remove it by hand"
     fi
@@ -1429,6 +1800,9 @@ check_targets() {
     for dir in "$DATA_DIR" "$RELEASES_DIR" "$CONFIG_DIR" "$BACKUP_DIR" "$SESSIONS_DIR"; do
         check_writable "$dir"
     done
+    if (( OPT_REMOVE || OPT_QUARANTINE_SET )); then
+        check_writable "$QUARANTINE_DIR"
+    fi
     if (( RC_CHANGED )) && [[ $RC_STATE != foreign ]]; then
         # classify_rc has made sure that an existing rc is writable; a hard-linked one is written
         # in place, any other one goes through a temp file in its folder.
@@ -1570,8 +1944,54 @@ require_working_recorder() {
 #                         INSTALL
 # =======================================================
 
-# Parse the install options into OPT_MODE, OPT_DRY_RUN, OPT_YES and OPT_PRINT_ONLY.
-# Exits 2 on an unknown option or a bad value; -h and --help print the usage and exit 0.
+# Exit 2 unless MARKER can name a whole line of the rc: it holds text and no control character,
+# and it is not tlogger's own marker. Usage errors never repeat a marker.
+check_marker() {
+    if [[ -z ${1//[[:space:]]/} ]]; then
+        usage_error "a --remove-block marker is empty or blank"
+    fi
+    if [[ $1 == *[[:cntrl:]]* ]]; then
+        usage_error "a --remove-block marker holds a control character"
+    fi
+    if [[ $1 == "$START_MARK" || $1 == "$END_MARK" ]]; then
+        usage_error "a --remove-block marker is tlogger's own marker line"
+    fi
+}
+
+# Exit 2 for a combination of the migration options that install does not take.
+check_migration_options() {
+    if (( OPT_PRINT_ONLY && ( OPT_REMOVE || OPT_BLOCK_SHA_SET || OPT_QUARANTINE_SET ) )); then
+        usage_error "--print-only does not go with --remove-block, --block-sha256 or --quarantine"
+    fi
+    if (( OPT_BLOCK_SHA_SET && ! OPT_REMOVE )); then
+        usage_error "--block-sha256 needs --remove-block"
+    fi
+    if (( OPT_BLOCK_SHA_SET )) && [[ ! $OPT_BLOCK_SHA =~ ^[0-9a-fA-F]{64}$ ]]; then
+        usage_error "--block-sha256 takes 64 hex characters, as a dry run prints them"
+    fi
+    if (( OPT_REMOVE )); then
+        check_marker "$OPT_LEGACY_START"
+        check_marker "$OPT_LEGACY_END"
+        if [[ $OPT_LEGACY_START == "$OPT_LEGACY_END" ]]; then
+            usage_error "the two --remove-block markers are the same line"
+        fi
+        if (( OPT_YES && ! OPT_DRY_RUN && ! OPT_BLOCK_SHA_SET )); then
+            usage_error "--yes with --remove-block needs --block-sha256, the fingerprint a dry run prints"
+        fi
+    fi
+    if (( OPT_QUARANTINE_SET )); then
+        if [[ -z $OPT_QUARANTINE ]]; then
+            usage_error "--quarantine needs a file"
+        fi
+        if [[ $OPT_QUARANTINE != /* ]]; then
+            OPT_QUARANTINE=$PWD/$OPT_QUARANTINE
+        fi
+    fi
+}
+
+# Parse the install options into OPT_MODE, OPT_DRY_RUN, OPT_YES, OPT_PRINT_ONLY and the migration
+# options. --remove-block takes the next two arguments as they are, whatever they start with.
+# Exits 2 on an unknown or repeated option or a bad value; -h and --help print the usage and exit 0.
 parse_install_options() {
     local value
     while (( $# )); do
@@ -1593,21 +2013,89 @@ parse_install_options() {
             --dry-run) OPT_DRY_RUN=1; shift ;;
             --yes) OPT_YES=1; shift ;;
             --print-only) OPT_PRINT_ONLY=1; shift ;;
+            --remove-block)
+                (( $# >= 3 )) || usage_error "--remove-block needs two values: START and END"
+                (( ! OPT_REMOVE )) || usage_error "--remove-block is given more than once"
+                OPT_REMOVE=1 OPT_LEGACY_START=$2 OPT_LEGACY_END=$3
+                shift 3
+                ;;
+            --block-sha256)
+                (( $# >= 2 )) || usage_error "--block-sha256 needs a value"
+                (( ! OPT_BLOCK_SHA_SET )) || usage_error "--block-sha256 is given more than once"
+                OPT_BLOCK_SHA_SET=1 OPT_BLOCK_SHA=$2
+                shift 2
+                ;;
+            --quarantine)
+                (( $# >= 2 )) || usage_error "--quarantine needs a file"
+                (( ! OPT_QUARANTINE_SET )) || usage_error "--quarantine is given more than once"
+                OPT_QUARANTINE_SET=1 OPT_QUARANTINE=$2
+                shift 2
+                ;;
             -h | --help) usage; exit 0 ;;
-            *) usage_error "unknown option for install: $1" ;;
+            *)
+                # After --remove-block this word may belong to an unquoted marker, so it stays out.
+                if (( OPT_REMOVE )); then
+                    usage_error "unexpected argument after --remove-block; quote both markers"
+                fi
+                usage_error "unknown option for install: $1"
+                ;;
         esac
     done
     if (( OPT_DRY_RUN && OPT_PRINT_ONLY )); then
         usage_error "--dry-run and --print-only do not go together"
     fi
+    check_migration_options
 }
 
-# Print the install plan on stdout: the rc and what happens to it, the mode, the version and the
-# code, config and state paths, then the diff of the rc when it changes.
+# Print the question install asks before it writes, naming the old block's removal and the stale
+# backup's move whenever those options are given.
+install_question() {
+    local action
+    if (( ! RC_CHANGED )); then
+        action="Refresh the tlogger code and config"
+    elif (( SCAN_START )); then
+        action="Update the tlogger block in $(shown "$RC")"
+    else
+        action="Add the tlogger block to $(shown "$RC")"
+    fi
+    if (( OPT_REMOVE )); then
+        action="Remove the old block at lines $LEGACY_FROM-$LEGACY_TO of $(shown "$RC"), ${action,}"
+    fi
+    if [[ -n $OPT_QUARANTINE ]]; then
+        action+=", and move $(shown "$OPT_QUARANTINE") into $(shown "$QUARANTINE_DIR")"
+    fi
+    printf '%s?\n' "$action"
+}
+
+# Print LABEL VALUE pairs as rows of the install plan. Only a migration run, with its longer
+# labels, widens the column, so that a plain install prints what it always printed.
+plan_rows() {
+    local width=9
+    if (( OPT_REMOVE || OPT_QUARANTINE_SET )); then
+        width=10
+    fi
+    while (( $# )); do
+        printf '  %-*s %s\n' "$width" "$1" "$2"
+        shift 2
+    done
+}
+
+# Print the install plan on stdout: the rc and what happens to it, the old block and the stale
+# backup when they are named, the mode, the version and the code, config and state paths, then
+# the diff of the rc when it changes.
 print_install_plan() {
     local note old_label
     old_label=$(shown "$RC")
-    if [[ $RC_STATE == missing ]]; then
+    if (( OPT_REMOVE )); then
+        note="old block at lines $LEGACY_FROM-$LEGACY_TO removed; "
+        if (( SCAN_START == 0 )); then
+            note+="tlogger block added at lines 1-4"
+        elif own_block_current; then
+            note+="tlogger block at lines $SCAN_START-$SCAN_END kept"
+        else
+            note+="tlogger block at lines $SCAN_START-$SCAN_END replaced"
+        fi
+    elif [[ $RC_STATE == missing ]]; then
         if [[ -n $SEED ]]; then
             note="missing; created from $(shown "$SEED") with the block at lines 1-4"
             old_label=$(shown "$SEED")
@@ -1623,8 +2111,16 @@ print_install_plan() {
         note="the block at lines $SCAN_START-$SCAN_END is up to date; no change"
     fi
     printf 'tlogger install plan\n'
-    printf '  %-9s %s\n' \
-        rc: "$(shown "$RC") ($note)" \
+    plan_rows rc: "$(shown "$RC") ($note)"
+    if (( OPT_REMOVE )); then
+        plan_rows \
+            'old block:' "$(( LEGACY_TO - LEGACY_FROM + 1 )) lines, sha256 $LEGACY_SHA" \
+            'saved to:' "$(shown "$QUARANTINE_DIR")/removed-block.L$(legacy_return_line).<UTC time>.<random> (0600)"
+    fi
+    if (( OPT_QUARANTINE_SET )); then
+        plan_rows stale: "$(shown "$OPT_QUARANTINE"), $(human_size "$STALE_SIZE"), $STALE_DATE, moves to quarantine/ (0600, now 0$STALE_MODE)"
+    fi
+    plan_rows \
         mode: "$MODE" \
         version: "$VERSION_STR" \
         code: "$(shown "$RELEASES_DIR/$VERSION_STR"), linked from $(shown "$CURRENT_LINK")" \
@@ -1656,15 +2152,19 @@ print_install_summary() {
         logdir: "$(shown "${CONFIG_LOGDIR:-$SESSIONS_DIR}")" \
         backup: "$backup_note" \
         uninstall: "tlogger uninstall, in a new terminal; or $(shown "$CURRENT_LINK/bin/tlogger") uninstall"
+    if [[ -n $STALE_MOVED ]]; then
+        printf '  %-10s %s\n' moved: "$(shown "$OPT_QUARANTINE") to $(shown "$STALE_MOVED"), mode 0600; its mode was 0$STALE_MODE"
+    fi
+    if (( OPT_REMOVE )); then
+        printf 'Terminals that are already open keep the old logger until you close them.\n'
+    fi
 }
 
 # tlogger install: put the block at the top of the rc and install the code, config and state.
-# When the mode is auto, from --mode, the question or the config, the recorder must pass the smoke
-# test first; --print-only skips it. Writes nothing anywhere with --dry-run or --print-only, no
-# temp folder either but the smoke test's own, which it removes, and nothing outside its private
-# temp folders before the checks in check_targets, the smoke test and check_syntax pass.
+# --remove-block cuts the old block in that write; --quarantine then moves a stale backup last.
+# --dry-run and --print-only leave nothing; other runs write only temp files until all checks pass.
 cmd_install() {
-    local question
+    local sum
     parse_install_options "$@"
     refuse_foreign_root
     read_version
@@ -1680,6 +2180,18 @@ cmd_install() {
     fi
     check_recorder
     classify_rc
+    if (( OPT_REMOVE )) && [[ $RC_STATE == missing ]]; then
+        refuse_no_block "there is no $(shown "$RC"), so there is no old block to remove"
+    fi
+    # Without the rc's text there are no line numbers to name, so a person removes the old block.
+    if (( OPT_REMOVE )) && [[ $RC_STATE != missing && ( ! -f $RC || ! -r $RC ) ]]; then
+        msg "$(shown "$RC") cannot be read, so tlogger could not locate the old block; remove it by hand"
+        RC_WHY=${RC_WHY:-cannot be read}
+        SCAN_START=0 SCAN_END=0
+        print_by_hand
+        note_quarantine_followup
+        exit 1
+    fi
     if [[ $RC_STATE == missing ]]; then
         seed_rc
     else
@@ -1688,10 +2200,21 @@ cmd_install() {
     if [[ -z $OLD_RC ]]; then
         SCAN_START=0 SCAN_END=0
         print_by_hand
+        note_quarantine_followup
         exit 1
     fi
-    scan_file "$OLD_RC"
+    if (( OPT_DRY_RUN && OPT_REMOVE )); then
+        sum=$({ sha256sum < "$OLD_RC"; } 2> /dev/null) || die 1 "cannot read $(shown "$RC")"
+        DRY_RUN_RC_SHA=${sum%% *}
+    fi
+    if (( OPT_REMOVE )); then
+        find_legacy_block
+    fi
+    scan_file "$OLD_RC" "$LEGACY_FROM" "$LEGACY_TO"
     refuse_bad_markers
+    if (( OPT_REMOVE )); then
+        refuse_block_overlap
+    fi
     refuse_foreign_recorder
     if (( ! OPT_DRY_RUN )); then
         build_rc put
@@ -1701,10 +2224,18 @@ cmd_install() {
         RC_CHANGED=0
     fi
     if [[ $RC_STATE == foreign ]] && (( RC_CHANGED )); then
-        print_by_hand
+        if (( OPT_REMOVE )); then
+            print_cut_by_hand
+        else
+            print_by_hand
+        fi
+        note_quarantine_followup
         exit 1
     fi
     check_targets
+    if (( OPT_QUARANTINE_SET )); then
+        check_stale_file
+    fi
     choose_mode
     if (( ! OPT_DRY_RUN && ! OPT_YES )) && ! on_tty; then
         die 2 "--yes is required when not run from a terminal"
@@ -1723,22 +2254,37 @@ cmd_install() {
         msg "already installed, block up to date"
     fi
     if (( OPT_DRY_RUN )); then
+        if [[ -n $DRY_RUN_RC_SHA ]]; then
+            sum=$({ sha256sum < "$OLD_RC"; } 2> /dev/null) || sum=
+            if [[ ${sum%% *} != "$DRY_RUN_RC_SHA" ]]; then
+                die 1 "$(shown "$RC") changed while tlogger was reading it, so the plan and fingerprint above may not fit it; run the dry run again"
+            fi
+        fi
         msg "dry run: nothing was written"
         return 0
     fi
-    if (( ! RC_CHANGED )); then
-        question="Refresh the tlogger code and config?"
-    elif (( SCAN_START )); then
-        question="Update the tlogger block in $(shown "$RC")?"
-    else
-        question="Add the tlogger block to $(shown "$RC")?"
+    confirm "$(install_question)"
+    if (( OPT_REMOVE || OPT_QUARANTINE_SET )) && [[ $RC_STATE != missing ]] &&
+        ! cmp -s -- "$OLD_RC" "$RC" 2> /dev/null; then
+        die 1 "$(shown "$RC") changed while tlogger was waiting; nothing changed, run it again"
     fi
-    confirm "$question"
     install_code
     install_config
     install_state
+    if (( OPT_REMOVE || OPT_QUARANTINE_SET )); then
+        ensure_dir "$QUARANTINE_DIR" 700
+    fi
+    if (( OPT_REMOVE )); then
+        save_removed_block
+    fi
     if (( RC_CHANGED )); then
         write_rc "$WORK/new-rc" prune
+    fi
+    if (( OPT_REMOVE )); then
+        print_undo
+    fi
+    if (( OPT_QUARANTINE_SET )); then
+        move_stale
     fi
     probe_plugin
     print_install_summary
