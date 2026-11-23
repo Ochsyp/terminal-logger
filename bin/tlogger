@@ -806,6 +806,19 @@ refuse_no_block() {
     exit 3
 }
 
+# Exit 3 for an rc that holds neither marker. Only an rc with tlogger's block gets the --quarantine
+# command: without it the markers may be mistyped, and that command would add tlogger beside them.
+refuse_no_markers() {
+    msg "$(shown "$RC") holds neither marker line, so there is no old block to remove"
+    scan_file "$OLD_RC"
+    if (( SCAN_START )); then
+        note_quarantine_followup
+    elif (( OPT_QUARANTINE_SET )); then
+        msg "the stale backup was not moved; check both marker lines against the rc, because an old block that stays would run beside tlogger"
+    fi
+    exit 3
+}
+
 # Set LEGACY_FROM, LEGACY_TO and LEGACY_SHA from the two given markers in OLD_RC, and check the
 # fingerprint when one was given. Exits 3 when neither marker is there and 1 for any odd pairing
 # or another block than the fingerprint names. Messages give line numbers, never the marker text.
@@ -817,7 +830,7 @@ find_legacy_block() {
     while IFS= read -r line; do
         case $line in
             '') ;;
-            none) refuse_no_block "$(shown "$RC") holds neither marker line, so there is no old block to remove" ;;
+            none) refuse_no_markers ;;
             'block '*) read -r _ LEGACY_FROM LEGACY_TO <<< "$line" ;;
             'error '*) errors+=("${line#error }") ;;
             *) die 1 "legacyblock.awk printed an unexpected line for $(shown "$RC")" ;;
@@ -975,11 +988,26 @@ refuse_stale() {
     die 1 "cannot quarantine $(shown "$OPT_QUARANTINE"): $1; nothing changed"
 }
 
+# Print the longest file name, in bytes, that the quarantine folder can hold, asking the nearest
+# folder that exists. 255, the limit of the usual Linux file systems, when getconf cannot tell.
+quarantine_name_max() {
+    local dir=$QUARANTINE_DIR max
+    while [[ ! -d $dir ]]; do
+        dir=${dir%/*}
+        dir=${dir:-/}
+    done
+    max=$(getconf NAME_MAX "$dir" 2> /dev/null) || max=255
+    if [[ ! $max =~ ^[1-9][0-9]*$ ]]; then
+        max=255
+    fi
+    printf '%s\n' "$max"
+}
+
 # Exit 1 unless the file --quarantine names can be moved safely: this user's readable regular file
-# with one link, in a folder it can leave, in HOME or ZDOT, and no start-up, tlogger or log file.
-# Records what the move compares. Call after read_config, which sets CONFIG_LOGDIR.
+# with one link, in a folder it can leave, in HOME or ZDOT, no start-up, tlogger or log file, and
+# with a name that fits. Records what the move compares. Call after read_config (CONFIG_LOGDIR).
 check_stale_file() {
-    local file=$OPT_QUARANTINE real dir name target links info logdir parent
+    local file=$OPT_QUARANTINE real dir name target links info logdir parent bytes
     local -a own=("$DATA_DIR" "$SRC_ROOT" "$CONFIG_DIR" "$STATE_DIR" "$SESSIONS_DIR")
     if [[ $file == *[[:cntrl:]]* ]]; then
         die 1 "cannot quarantine the file: its path holds a control character; move it by hand; nothing changed"
@@ -1036,6 +1064,11 @@ check_stale_file() {
             refuse_stale "it lies in one of tlogger's own code, config, state or log folders"
         fi
     done
+    # The move adds .<UTC time>.<random>, 24 bytes, to the name.
+    bytes=$(printf '%s' "${file##*/}" | wc -c)
+    if (( bytes + 24 > $(quarantine_name_max) )); then
+        refuse_stale "its file name is too long for the quarantine folder; rename it first"
+    fi
     info=$(stat -c '%d:%i:%s:%.9Y %a %s %Y' -- "$file" 2> /dev/null) ||
         refuse_stale "tlogger cannot read its details"
     read -r STALE_ID STALE_MODE STALE_SIZE name <<< "$info"
@@ -2019,22 +2052,38 @@ parse_install_options() {
                 OPT_REMOVE=1 OPT_LEGACY_START=$2 OPT_LEGACY_END=$3
                 shift 3
                 ;;
-            --block-sha256)
-                (( $# >= 2 )) || usage_error "--block-sha256 needs a value"
+            --block-sha256 | --block-sha256=*)
                 (( ! OPT_BLOCK_SHA_SET )) || usage_error "--block-sha256 is given more than once"
-                OPT_BLOCK_SHA_SET=1 OPT_BLOCK_SHA=$2
-                shift 2
+                OPT_BLOCK_SHA_SET=1
+                if [[ $1 == *=* ]]; then
+                    OPT_BLOCK_SHA=${1#*=}
+                    shift
+                else
+                    (( $# >= 2 )) || usage_error "--block-sha256 needs a value"
+                    OPT_BLOCK_SHA=$2
+                    shift 2
+                fi
                 ;;
-            --quarantine)
-                (( $# >= 2 )) || usage_error "--quarantine needs a file"
+            --quarantine | --quarantine=*)
                 (( ! OPT_QUARANTINE_SET )) || usage_error "--quarantine is given more than once"
-                OPT_QUARANTINE_SET=1 OPT_QUARANTINE=$2
-                shift 2
+                OPT_QUARANTINE_SET=1
+                if [[ $1 == *=* ]]; then
+                    OPT_QUARANTINE=${1#*=}
+                    shift
+                else
+                    (( $# >= 2 )) || usage_error "--quarantine needs a file"
+                    OPT_QUARANTINE=$2
+                    shift 2
+                fi
                 ;;
             -h | --help) usage; exit 0 ;;
             *)
-                # After --remove-block this word may belong to an unquoted marker, so it stays out.
+                # After --remove-block any other word may belong to an unquoted marker, so only
+                # the name of what looks like an option is repeated.
                 if (( OPT_REMOVE )); then
+                    if [[ $1 =~ ^--[a-z][a-z0-9-]*(=|$) ]]; then
+                        usage_error "unknown option for install: ${1%%=*}"
+                    fi
                     usage_error "unexpected argument after --remove-block; quote both markers"
                 fi
                 usage_error "unknown option for install: $1"
@@ -2053,6 +2102,8 @@ install_question() {
     local action
     if (( ! RC_CHANGED )); then
         action="Refresh the tlogger code and config"
+    elif (( OPT_REMOVE )) && own_block_current; then
+        action="Keep the tlogger block in $(shown "$RC")"
     elif (( SCAN_START )); then
         action="Update the tlogger block in $(shown "$RC")"
     else

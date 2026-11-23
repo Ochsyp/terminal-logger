@@ -321,8 +321,19 @@ undo_commands() {
     assert_refused 3
     [ -f "$STALE" ]
     [[ $stderr == *"not moved"* ]]
-    # Nothing is installed yet, so the follow-up names the tlogger that just ran.
-    [[ $stderr == *"$(readlink -f -- "$TLOGGER") install --quarantine ~/.zshrc.example-backup"* ]]
+    [[ $stderr == *"check both marker lines"* ]]
+    [[ $stderr != *"install --quarantine"* ]]
+}
+
+@test "a mistyped marker gets no command that would put tlogger beside the old block" {
+    simple_rc
+    stale_file
+    run_tlogger install --mode manual --yes --remove-block '# BEGIN mistyped' '# END mistyped' \
+        --block-sha256 "$(printf 'a%.0s' {1..64})" --quarantine "$STALE"
+    assert_refused 3
+    [ -f "$STALE" ]
+    [[ $stderr == *"check both marker lines"* ]]
+    [[ $stderr != *"install --quarantine"* ]]
 }
 
 @test "without --quarantine, exit 3 names no follow-up" {
@@ -331,6 +342,95 @@ undo_commands() {
     run_tlogger install --mode manual --dry-run --remove-block "$OLD_START" "$OLD_END"
     assert_refused 3
     [[ $stderr != *"--quarantine"* ]]
+    [[ $stderr != *"check both marker lines"* ]]
+}
+
+@test "--quarantine=FILE and --block-sha256=HASH work like the two-word forms" {
+    need symlinks
+    simple_rc
+    stale_file
+    fingerprint
+    run_tlogger install --mode manual --yes --remove-block "$OLD_START" "$OLD_END" \
+        "--block-sha256=$FP" "--quarantine=$STALE"
+    [ "$status" -eq 0 ]
+    [ ! -e "$STALE" ]
+    grep -qx 'stale-backup-content' "$(moved_stale)"
+    run grep -cF "$OLD_BODY" "$RC"
+    [ "$output" = 0 ]
+}
+
+@test "an empty --quarantine= or --block-sha256= exits 2" {
+    simple_rc
+    run_tlogger install --mode manual --dry-run --quarantine=
+    assert_refused 2
+    [[ $stderr == *"--quarantine needs a file"* ]]
+    run_tlogger install --mode manual --dry-run --remove-block "$OLD_START" "$OLD_END" \
+        --block-sha256=
+    assert_refused 2
+    [[ $stderr == *"64 hex characters"* ]]
+}
+
+@test "after --remove-block a mistyped option is named, and a stray word is not repeated" {
+    simple_rc
+    run_tlogger install --mode manual --remove-block "$OLD_START" "$OLD_END" --dryrun=value
+    [ "$status" -eq 2 ]
+    [[ $stderr == *"unknown option for install: --dryrun"* ]]
+    [[ $stderr != *"quote both markers"* ]]
+    [[ $stderr != *value* ]]
+    run_tlogger install --mode manual --remove-block "$OLD_START" "$OLD_END" stray-word
+    [ "$status" -eq 2 ]
+    [[ $stderr == *"quote both markers"* ]]
+    [[ $stderr != *stray-word* ]]
+    [ "$(sha_of "$RC")" = "$BEFORE" ]
+    refute_tlogger_folders
+}
+
+@test "a stale backup name too long for the quarantine folder is refused before any write" {
+    local long wide
+    simple_rc
+    # 232 bytes, and 116 two-byte characters: the suffix of 24 bytes takes either past 255.
+    printf -v long '%*s' 232 ''
+    long=${long// /b}
+    printf -v wide '%*s' 116 ''
+    wide=${wide// /$'\xc3\xa9'}
+    fingerprint
+    for name in "$long" "$wide"; do
+        stale_file "$HOME/$name"
+        run_tlogger install --mode manual --yes --remove-block "$OLD_START" "$OLD_END" \
+            --block-sha256 "$FP" --quarantine "$HOME/$name"
+        assert_refused 1
+        [[ $stderr == *"file name is too long"* ]]
+        [ -f "$HOME/$name" ]
+    done
+}
+
+@test "the name limit is the one of the file system that holds the quarantine folder" {
+    local name
+    simple_rc
+    mkdir -p "$HOME/bin"
+    printf '#!/bin/sh\necho 143\n' > "$HOME/bin/getconf"
+    chmod +x "$HOME/bin/getconf"
+    printf -v name '%*s' 120 ''
+    name=${name// /b}
+    stale_file "$HOME/$name"
+    PATH="$HOME/bin:$PATH" run_tlogger install --mode manual --dry-run \
+        --remove-block "$OLD_START" "$OLD_END" --quarantine "$HOME/$name"
+    assert_refused 1
+    [[ $stderr == *"file name is too long"* ]]
+}
+
+@test "the longest stale backup name that fits is moved" {
+    need symlinks
+    local name
+    simple_rc
+    printf -v name '%*s' 231 ''
+    name=${name// /b}
+    STALE="$HOME/$name"
+    stale_file
+    migrate --quarantine "$STALE"
+    [ "$status" -eq 0 ]
+    [ ! -e "$STALE" ]
+    grep -qx 'stale-backup-content' "$(moved_stale)"
 }
 
 @test "a missing marker, a duplicate, a reversed pair or an altered line exits 1 at its line" {
@@ -608,6 +708,22 @@ undo_commands() {
     [[ $output == *"old block at lines 12-63"* ]]
     [[ $output == *"move ~/.zshrc.example-backup"* ]]
     [[ $output == *"?" ]]
+}
+
+@test "the question says keep for a current tlogger block and update for an outdated one" {
+    { cat "$GOLDEN_BLOCK"; printf 'alias a=1\n'; old_block; } > "$RC"
+    fingerprint
+    run_with 'confirm() { printf "question: %s\n" "$1"; exit 0; }' install --mode manual --yes \
+        --remove-block "$OLD_START" "$OLD_END" --block-sha256 "$FP"
+    [ "$status" -eq 0 ]
+    [[ $output == *"question: Remove the old block at lines 6-8 of ~/.zshrc, keep the tlogger block"* ]]
+    [[ $output != *"update the tlogger block"* ]]
+    { sed '2s/.*/# An outdated block./' "$GOLDEN_BLOCK"; printf 'alias a=1\n'; old_block; } > "$RC"
+    fingerprint
+    run_with 'confirm() { printf "question: %s\n" "$1"; exit 0; }' install --mode manual --yes \
+        --remove-block "$OLD_START" "$OLD_END" --block-sha256 "$FP"
+    [ "$status" -eq 0 ]
+    [[ $output == *"question: Remove the old block at lines 6-8 of ~/.zshrc, update the tlogger block"* ]]
 }
 
 @test "an rc edited while the question waits stops the run before the code is written" {

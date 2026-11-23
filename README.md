@@ -113,8 +113,10 @@ the dry run printed.
 Everything between the two lines goes, including lines you added there. Its exact bytes are saved
 first as `quarantine/removed-block.L<line>.<time>.<random>`, mode 0600. tlogger refuses, and
 changes nothing, when a marker is missing, repeated, reversed or altered, when tlogger's own block
-overlaps the old one, or when another line still runs `script`. It exits 3 when the rc holds
-neither marker, and then names the `install --quarantine FILE` command that moves the backup.
+overlaps the old one, when another line still runs `script`, or when the backup's name is too long
+for the quarantine folder. It exits 3 when the rc holds neither marker. With the tlogger block in
+the rc, it then names the `install --quarantine FILE` command that moves the backup; without it,
+it asks you to check both marker lines, since an old block that stays would run beside tlogger.
 tlogger does not edit a symlinked or read-only rc: it prints the edits to make by hand.
 
 A real run prints the commands that put the block back. They start with
