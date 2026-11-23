@@ -351,7 +351,7 @@ undo_commands() {
     stale_file
     fingerprint
     run_tlogger install --mode manual --yes --remove-block "$OLD_START" "$OLD_END" \
-        "--block-sha256=$FP" "--quarantine=$STALE"
+        "--block-sha256=$FP" '--quarantine=~/.zshrc.example-backup'
     [ "$status" -eq 0 ]
     [ ! -e "$STALE" ]
     grep -qx 'stale-backup-content' "$(moved_stale)"

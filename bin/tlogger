@@ -2069,6 +2069,11 @@ parse_install_options() {
                 OPT_QUARANTINE_SET=1
                 if [[ $1 == *=* ]]; then
                     OPT_QUARANTINE=${1#*=}
+                    # The shell does not expand a ~ after the = of an option.
+                    # shellcheck disable=SC2088 # The ~ is text here.
+                    if [[ $OPT_QUARANTINE == '~/'* ]]; then
+                        OPT_QUARANTINE=${HOME-}/${OPT_QUARANTINE#'~/'}
+                    fi
                     shift
                 else
                     (( $# >= 2 )) || usage_error "--quarantine needs a file"
