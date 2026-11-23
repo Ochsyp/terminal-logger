@@ -405,7 +405,7 @@ writes, moves or renames them. Three commands read them:
 |---|---|
 | `tlogger render [--stdout] [SESSION]` | Writes the plain-text transcript of the session to `transcript.txt` in its folder and names it, as in `tlogger: transcript ~/.local/state/tlogger/sessions/20261104T101500Z-a1B2c3/transcript.txt`; `--stdout` prints the transcript instead and writes nothing |
 | `tlogger show [SESSION]` | Pages the transcript with `less`, after rendering it when `transcript.txt` is missing, older than the logs, or not what `render` writes (see below); without a terminal on stdout, prints it |
-| `tlogger replay [--speed N] [--maxdelay S] [SESSION]` | Replays the session in this terminal at its recorded pace with util-linux `scriptreplay`, through a filter; `--speed 2` replays twice as fast and `--speed 0.5` at half the pace, and `--maxdelay 1` waits at most a second between two outputs. Space pauses, Up and Down change the speed, and Ctrl+C stops. Keys typed during a replay never reach the shell |
+| `tlogger replay [--speed N] [--maxdelay S] [SESSION]` | Replays the session in this terminal at its recorded pace with util-linux `scriptreplay`, through a filter; `--speed 2` replays twice as fast and `--speed 0.5` at half the pace, and `--maxdelay 1` waits at most a second between two outputs. Space pauses, Up and Down change the speed, and Ctrl+C stops. Keys still queued when a replay ends are discarded |
 
 `SESSION` is a session id, which names a folder in the log folder, such as
 `20261104T101500Z-a1B2c3`; or a path to a session folder anywhere, by any name, which holds a
@@ -469,7 +469,7 @@ the session from the transcript, though not from `replay`; the marker line shows
 
 `show` runs `less` in its secure mode, with `LESSSECURE=1`, without `-R` and without `LESS`,
 `LESSOPEN`, `LESSCLOSE`, `LESSSECURE_ALLOW`, `LESS_IS_MORE` and `MORE`, so that no input
-preprocessor runs and nothing in the environment undoes that mode. It prints or pages an existing
+preprocessor runs and those variables cannot undo that mode. It prints or pages an existing
 `transcript.txt` as it is only when the file is newer than the logs, starts with the header line
 that `render` writes for this session and holds no control byte but LF and HT (no NUL or other
 C0 byte, no DEL, no C1 control in UTF-8). Any other file, such as one that someone put into the

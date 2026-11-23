@@ -2828,7 +2828,7 @@ restore_tty() {
 # non-canonical mode without echo, and the O_NONBLOCK it sets on its stdin, which it puts back
 # only on a terminal stdout, stays off the shell's own terminal file. Without a stdin terminal
 # and a /dev/tty that opens, it reads /dev/null, never a stdin it may share with the calling
-# shell. Needs WORK for scriptreplay's messages; restore_tty undoes the stty.
+# shell. Needs WORK for scriptreplay's messages; restore_tty undoes the stty and drops queued keys.
 replay_through_filter() {
     local -i tty=0 replay filter
     local -a codes
