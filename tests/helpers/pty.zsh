@@ -242,6 +242,32 @@ pty_wait_gone() {
     _pty_until '! kill -0 $pid 2> /dev/null' "the end of process $pid" $2
 }
 
+# Keep reading the terminal for SECONDS and end the driver if TEXT appears in the output that no
+# wait has consumed. Consumes nothing, so a later pty_expect still finds what came meanwhile.
+pty_absent() {
+    local text=$1
+    local -F deadline=$(( EPOCHREALTIME + $2 ))
+    while true; do
+        _pty_read
+        if [[ $PTY_BUF == *"$text"* ]]; then
+            pty_fail "'${(V)text}' appeared within $2 seconds"
+        fi
+        if (( EPOCHREALTIME >= deadline )); then
+            return 0
+        fi
+        zselect -t 5
+    done
+}
+
+# Set REPLY to the terminal settings as stty -g prints them, read by a command in the terminal.
+pty_stty() {
+    pty_run 'stty -g'
+    if (( PTY_STATUS != 0 )) || [[ $PTY_OUT != [[:xdigit:]:]##$'\n' ]]; then
+        pty_fail "stty -g returned $PTY_STATUS and printed ${(V)PTY_OUT}"
+    fi
+    REPLY=${PTY_OUT%$'\n'}
+}
+
 # Let CENTISECONDS (default 20) pass. zselect returns 1 when its time runs out, which is the point
 # here, so the pause returns 0: a driver that ends with a pause must not fail for it.
 pty_pause() {

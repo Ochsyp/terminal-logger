@@ -100,6 +100,9 @@ All notable changes to this project are listed here. The format follows
   holds `libexec/legacyblock.awk`, which finds the block.
 - Tests of the block scan under each awk, and of the cut, the fingerprint, the refusals, the move
   and the undo.
+- `tests/e2e-view-tty.bats` runs `tlogger show` and `replay` in a real pseudo-terminal: the pager
+  and its secure mode, the replay keys, Ctrl+C and the terminal they leave. The CI test job
+  installs `less` for it; what the tool needs on a user's machine does not change.
 
 ### Changed
 
