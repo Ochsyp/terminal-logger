@@ -500,7 +500,9 @@ prompt comes back clean, and `fg` carries on from the same place. After `bg` the
 suspended until `fg`, because it needs the terminal. A full-screen program in the replay can look
 wrong after `fg` until it next redraws. With no job-control shell above the replay, as after
 `exec`, Ctrl+Z does nothing, since nothing could resume it. A stop sent from outside with
-`kill -STOP` cannot be caught, so it leaves the terminal as the replay had it.
+`kill -STOP` cannot be caught, so it leaves the terminal as the replay had it. The clean prompt
+needs a replay started from your shell with its output on the terminal: a script around it stops
+first, and a replay piped into another program gets no restore sequence.
 
 `scriptreplay` reads a copy of the timing file, in a private temp folder, without its header
 lines: under a locale such as `de_DE`, `script` writes their delays with a comma, and

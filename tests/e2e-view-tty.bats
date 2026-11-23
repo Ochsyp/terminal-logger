@@ -634,3 +634,36 @@ shell_works
 pty_close
 EOF
 }
+
+@test "Ctrl+Z and fg work through the plugin's tlogger function, as a person runs it" {
+    need script
+    need proc
+    need symlinks
+    # install creates the state folders itself, with their private modes.
+    rmdir "$LOGS" "$HOME/.local/state/tlogger" "$HOME/.local/state" "$HOME/.local"
+    run_tlogger install --mode manual --yes
+    [ "$status" -eq 0 ]
+    suspend_session
+    # zsh suspends a command inside a function through other code than a plain command.
+    drive << 'EOF'
+term_shell
+pty_stty
+saved=$REPLY
+pty_send "tlogger replay $ID"
+pty_expect sus-one
+press_ctrl_z
+pty_stty
+[[ $REPLY == "$saved" ]] || pty_fail "the settings at the prompt are $REPLY, not $saved"
+pty_absent sus-two 7
+type_fg
+pty_expect sus-two
+pty_expect sus-three
+pty_expect "$FILTER_RESTORE"
+pty_expect '<fg:0>'
+pty_stty
+[[ $REPLY == "$saved" ]] || pty_fail "the settings after the replay are $REPLY, not $saved"
+shell_works
+pty_close
+EOF
+    refute_temp_left
+}
