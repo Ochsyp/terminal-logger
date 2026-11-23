@@ -536,9 +536,9 @@ bats tests/
 ```
 
 The ShellCheck test needs `shellcheck` on PATH and is skipped without it. Tests that need a real
-zsh, util-linux `script` or `scriptreplay`, `python3` or `python3-pyte`, the Linux `/proc`,
-symlinks, POSIX file modes, hard links, mawk or gawk skip on a machine without them, and the tests
-tagged `root` skip unless run as root. The end-to-end tests record real sessions in a
+zsh, util-linux `script` or `scriptreplay`, `less`, `python3` or `python3-pyte`, the Linux
+`/proc`, symlinks, POSIX file modes, hard links, mawk or gawk skip on a machine without them, and
+the tests tagged `root` skip unless run as root. The end-to-end tests record real sessions in a
 pseudo-terminal that zsh's `zpty` module drives, and render and replay one of them. CI runs the
 whole suite on Kali Linux in a container, with ShellCheck 0.11.0, and fails when any test is
 skipped. [CONTRIBUTING.md](CONTRIBUTING.md) tells how to run the suite as CI does.

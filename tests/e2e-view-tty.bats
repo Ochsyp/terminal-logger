@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # Runs tlogger show and replay in a real pseudo-terminal, as a person does, on made-up sessions:
 # the pager and its secure mode, the replay keys, Ctrl+C and the terminal they leave behind.
-# Gaps are whole seconds and every wait has a hard deadline, so that a busy machine fails no test.
+# Gaps are whole seconds with seconds of margin, and every wait has a hard deadline.
 
 bats_require_minimum_version 1.5.0
 
@@ -142,7 +142,7 @@ pty_close
 EOF
 }
 
-@test "the pager's shell, pipe, editor and save keys run nothing" {
+@test "the pager's shell, pipe, editor and log-file keys run nothing" {
     need command less
     page_session
     # The first three would run jj in a pager that is not secure. less never saves a regular file,
@@ -358,6 +358,28 @@ pty_end $n
 (( PTY_STATUS == 0 )) || pty_fail "replay returned $PTY_STATUS"
 shell_works
 [[ ! -e $HOME/tool-ran ]] || pty_fail 'a key typed during the replay ran in the shell'
+pty_close
+EOF
+}
+
+@test "keys still queued when a replay ends do not reach the shell" {
+    timed_session 0.100000 late-one 3.000000 late-two
+    # scriptreplay reads the terminal only when its key buffer is empty and takes one key per
+    # 100 ms. The 60 keys last past the end of the replay, so the line typed after them stays queued.
+    drive << 'EOF'
+term_shell
+pty_begin "tty-replay $ID"
+n=$REPLY
+pty_expect late-one
+keys=
+repeat 60 keys+=x
+pty_type $keys
+pty_pause 50
+pty_type $'jj\n'
+pty_end $n
+(( PTY_STATUS == 0 )) || pty_fail "replay returned $PTY_STATUS"
+shell_works
+[[ ! -e $HOME/tool-ran ]] || pty_fail 'a key queued at the end of the replay ran in the shell'
 pty_close
 EOF
 }
