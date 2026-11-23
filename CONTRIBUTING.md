@@ -168,6 +168,9 @@ bats tests/
   OSC title, a cursor position request and mouse reporting in it, then renders, shows and
   replays it with `/usr/bin/python3` and the real `scriptreplay`, and checks that neither the
   transcript nor the replay keeps those sequences.
+- `tests/e2e-view-tty.bats` runs `show` and `replay` in a real pseudo-terminal on made-up
+  sessions: the pager and its secure mode, the replay keys, Ctrl+C and the terminal settings they
+  leave. It needs `less`, which only the test job installs; the tool itself does not require it.
 - git stores the hooks, `bin/tlogger`, the stubs in `tests/stub-bin` and every `.bats` file as
   executable files, and the sourced files as plain ones, `libexec/tlogger_view.py` among them; a
   lint test checks the modes in the index. Where `core.filemode` is false, as on Git for Windows,
@@ -176,7 +179,7 @@ bats tests/
 - Tests tagged `root` (`# bats test_tags=root`) run only as root and skip otherwise. The other
   tests expect a non-root user: tlogger refuses root with a HOME that is not root's, so a run as
   root fails them by design.
-- To run the suite as CI does, on Linux with zsh, util-linux, mawk, gawk, `python3` and
+- To run the suite as CI does, on Linux with zsh, util-linux, mawk, gawk, `less`, `python3` and
   `python3-pyte` installed, run the untagged tests as yourself, then the root tests as root:
 
   ```bash

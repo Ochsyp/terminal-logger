@@ -100,6 +100,9 @@ All notable changes to this project are listed here. The format follows
   holds `libexec/legacyblock.awk`, which finds the block.
 - Tests of the block scan under each awk, and of the cut, the fingerprint, the refusals, the move
   and the undo.
+- `tests/e2e-view-tty.bats` runs `tlogger show` and `replay` in a real pseudo-terminal: the pager
+  and its secure mode, the replay keys, Ctrl+C and the terminal they leave. The CI test job
+  installs `less` for it; what the tool needs on a user's machine does not change.
 
 ### Changed
 
@@ -121,6 +124,11 @@ All notable changes to this project are listed here. The format follows
 
 ### Fixed
 
+- `tlogger show` also clears `LESSSECURE_ALLOW`, `LESS_IS_MORE` and `MORE`. A `LESSSECURE_ALLOW`
+  in the environment could turn the pager's blocked keys back on, and the other two could pass
+  it options.
+- `tlogger replay` discards the keys still queued in the terminal when it ends. A line typed late
+  in a replay could otherwise run as a command in the shell.
 - The in-place write of a hard-linked rc also ignores QUIT, so that Ctrl+\ cannot cut it short.
 
 [Unreleased]: https://github.com/Ochsyp/terminal-logger/commits/main

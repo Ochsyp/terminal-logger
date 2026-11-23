@@ -405,7 +405,7 @@ writes, moves or renames them. Three commands read them:
 |---|---|
 | `tlogger render [--stdout] [SESSION]` | Writes the plain-text transcript of the session to `transcript.txt` in its folder and names it, as in `tlogger: transcript ~/.local/state/tlogger/sessions/20261104T101500Z-a1B2c3/transcript.txt`; `--stdout` prints the transcript instead and writes nothing |
 | `tlogger show [SESSION]` | Pages the transcript with `less`, after rendering it when `transcript.txt` is missing, older than the logs, or not what `render` writes (see below); without a terminal on stdout, prints it |
-| `tlogger replay [--speed N] [--maxdelay S] [SESSION]` | Replays the session in this terminal at its recorded pace with util-linux `scriptreplay`, through a filter; `--speed 2` replays twice as fast and `--speed 0.5` at half the pace, and `--maxdelay 1` waits at most a second between two outputs. Space pauses, Up and Down change the speed, and Ctrl+C stops |
+| `tlogger replay [--speed N] [--maxdelay S] [SESSION]` | Replays the session in this terminal at its recorded pace with util-linux `scriptreplay`, through a filter; `--speed 2` replays twice as fast and `--speed 0.5` at half the pace, and `--maxdelay 1` waits at most a second between two outputs. Space pauses, Up and Down change the speed, and Ctrl+C stops. Keys still queued when a replay ends are discarded |
 
 `SESSION` is a session id, which names a folder in the log folder, such as
 `20261104T101500Z-a1B2c3`; or a path to a session folder anywhere, by any name, which holds a
@@ -468,7 +468,8 @@ slowly. A target that switches to the alternate screen and never switches back h
 the session from the transcript, though not from `replay`; the marker line shows where.
 
 `show` runs `less` in its secure mode, with `LESSSECURE=1`, without `-R` and without `LESS`,
-`LESSOPEN` and `LESSCLOSE`, so that no input preprocessor runs. It prints or pages an existing
+`LESSOPEN`, `LESSCLOSE`, `LESSSECURE_ALLOW`, `LESS_IS_MORE` and `MORE`, so that no input
+preprocessor runs and those variables cannot undo that mode. It prints or pages an existing
 `transcript.txt` as it is only when the file is newer than the logs, starts with the header line
 that `render` writes for this session and holds no control byte but LF and HT (no NUL or other
 C0 byte, no DEL, no C1 control in UTF-8). Any other file, such as one that someone put into the
@@ -535,9 +536,9 @@ bats tests/
 ```
 
 The ShellCheck test needs `shellcheck` on PATH and is skipped without it. Tests that need a real
-zsh, util-linux `script` or `scriptreplay`, `python3` or `python3-pyte`, the Linux `/proc`,
-symlinks, POSIX file modes, hard links, mawk or gawk skip on a machine without them, and the tests
-tagged `root` skip unless run as root. The end-to-end tests record real sessions in a
+zsh, util-linux `script` or `scriptreplay`, `less`, `python3` or `python3-pyte`, the Linux
+`/proc`, symlinks, POSIX file modes, hard links, mawk or gawk skip on a machine without them, and
+the tests tagged `root` skip unless run as root. The end-to-end tests record real sessions in a
 pseudo-terminal that zsh's `zpty` module drives, and render and replay one of them. CI runs the
 whole suite on Kali Linux in a container, with ShellCheck 0.11.0, and fails when any test is
 skipped. [CONTRIBUTING.md](CONTRIBUTING.md) tells how to run the suite as CI does.

@@ -2809,11 +2809,14 @@ positive_decimal() {
     [[ ${#1} -le 20 && $1 =~ $DECIMAL_RE && $1 == *[1-9]* ]]
 }
 
-# Put back the terminal settings that replay changed, if any. Ignores every failure, so that
-# cleanup can call it at any time.
+# Put back the terminal settings that replay changed, if any, then discard the keys still queued:
+# scriptreplay leaves those it has not read, and the shell would run them as a command. Ignores
+# every failure, so that cleanup can call it at any time.
 restore_tty() {
     if [[ -n $TTY_SAVED ]]; then
         stty "$TTY_SAVED" < /dev/tty > /dev/null 2>&1 || true
+        "$PYTHON" -I -c 'import termios; termios.tcflush(0, termios.TCIFLUSH)' \
+            2> /dev/null < /dev/tty > /dev/null || true
         TTY_SAVED=
     fi
 }
@@ -2825,7 +2828,7 @@ restore_tty() {
 # non-canonical mode without echo, and the O_NONBLOCK it sets on its stdin, which it puts back
 # only on a terminal stdout, stays off the shell's own terminal file. Without a stdin terminal
 # and a /dev/tty that opens, it reads /dev/null, never a stdin it may share with the calling
-# shell. Needs WORK for scriptreplay's messages; restore_tty undoes the stty.
+# shell. Needs WORK for scriptreplay's messages; restore_tty undoes the stty and drops queued keys.
 replay_through_filter() {
     local -i tty=0 replay filter
     local -a codes
@@ -2903,9 +2906,10 @@ cmd_render() {
 }
 
 # tlogger show [SESSION]: page the transcript of a session with less, without -R and in its
-# secure mode, with LESS, LESSOPEN and LESSCLOSE unset; when stdout is not a terminal, or less
-# is missing, print it. transcript.txt is rendered first unless transcript_fresh finds it newer
-# than the logs. Exits as render does, or with less's status.
+# secure mode; when stdout is not a terminal, or less is missing, print it. LESS, LESSOPEN,
+# LESSCLOSE, LESSSECURE_ALLOW, LESS_IS_MORE and MORE are unset, since each can pass options, run
+# a command or undo that mode. transcript.txt is rendered first unless transcript_fresh finds it
+# newer than the logs. Exits as render does, or with less's status.
 cmd_show() {
     local session=''
     local -i count=0
@@ -2934,7 +2938,8 @@ cmd_show() {
         run_render
     fi
     if [[ -t 1 ]] && command -v less > /dev/null 2>&1; then
-        env -u LESS -u LESSOPEN -u LESSCLOSE LESSSECURE=1 less -- "$SESSION_DIR/transcript.txt"
+        env -u LESS -u LESSOPEN -u LESSCLOSE -u LESSSECURE_ALLOW -u LESS_IS_MORE -u MORE \
+            LESSSECURE=1 less -- "$SESSION_DIR/transcript.txt"
     else
         cat -- "$SESSION_DIR/transcript.txt"
     fi
