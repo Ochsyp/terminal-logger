@@ -468,7 +468,8 @@ slowly. A target that switches to the alternate screen and never switches back h
 the session from the transcript, though not from `replay`; the marker line shows where.
 
 `show` runs `less` in its secure mode, with `LESSSECURE=1`, without `-R` and without `LESS`,
-`LESSOPEN` and `LESSCLOSE`, so that no input preprocessor runs. It prints or pages an existing
+`LESSOPEN`, `LESSCLOSE`, `LESSSECURE_ALLOW`, `LESS_IS_MORE` and `MORE`, so that no input
+preprocessor runs and nothing in the environment undoes that mode. It prints or pages an existing
 `transcript.txt` as it is only when the file is newer than the logs, starts with the header line
 that `render` writes for this session and holds no control byte but LF and HT (no NUL or other
 C0 byte, no DEL, no C1 control in UTF-8). Any other file, such as one that someone put into the

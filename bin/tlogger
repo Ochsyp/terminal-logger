@@ -2903,9 +2903,10 @@ cmd_render() {
 }
 
 # tlogger show [SESSION]: page the transcript of a session with less, without -R and in its
-# secure mode, with LESS, LESSOPEN and LESSCLOSE unset; when stdout is not a terminal, or less
-# is missing, print it. transcript.txt is rendered first unless transcript_fresh finds it newer
-# than the logs. Exits as render does, or with less's status.
+# secure mode; when stdout is not a terminal, or less is missing, print it. LESS, LESSOPEN,
+# LESSCLOSE, LESSSECURE_ALLOW, LESS_IS_MORE and MORE are unset, since each can pass options, run
+# a command or undo that mode. transcript.txt is rendered first unless transcript_fresh finds it
+# newer than the logs. Exits as render does, or with less's status.
 cmd_show() {
     local session=''
     local -i count=0
@@ -2934,7 +2935,8 @@ cmd_show() {
         run_render
     fi
     if [[ -t 1 ]] && command -v less > /dev/null 2>&1; then
-        env -u LESS -u LESSOPEN -u LESSCLOSE LESSSECURE=1 less -- "$SESSION_DIR/transcript.txt"
+        env -u LESS -u LESSOPEN -u LESSCLOSE -u LESSSECURE_ALLOW -u LESS_IS_MORE -u MORE \
+            LESSSECURE=1 less -- "$SESSION_DIR/transcript.txt"
     else
         cat -- "$SESSION_DIR/transcript.txt"
     fi
