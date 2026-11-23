@@ -32,7 +32,8 @@ setup() {
 # secure would run a command, and as pager keys its name only scrolls. tty-replay runs tlogger
 # replay and saves, inside the job, the terminal settings and O_NONBLOCK as replay left them: zsh
 # clears that flag before it reads its next line. Its trap is not an ignore, because bash cannot
-# trap a signal that was ignored when it started.
+# trap a signal that was ignored when it started. no-tstp-replay starts a replay with SIGTSTP
+# ignored. The Ctrl+Z tests start bash directly, since a wrapper would stop at once on Ctrl+Z.
 make_tools() {
     cat > "$HOME/bin/jj" << 'EOF'
 #!/bin/sh
@@ -48,7 +49,12 @@ stty -g > "$HOME/tty-after"
     > "$HOME/nonblock-after"
 exit "$code"
 EOF
-    chmod 755 "$HOME/bin/jj" "$HOME/bin/tty-replay"
+    cat > "$HOME/bin/no-tstp-replay" << 'EOF'
+#!/bin/sh
+trap '' TSTP
+exec bash "$TLOGGER" replay "$@"
+EOF
+    chmod 755 "$HOME/bin/jj" "$HOME/bin/tty-replay" "$HOME/bin/no-tstp-replay"
 }
 
 # Run the zsh code on stdin as the driver, after the helpers below: zsh -f with
@@ -57,6 +63,9 @@ EOF
 #   term_shell   starts the shell in a 24x80 xterm, with ~/bin first on PATH.
 #   shell_works  fails unless the shell still runs a command.
 #   tty_is       fails unless tty-replay saved the terminal settings SAVED.
+#   start_replay types a replay as a job of its own, on a line without frame markers.
+#   press_ctrl_z types Ctrl+Z and waits for the restore sequence, then for zsh's job message.
+#   type_fg      types fg, then a marker <fg:STATUS> with the status that fg returns.
 drive() {
     {
         cat << 'EOF'
@@ -70,6 +79,17 @@ shell_works() {
 tty_is() {
     [[ $(<$HOME/tty-after) == "$1" ]] ||
         pty_fail "the terminal settings are $(<$HOME/tty-after), not $1"
+}
+start_replay() {
+    pty_send "bash \"\$TLOGGER\" replay $ID"
+}
+press_ctrl_z() {
+    pty_type $'\x1a'
+    pty_expect "$FILTER_RESTORE"
+    pty_expect suspended
+}
+type_fg() {
+    pty_send 'fg; echo "<fg:$?>"'
 }
 EOF
         cat
@@ -414,6 +434,203 @@ pty_run "tty-replay $ID"
 (( PTY_STATUS == 0 )) || pty_fail "replay returned $PTY_STATUS"
 [[ $(<$HOME/nonblock-after) == 0 ]] ||
     pty_fail "O_NONBLOCK is set on the shell's terminal: $(<$HOME/nonblock-after)"
+pty_close
+EOF
+}
+
+# Create the session ID for the Ctrl+Z tests: a first line, then a 5-second gap that leaves time
+# to suspend it, and two more lines.
+suspend_session() {
+    timed_session 0.100000 sus-one 5.000000 sus-two 1.000000 sus-three
+}
+
+@test "Ctrl+Z restores the terminal before the shell's prompt and gives back the shell's settings" {
+    suspend_session
+    drive << 'EOF'
+term_shell
+pty_stty
+saved=$REPLY
+start_replay
+pty_expect sus-one
+press_ctrl_z
+pty_stty
+[[ $REPLY == "$saved" ]] || pty_fail "the settings at the prompt are $REPLY, not $saved"
+pty_close
+EOF
+}
+
+@test "the shell runs commands while a replay is suspended, and the replay waits" {
+    suspend_session
+    drive << 'EOF'
+term_shell
+start_replay
+pty_expect sus-one
+press_ctrl_z
+pty_run 'print -r -- during-$((6*7))'
+pty_out_is during-42 || pty_fail "the shell printed ${(V)PTY_OUT}"
+pty_absent sus-two 7
+pty_close
+EOF
+}
+
+@test "fg finishes a suspended replay with all its output and restores the terminal again" {
+    local f
+    local -A sums=()
+    suspend_session
+    for f in output.raw input.raw timing commands.tsv; do
+        sums[$f]=$(sha_of "$SDIR/$f")
+    done
+    drive << 'EOF'
+term_shell
+pty_stty
+saved=$REPLY
+start_replay
+pty_expect sus-one
+press_ctrl_z
+type_fg
+pty_expect sus-two
+pty_expect sus-three
+pty_expect "$FILTER_RESTORE"
+pty_expect '<fg:0>'
+pty_stty
+[[ $REPLY == "$saved" ]] || pty_fail "the settings after the replay are $REPLY, not $saved"
+shell_works
+pty_close
+EOF
+    for f in output.raw input.raw timing commands.tsv; do
+        [ "$(sha_of "$SDIR/$f")" = "${sums[$f]}" ]
+    done
+    refute_temp_left
+}
+
+@test "the replay keys still work after fg" {
+    suspend_session
+    # Space reaches scriptreplay at once only if fg has put the replay's terminal mode back.
+    drive << 'EOF'
+term_shell
+start_replay
+pty_expect sus-one
+press_ctrl_z
+type_fg
+pty_pause 50
+pty_type ' '
+pty_absent sus-two 7
+pty_type ' '
+pty_expect sus-two
+pty_expect sus-three
+pty_expect '<fg:0>'
+pty_close
+EOF
+}
+
+@test "a replay can be suspended twice" {
+    suspend_session
+    drive << 'EOF'
+term_shell
+start_replay
+pty_expect sus-one
+press_ctrl_z
+type_fg
+pty_pause 50
+press_ctrl_z
+type_fg
+pty_expect sus-two
+pty_expect sus-three
+pty_expect '<fg:0>'
+shell_works
+pty_close
+EOF
+}
+
+@test "Ctrl+C after fg stops the replay with status 130 and restores the terminal" {
+    timed_session 0.100000 sus-one 30.000000 sus-two
+    drive << 'EOF'
+term_shell
+pty_stty
+saved=$REPLY
+start_replay
+pty_expect sus-one
+press_ctrl_z
+type_fg
+pty_pause 50
+pty_type $'\x03'
+pty_expect "$FILTER_RESTORE"
+pty_expect '<fg:130>'
+[[ $PTY_LOG != *sus-two* ]] || pty_fail 'the replay went on after Ctrl+C'
+pty_stty
+[[ $REPLY == "$saved" ]] || pty_fail "the settings after Ctrl+C are $REPLY, not $saved"
+shell_works
+pty_close
+EOF
+    refute_temp_left
+}
+
+@test "bg leaves the terminal to the shell, and the replay waits until fg" {
+    suspend_session
+    drive << 'EOF'
+term_shell
+pty_stty
+saved=$REPLY
+start_replay
+pty_expect sus-one
+press_ctrl_z
+pty_send bg
+pty_absent sus-two 7
+pty_run jobs
+pty_out_has suspended || pty_fail "the job is not suspended: ${(V)PTY_OUT}"
+pty_stty
+[[ $REPLY == "$saved" ]] || pty_fail "the settings after bg are $REPLY, not $saved"
+shell_works
+type_fg
+pty_expect sus-two
+pty_expect sus-three
+pty_expect '<fg:0>'
+pty_close
+EOF
+}
+
+@test "a replay with no job-control shell above it ignores Ctrl+Z and never hangs" {
+    suspend_session
+    # exec replaces the shell, so that no process in this session could resume a stopped group.
+    drive << 'EOF'
+term_shell
+pty_send "exec bash \"\$TLOGGER\" replay $ID"
+pty_expect sus-one
+pty_type $'\x1a'
+pty_expect sus-two
+pty_expect sus-three
+pty_expect "$FILTER_RESTORE"
+pty_wait_gone $PTY_PID
+pty_close
+EOF
+}
+
+@test "a replay started with SIGTSTP ignored keeps ignoring Ctrl+Z" {
+    suspend_session
+    drive << 'EOF'
+term_shell
+pty_begin "no-tstp-replay $ID"
+n=$REPLY
+pty_expect sus-one
+pty_type $'\x1a'
+pty_expect sus-two
+pty_expect sus-three
+pty_end $n
+(( PTY_STATUS == 0 )) || pty_fail "replay returned $PTY_STATUS"
+shell_works
+pty_close
+EOF
+}
+
+@test "Ctrl+Z in a session on the alternate screen goes back to the normal screen" {
+    timed_session 0.100000 $'\e[?1049halt-one' 5.000000 alt-two
+    # The restore sequence that press_ctrl_z waits for starts by leaving the alternate screen.
+    drive << 'EOF'
+term_shell
+start_replay
+pty_expect $'\e[?1049halt-one'
+press_ctrl_z
+shell_works
 pty_close
 EOF
 }

@@ -267,3 +267,23 @@ except v.Stop as stop:
         compare_filtered 0
     done
 }
+
+@test "filter takes --suspend with settings in the form of stty -g, and no other argument" {
+    local spec
+    local -a args
+    for spec in '--suspend' '--suspend not-settings' '--suspend 500:5:bf;id' 'extra'; do
+        read -r -a args <<< "$spec"
+        run --separate-stderr "$PYTHON3" -I "$VIEW" filter "${args[@]}" < /dev/null
+        [ "$status" -eq 2 ]
+        [ -z "$output" ]
+    done
+}
+
+@test "filter --suspend without a terminal filters as usual" {
+    local -a codes
+    printf '%b' 'a\e[31mb\e]0;title\a' |
+        "$PYTHON3" -I "$VIEW" filter --suspend 500:5:bf:8a3b 2> "$ERRORS" | cat > "$GOT"
+    codes=("${PIPESTATUS[@]}")
+    { printf '%b' 'a\e[31mb'; printf '%s' "$FILTER_RESTORE"; } > "$WANT"
+    compare_filtered "${codes[1]}"
+}
