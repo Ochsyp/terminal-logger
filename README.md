@@ -3,12 +3,13 @@
 A recorder for zsh terminal sessions on Kali Linux, keystrokes included, as evidence for
 penetration tests.
 
-> **Status:** phase 5. In auto mode every new zsh terminal records itself as its shell starts; in
+> **Status:** phase 6. In auto mode every new zsh terminal records itself as its shell starts; in
 > manual mode `tlogger start` records a terminal on request. `tlogger stop` pauses the recording,
 > and `tlogger mode` switches between the modes. A recorded shell journals each command with its
 > start time in UTC, and the prompt shows whether the terminal is recorded. `tlogger render`,
 > `show` and `replay` turn a session into a plain-text transcript, page it and replay it.
-> `tlogger install`, `uninstall` and `status` put the plugin in place and take it out again.
+> `tlogger install`, `uninstall` and `status` put the plugin in place and take it out again, and
+> `install` can [replace an older logger](#moving-from-an-older-logger).
 > [CONTRIBUTING.md](CONTRIBUTING.md) describes the workflow, and [CHANGELOG.md](CHANGELOG.md)
 > lists what changed.
 
@@ -75,7 +76,7 @@ defaults they are:
 |---|---|---|
 | Code | `~/.local/share/tlogger/releases/<version>/`, and `current`, a symlink to the release in use; the current release and one older one are kept | 0755 folders and `bin/tlogger`, 0644 files |
 | Config | `~/.config/tlogger/config`: `key=value` lines, read as data and never run | 0700 folder, 0600 file |
-| State | `~/.local/state/tlogger/`: `sessions/` for the logs, `rc-backups/` for a copy of the rc before each change, of which install keeps the five newest | 0700 folders, 0600 backups |
+| State | `~/.local/state/tlogger/`: `sessions/` for the logs, `rc-backups/` for a copy of the rc before each change, of which install keeps the five newest; `quarantine/` for what a [move from an older logger](#moving-from-an-older-logger) takes out, never pruned | 0700 folders, 0600 files |
 
 The rc keeps its mode, its hard links and every byte outside the block, CRLF line ends and a
 missing final newline included. A missing rc is created from `/etc/skel/.zshrc`, or empty without
@@ -87,6 +88,42 @@ while another line of the rc runs util-linux `script`, the sign of another sessi
 In a new zsh terminal, `tlogger status` names the plugin version and shows whether the terminal is
 recorded; [Recording](#recording) describes the commands. Outside zsh,
 `~/.local/share/tlogger/current/bin/tlogger status` reports the installation instead.
+
+### Moving from an older logger
+
+`install` refuses while an older logger's block in the rc runs `script`. One command takes that
+block out, adds the tlogger block in the same write and moves the older logger's stale backup
+into a private folder. Look first, because a dry run writes nothing:
+
+```bash
+bin/tlogger install --mode auto --dry-run \
+    --remove-block '# BEGIN example-recorder' '# END example-recorder' \
+    --quarantine ~/.zshrc.example-backup
+```
+
+Then run the same command without `--dry-run`. For a run with `--yes`, add the fingerprint that
+the dry run printed.
+
+| Option | What it does |
+|---|---|
+| `--remove-block START END` | Removes the lines from START to END. Each must equal one whole line of the rc, apart from a Windows line ending. Quote both. |
+| `--block-sha256 HASH` | Goes on only if the block is byte for byte the one the dry run showed. `--yes` needs it, outside a dry run. |
+| `--quarantine FILE` | Moves the file to `~/.local/state/tlogger/quarantine/` with mode 0600 and its timestamp. |
+
+Everything between the two lines goes, including lines you added there. Its exact bytes are saved
+first as `quarantine/removed-block.L<line>.<time>.<random>`, mode 0600. tlogger refuses, and
+changes nothing, when a marker is missing, repeated, reversed or altered, when tlogger's own block
+overlaps the old one, when another line still runs `script`, or when the backup's name is too long
+for the quarantine folder. It exits 3 when the rc holds neither marker. With the tlogger block in
+the rc, it then names the `install --quarantine FILE` command that moves the backup; without it,
+it asks you to check both marker lines, since an old block that stays would run beside tlogger.
+tlogger does not edit a symlinked or read-only rc: it prints the edits to make by hand.
+
+A real run prints the commands that put the block back. They start with
+`~/.local/share/tlogger/current/bin/tlogger uninstall`, and give back the file as it was, without
+any tlogger block. If you edited the rc above that line since, paste the saved block back by hand.
+To undo the move, `mv` the file back and `chmod` it to the old mode, which the summary prints.
+Terminals already open keep the old logger until closed.
 
 ### Uninstall
 

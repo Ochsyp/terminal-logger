@@ -1,8 +1,8 @@
 #!/usr/bin/env bats
 # Lint checks: no CR byte in any file git tracks or would add, sh -n, bash -n and zsh -n syntax
-# checks, no ShellCheck finding in the shell files, rcblock.awk under each awk, tlogger_view.py
-# compiled, its imports and the way bin/tlogger runs it, and the file modes git stores: executable
-# for hooks, scripts and .bats files, not for the files that are sourced or read.
+# checks, no ShellCheck finding in the shell files, rcblock.awk and legacyblock.awk under each awk,
+# tlogger_view.py compiled, its imports and the way bin/tlogger runs it, and the file modes git
+# stores: executable for hooks, scripts and .bats files, not for the files that are sourced or read.
 
 load helpers
 
@@ -40,8 +40,9 @@ shellcheck_repo() {
 
 @test "no file that git tracks or would add holds a CR byte" {
     local path
-    local -a files=() required=(bin/tlogger lib/config.zsh lib/tlogger.zsh libexec/rcblock.awk
-        libexec/tlogger_view.py VERSION tests/stub-bin/zsh tests/stub-bin/tlogger-test-recorder
+    local -a files=() required=(bin/tlogger lib/config.zsh lib/tlogger.zsh libexec/legacyblock.awk
+        libexec/rcblock.awk libexec/tlogger_view.py VERSION tests/stub-bin/zsh
+        tests/stub-bin/tlogger-test-recorder
         tests/stub-bin/tlogger-test-ip tests/golden/rc-block.zsh
         tests/fixtures/skel-zshrc tests/fixtures/e2e-zshrc tests/fixtures/e2e-auto-zshrc
         tests/helpers/pty.zsh tests/helpers/fakeproc.zsh)
@@ -108,6 +109,24 @@ shellcheck_repo() {
     (( checked > 0 ))
 }
 
+@test "legacyblock.awk prints none for empty input under each awk on PATH" {
+    local awk
+    local -i checked=0
+    for awk in mawk gawk awk; do
+        if ! command -v "$awk" > /dev/null 2>&1; then
+            continue
+        fi
+        run env LEGACY_START='# start' LEGACY_END='# end' \
+            "$awk" -f "$REPO_ROOT/libexec/legacyblock.awk" < /dev/null
+        if [[ $status -ne 0 || $output != none ]]; then
+            printf '%s printed (exit %s):\n%s\n' "$awk" "$status" "$output" >&2
+            return 1
+        fi
+        checked+=1
+    done
+    (( checked > 0 ))
+}
+
 @test "libexec/tlogger_view.py compiles and imports nothing but the standard library and pyte" {
     need python3
     # cfile puts the bytecode in the test's folder, not beside the file.
@@ -157,9 +176,9 @@ shellcheck_repo() {
             return 1
         fi
     done
-    # git runs a hook only when it is executable. denylist.sh, the plugin files, rcblock.awk,
-    # tlogger_view.py, which python3 -I reads, and the test helpers are sourced or read, never run
-    # themselves, so none of them is executable.
+    # git runs a hook only when it is executable. denylist.sh, the plugin files, the two awk
+    # scanners, tlogger_view.py, which python3 -I reads, and the test helpers are sourced or read,
+    # never run themselves, so none of them is executable.
     listing=$(git -C "$REPO_ROOT" ls-files -s -- .githooks bin lib libexec tests)
     while read -r mode _ _ path; do
         case $path in

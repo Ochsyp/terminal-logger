@@ -90,6 +90,16 @@ All notable changes to this project are listed here. The format follows
     signal after dropping what it had not finished writing, it restores the terminal.
 - Tests of the renderer on synthetic logs, of the replay filter and of the three commands, and an
   end-to-end test that renders and replays a session recorded in a pseudo-terminal.
+- Moving from an older logger with `tlogger install`. `--remove-block START END` takes the block
+  between two given whole lines out of the rc in the same checked write that adds the tlogger
+  block, and saves its exact bytes in `~/.local/state/tlogger/quarantine` (0700, files 0600).
+  `--block-sha256 HASH`, which `--yes` needs outside a dry run, holds it to the block the dry run
+  showed. `--quarantine FILE` moves the older logger's stale backup there, with mode 0600 and its
+  timestamp; it refuses links, start-up files, tlogger's own files and logs, and anything outside
+  the home and zsh folders. A real run prints the commands that put the block back. A release
+  holds `libexec/legacyblock.awk`, which finds the block.
+- Tests of the block scan under each awk, and of the cut, the fingerprint, the refusals, the move
+  and the undo.
 
 ### Changed
 
@@ -108,5 +118,9 @@ All notable changes to this project are listed here. The format follows
   starts; a session that never started, with nothing but empty logs, is still removed.
 - CI installs `python3` and `python3-pyte` and prints the versions of `scriptreplay`, `python3`
   and `python3-pyte`. A release holds `libexec/tlogger_view.py` as well.
+
+### Fixed
+
+- The in-place write of a hard-linked rc also ignores QUIT, so that Ctrl+\ cannot cut it short.
 
 [Unreleased]: https://github.com/Ochsyp/terminal-logger/commits/main
