@@ -405,7 +405,7 @@ writes, moves or renames them. Three commands read them:
 |---|---|
 | `tlogger render [--stdout] [SESSION]` | Writes the plain-text transcript of the session to `transcript.txt` in its folder and names it, as in `tlogger: transcript ~/.local/state/tlogger/sessions/20261104T101500Z-a1B2c3/transcript.txt`; `--stdout` prints the transcript instead and writes nothing |
 | `tlogger show [SESSION]` | Pages the transcript with `less`, after rendering it when `transcript.txt` is missing, older than the logs, or not what `render` writes (see below); without a terminal on stdout, prints it |
-| `tlogger replay [--speed N] [--maxdelay S] [SESSION]` | Replays the session in this terminal at its recorded pace with util-linux `scriptreplay`, through a filter; `--speed 2` replays twice as fast and `--speed 0.5` at half the pace, and `--maxdelay 1` waits at most a second between two outputs. Space pauses, Up and Down change the speed, and Ctrl+C stops. Keys still queued when a replay ends are discarded |
+| `tlogger replay [--speed N] [--maxdelay S] [SESSION]` | Replays the session in this terminal at its recorded pace with util-linux `scriptreplay`, through a filter; `--speed 2` replays twice as fast and `--speed 0.5` at half the pace, and `--maxdelay 1` waits at most a second between two outputs. Space pauses, Up and Down change the speed, Ctrl+C stops, and Ctrl+Z suspends it until `fg`. Keys still queued when a replay ends are discarded |
 
 `SESSION` is a session id, which names a folder in the log folder, such as
 `20261104T101500Z-a1B2c3`; or a path to a session folder anywhere, by any name, which holds a
@@ -494,6 +494,13 @@ or Ctrl+C or Ctrl+\ stops it, the filter puts back the colours, the cursor, the 
 the normal screen, and turns mouse, focus and bracketed-paste reporting off. The filter writes
 UTF-8 and expects a UTF-8 terminal, as Kali's terminals are: a terminal set to an 8-bit character
 set such as Latin-1 can read bytes inside UTF-8 characters as C1 controls.
+
+Ctrl+Z suspends a replay. The filter first puts back the screen and the terminal settings, so your
+prompt comes back clean, and `fg` carries on from the same place. After `bg` the replay stays
+suspended until `fg`, because it needs the terminal. A full-screen program in the replay can look
+wrong after `fg` until it next redraws. With no job-control shell above the replay, as after
+`exec`, Ctrl+Z does nothing, since nothing could resume it. A stop sent from outside with
+`kill -STOP` cannot be caught, so it leaves the terminal as the replay had it.
 
 `scriptreplay` reads a copy of the timing file, in a private temp folder, without its header
 lines: under a locale such as `de_DE`, `script` writes their delays with a comma, and

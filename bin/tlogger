@@ -277,7 +277,7 @@ hidden prompts. render and show need python3 and python3-pyte, replay python3 an
   render --stdout      Print the transcript instead of writing transcript.txt.
   replay --speed N     Replay N times as fast; N is a positive number, such as 2 or 0.5.
   replay --maxdelay S  Wait at most S seconds between two outputs.
-During a replay, Space pauses, Up and Down change the speed and Ctrl+C stops.
+During a replay, Space pauses, Up and Down change the speed, Ctrl+C stops and Ctrl+Z suspends it.
 
 Install options:
   --mode auto|manual  Record every new terminal (auto) or only on request, with tlogger start
@@ -2829,14 +2829,20 @@ restore_tty() {
 # only on a terminal stdout, stays off the shell's own terminal file. Without a stdin terminal
 # and a /dev/tty that opens, it reads /dev/null, never a stdin it may share with the calling
 # shell. Needs WORK for scriptreplay's messages; restore_tty undoes the stty and drops queued keys.
+# bash and scriptreplay ignore SIGTSTP during the pipeline, so that Ctrl+Z stops nothing until the
+# filter has restored the terminal. A SIGTSTP that was ignored when tlogger started stays ignored.
 replay_through_filter() {
     local -i tty=0 replay filter
-    local -a codes
+    local -a codes suspend=()
     local line home
     if [[ -t 0 ]] && { : < /dev/tty; } 2> /dev/null; then
         exec {tty}< /dev/tty
         TTY_SAVED=$(stty -g <&"$tty" 2> /dev/null) || TTY_SAVED=
         if [[ -n $TTY_SAVED ]]; then
+            if [[ -z $(trap -p TSTP) ]]; then
+                trap '' TSTP
+                suspend=(--suspend "$TTY_SAVED")
+            fi
             stty -icanon -echo min 1 time 0 <&"$tty" 2> /dev/null || true
         fi
         msg "replaying session $SESSION_ID: Space pauses, Up and Down change the speed, Ctrl+C stops"
@@ -2844,12 +2850,15 @@ replay_through_filter() {
         exec {tty}< /dev/null
     fi
     if "$SCRIPTREPLAY" "$@" <&"$tty" 2> "$WORK/scriptreplay.err" |
-        "$PYTHON" -I "$SRC_ROOT/libexec/tlogger_view.py" filter; then
+        "$PYTHON" -I "$SRC_ROOT/libexec/tlogger_view.py" filter "${suspend[@]}"; then
         codes=("${PIPESTATUS[@]}")
     else
         codes=("${PIPESTATUS[@]}")
     fi
     restore_tty
+    if (( ${#suspend[@]} )); then
+        trap - TSTP
+    fi
     if (( tty )); then
         exec {tty}<&-
     fi
