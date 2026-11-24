@@ -166,7 +166,8 @@ bats tests/
   `bin/tlogger` runs in place of `/usr/bin/python3` and `/usr/bin/scriptreplay`; they exist for
   the tests only. The tests name stand-ins there: a `scriptreplay` that records its arguments
   and prints a fixed replay, and `python3` stand-ins that fail as the Windows Store stub does or
-  lack `pyte`. One test replays through the real `scriptreplay`.
+  lack `pyte`. One test replays through the real `scriptreplay`, and one checks that a second
+  SIGTERM cannot cut cleanup short.
 - `tests/e2e-render.bats` records a session as `tests/e2e-manual.bats` does, with `clear` and an
   OSC title, a cursor position request and mouse reporting in it, then renders, shows and
   replays it with `/usr/bin/python3` and the real `scriptreplay`, and checks that neither the

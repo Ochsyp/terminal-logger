@@ -127,8 +127,9 @@ All notable changes to this project are listed here. The format follows
 
 ### Fixed
 
-- Cleanup at the end of every tlogger command ignores HUP, INT, QUIT and TERM, so a second
-  Ctrl+C or a closing terminal can no longer stop it halfway and leave a temp folder behind.
+- Cleanup at the end of every command that `bin/tlogger` runs ignores HUP, INT, QUIT and TERM,
+  so a second Ctrl+C or a closing terminal can no longer stop it halfway and leave a temp folder
+  behind.
 - Ctrl+Z during `tlogger replay` gives a clean prompt: the filter restores the screen and the
   terminal settings before the replay stops, and `fg` carries on from the same place. After `bg`
   the replay waits for `fg`, and with no job-control shell above it Ctrl+Z does nothing.

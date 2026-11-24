@@ -330,7 +330,7 @@ pty_begin "tty-replay $ID"
 n=$REPLY
 pty_expect twice-one
 pty_type $'\x03'
-_pty_until '[[ -e $HOME/flush-started ]]' 'the start of the key flush'
+pty_wait_file $HOME/flush-started
 pty_type $'\x03'
 pty_end $n
 (( PTY_STATUS == 130 )) || pty_fail "replay returned $PTY_STATUS"

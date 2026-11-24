@@ -361,8 +361,10 @@ tlogger: the replay of session $ID failed: scriptreplay exited with status 3" ]
     # The replay runs long enough for the first SIGTERM, and rm holds cleanup open for the second.
     # shellcheck disable=SC2016 # sh expands these, not bash.
     make_tool scriptreplay ': > "$HOME/replay-started"; sleep 2; printf "shown\n"'
-    # shellcheck disable=SC2016 # sh expands $HOME and $@, not bash.
-    make_tool rm ': > "$HOME/rm-started"; sleep 2; exec '"$real_rm"' "$@"'
+    # It waits only when it removes the work folder's files, which cleanup alone does.
+    # shellcheck disable=SC2016 # sh expands $HOME, $* and $@, not bash.
+    make_tool rm 'case "$*" in *"/tlogger."*) : > "$HOME/rm-started"; sleep 2 ;; esac
+exec '"$real_rm"' "$@"'
     session_new "$LOGS/$ID"
     session_out 'hello\r\n'
     session_end

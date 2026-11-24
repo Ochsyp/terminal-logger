@@ -259,6 +259,12 @@ pty_absent() {
     done
 }
 
+# Keep reading the terminal until FILE exists, at most SECONDS; end the driver when it does not.
+pty_wait_file() {
+    local file=$1
+    _pty_until '[[ -e $file ]]' "the file ${(V)file}" $2
+}
+
 # Set REPLY to the terminal settings as stty -g prints them, read by a command in the terminal.
 pty_stty() {
     pty_run 'stty -g'
