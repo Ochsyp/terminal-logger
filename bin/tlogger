@@ -2787,7 +2787,7 @@ run_render() {
 # session and no control byte but LF and HT, so that show can page it as it is. The file sits in
 # a folder that a crafted session may have filled, so show prints it only when it looks like
 # render's own: valid UTF-8, with no NUL or other C0 byte, no DEL and no C1 control (C2 80 to
-# C2 9F). Without iconv the file counts as untrusted, which only costs a render.
+# C2 9F). Without iconv the file counts as untrusted and is rendered again.
 transcript_fresh() {
     local t=$SESSION_DIR/transcript.txt
     local LC_ALL=C first chunk carry=''
