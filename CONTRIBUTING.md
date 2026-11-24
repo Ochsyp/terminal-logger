@@ -169,8 +169,8 @@ bats tests/
   replays it with `/usr/bin/python3` and the real `scriptreplay`, and checks that neither the
   transcript nor the replay keeps those sequences.
 - `tests/e2e-view-tty.bats` runs `show` and `replay` in a real pseudo-terminal on made-up
-  sessions: the pager and its secure mode, the replay keys, Ctrl+C and the terminal settings they
-  leave. It needs `less`, which only the test job installs; the tool itself does not require it.
+  sessions: the pager and its secure mode, the replay keys, Ctrl+C, Ctrl+Z with `fg` and `bg`, and
+  the terminal settings they leave. It needs `less`, which only the test job installs; the tool itself does not require it.
 - git stores the hooks, `bin/tlogger`, the stubs in `tests/stub-bin` and every `.bats` file as
   executable files, and the sourced files as plain ones, `libexec/tlogger_view.py` among them; a
   lint test checks the modes in the index. Where `core.filemode` is false, as on Git for Windows,
@@ -294,7 +294,8 @@ dropped whole. At the end of its input and on SIGHUP, SIGINT, SIGQUIT or SIGTERM
 fixed restore sequence, which `FILTER_RESTORE` in `tests/helpers.bash` holds byte for byte. On a
 signal it first drops what it had not finished writing, so that a write the signal cut short is
 never sent again from its start; the restore sequence begins with ESC, which ends a sequence that
-the cut left open.
+the cut left open. With `--suspend`, which `bin/tlogger` passes on a terminal, it also writes the
+restore sequence on Ctrl+Z, after any write in progress, before it stops the process group.
 
 ### Moving the Kali image
 

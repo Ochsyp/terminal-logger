@@ -19,7 +19,7 @@ USAGE = """\
 usage: tlogger_view.py probe [--pyte]
        tlogger_view.py render --version VERSION [--stdout] [--] SESSION_FOLDER
        tlogger_view.py replay-timing < TIMING
-       tlogger_view.py filter
+       tlogger_view.py filter [--suspend SETTINGS]
 """
 
 # A tlogger version, as bin/tlogger's VERSION_RE takes it.
@@ -435,18 +435,148 @@ def filter_tokens(tokens):
     return "".join(out)
 
 
+# The form of stty -g, in which bin/tlogger passes the shell's terminal settings to the filter.
+_STTY_SAVED = re.compile(r"[0-9a-fA-F]+(?::[0-9a-fA-F]+)+")
+
+
+def _job_shell_above():
+    """Return True when an ancestor outside this process group is in this session.
+
+    That ancestor is a job-control shell, which can resume a stopped group. Without one the group
+    is orphaned, and SIGSTOP would leave it stopped for good. An error counts as no shell.
+    """
+    group, session = os.getpgrp(), os.getsid(0)
+    pid = os.getppid()
+    try:
+        while pid > 0:
+            if os.getpgid(pid) != group:
+                return os.getsid(pid) == session
+            with open("/proc/%d/stat" % pid, "rb") as stat:
+                pid = int(stat.read().rpartition(b")")[2].split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return False
+
+
+class _Suspend:
+    """Act on Ctrl+Z during a replay: restore the terminal, stop the group, carry on after fg.
+
+    bin/tlogger and scriptreplay ignore SIGTSTP, so the shell takes the terminal back only after
+    this class has restored it and stopped them all. zsh does not reset the terminal settings of
+    a stopped job, so this class puts the shell's back, and the replay's after fg.
+    """
+
+    def __init__(self, sink, saved, tty, replay_mode, termios, subprocess):
+        self.sink = sink
+        self.saved = saved
+        self.tty = tty
+        self.replay_mode = replay_mode
+        self.termios = termios
+        self.subprocess = subprocess
+        self.writing = False
+        self.pending = False
+        signal.signal(signal.SIGTSTP, self.on_signal)
+
+    @classmethod
+    def start(cls, sink, saved):
+        """Return a _Suspend for the controlling terminal, or None when there is none."""
+        try:
+            import subprocess
+            import termios
+            tty = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
+        except (ImportError, OSError):
+            return None
+        try:
+            return cls(sink, saved, tty, termios.tcgetattr(tty), termios, subprocess)
+        except termios.error:
+            os.close(tty)
+            return None
+
+    def on_signal(self, signum, frame):
+        """Stop now, or after the write in progress, so that no sequence is cut in two."""
+        if self.writing:
+            self.pending = True
+        else:
+            self.stop()
+
+    def write(self, data):
+        """Write DATA out whole, then act on a Ctrl+Z that came during the write."""
+        self.writing = True
+        self.sink.write(data)
+        self.sink.flush()
+        self.writing = False
+        if self.pending:
+            self.stop()
+
+    def foreground(self):
+        """Return True while this process group owns the terminal."""
+        try:
+            return os.tcgetpgrp(self.tty) == os.getpgrp()
+        except OSError:
+            return False
+
+    def stop(self):
+        """Suspend the replay. Does nothing when no job-control shell could resume it.
+
+        bg resumes the group too, so it stops again until it owns the terminal: in the background
+        scriptreplay would read keys that belong to the shell.
+        """
+        signal.signal(signal.SIGTSTP, signal.SIG_IGN)
+        self.pending = False
+        if self.foreground() and _job_shell_above():
+            if os.isatty(1):
+                self.sink.write(RESTORE)
+                self.sink.flush()
+            try:
+                self.subprocess.run(["stty", self.saved], stdin=self.tty, check=False,
+                                    stdout=self.subprocess.DEVNULL,
+                                    stderr=self.subprocess.DEVNULL)
+            except OSError:
+                pass
+            os.kill(0, signal.SIGSTOP)
+            while not self.foreground() and _job_shell_above():
+                os.kill(0, signal.SIGSTOP)
+            if self.foreground():
+                try:
+                    self.termios.tcsetattr(self.tty, self.termios.TCSANOW, self.replay_mode)
+                except self.termios.error:
+                    pass
+        signal.signal(signal.SIGTSTP, self.on_signal)
+
+
+def _filter_saved_settings(args):
+    """Return the settings that 'filter --suspend SETTINGS' names, or None without arguments."""
+    if not args:
+        return None
+    if args[0] != "--suspend":
+        raise UsageError("filter takes no arguments")
+    if len(args) != 2 or not _STTY_SAVED.fullmatch(args[1]):
+        raise UsageError("filter --suspend takes the terminal settings that stty -g prints")
+    return args[1]
+
+
 def cmd_filter(args):
-    """tlogger_view.py filter: copy stdin to stdout through the allow-list, then RESTORE.
+    """tlogger_view.py filter [--suspend SETTINGS]: copy stdin to stdout through the allow-list,
+    then RESTORE.
 
     Reads and writes unbuffered, with os.read and os.write. Bytes that are not valid UTF-8 are
     dropped, raw C1 bytes among them. RESTORE follows the end of input and each signal of
-    _STOP_SIGNALS; Stop then leaves through main with 128 plus the signal number.
+    _STOP_SIGNALS; Stop then leaves through main with 128 plus the signal number. --suspend
+    handles Ctrl+Z as _Suspend says; SETTINGS are the shell's terminal settings, from stty -g.
     """
-    if args:
-        raise UsageError("filter takes no arguments")
+    saved = _filter_saved_settings(args)
     decoder = codecs.getincrementaldecoder("utf-8")(errors="ignore")
     tokenizer = Tokenizer()
     sink = Sink(1)
+    suspend = _Suspend.start(sink, saved) if saved else None
+
+    def emit(data):
+        if suspend:
+            suspend.write(data)
+        else:
+            sink.write(data)
+            sink.flush()
+
     try:
         while True:
             data = os.read(0, 65536)
@@ -454,13 +584,13 @@ def cmd_filter(args):
                 break
             text = filter_tokens(tokenizer.feed(decoder.decode(data)))
             if text:
-                sink.write(text.encode("utf-8"))
-                sink.flush()
+                emit(text.encode("utf-8"))
         text = filter_tokens(tokenizer.feed(decoder.decode(b"", True)))
         tokenizer.finish()
-        sink.write(text.encode("utf-8"))
-        sink.flush()
+        emit(text.encode("utf-8"))
     finally:
+        if suspend:
+            signal.signal(signal.SIGTSTP, signal.SIG_IGN)
         _ignore_signals()
         # A signal can come after a short write, before flush has dropped what was written. Sent
         # again, the chunk would start in the middle of whatever the cut left open. RESTORE

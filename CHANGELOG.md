@@ -124,6 +124,9 @@ All notable changes to this project are listed here. The format follows
 
 ### Fixed
 
+- Ctrl+Z during `tlogger replay` gives a clean prompt: the filter restores the screen and the
+  terminal settings before the replay stops, and `fg` carries on from the same place. After `bg`
+  the replay waits for `fg`, and with no job-control shell above it Ctrl+Z does nothing.
 - `tlogger show` also clears `LESSSECURE_ALLOW`, `LESS_IS_MORE` and `MORE`. A `LESSSECURE_ALLOW`
   in the environment could turn the pager's blocked keys back on, and the other two could pass
   it options.
