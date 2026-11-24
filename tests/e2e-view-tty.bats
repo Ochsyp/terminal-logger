@@ -22,7 +22,10 @@ setup() {
     need pyte
     export ID=20261112T100000Z-a1B2c3 TLOGGER FILTER_RESTORE
     LOGS="$HOME/.local/state/tlogger/sessions"
+    # shellcheck disable=SC2034 # drive reads it.
     SCREEN="$BATS_TEST_TMPDIR/screen"
+    # shellcheck disable=SC2034 # The helpers of this file's drivers.
+    DRIVE_PRELUDE="$REPO_ROOT/tests/helpers/view-tty.zsh"
     mkdir -p "$LOGS" "$HOME/bin"
     cp "$REPO_ROOT/tests/fixtures/e2e-zshrc" "$HOME/.zshrc"
     make_tools
@@ -55,50 +58,6 @@ trap '' TSTP
 exec bash "$TLOGGER" replay "$@"
 EOF
     chmod 755 "$HOME/bin/jj" "$HOME/bin/tty-replay" "$HOME/bin/no-tstp-replay"
-}
-
-# Run the zsh code on stdin as the driver, after the helpers below: zsh -f with
-# tests/helpers/pty.zsh loaded, under a hard timeout, with fd 3 closed so that nothing it starts
-# can hold bats up. SCREEN receives everything the terminal printed.
-#   term_shell   starts the shell in a 24x80 xterm, with ~/bin first on PATH.
-#   shell_works  fails unless the shell still runs a command.
-#   tty_is       fails unless tty-replay saved the terminal settings SAVED.
-#   start_replay types a replay as a job of its own, on a line without frame markers.
-#   press_ctrl_z types Ctrl+Z and waits for the restore sequence, then for zsh's job message.
-#   type_fg      types fg, then a marker <fg:STATUS> with the status that fg returns.
-drive() {
-    {
-        cat << 'EOF'
-term_shell() {
-    pty_shell TERM=xterm "PATH=$HOME/bin:$PATH" "TLOGGER=$TLOGGER" "TMPDIR=$TMPDIR" "$@"
-}
-shell_works() {
-    pty_run 'print -r -- shell-ok-$((6*7))'
-    pty_out_is shell-ok-42 || pty_fail "the shell printed ${(V)PTY_OUT}"
-}
-tty_is() {
-    [[ $(<$HOME/tty-after) == "$1" ]] ||
-        pty_fail "the terminal settings are $(<$HOME/tty-after), not $1"
-}
-start_replay() {
-    pty_send "bash \"\$TLOGGER\" replay $ID"
-}
-press_ctrl_z() {
-    pty_type $'\x1a'
-    pty_expect "$FILTER_RESTORE"
-    pty_expect suspended
-}
-type_fg() {
-    pty_send 'fg; echo "<fg:$?>"'
-}
-EOF
-        cat
-    } > "$BATS_TEST_TMPDIR/driver.zsh"
-    : > "$SCREEN"
-    # zsh expands these, not bash.
-    # shellcheck disable=SC2016
-    PTY_SCREEN_FILE=$SCREEN timeout -k 5 150 zsh -f -c 'source "$1" && source "$2"' zsh \
-        "$REPO_ROOT/tests/helpers/pty.zsh" "$BATS_TEST_TMPDIR/driver.zsh" < /dev/null 3>&-
 }
 
 # Create the session ID with 200 numbered lines, more than one screen of the pager holds.
@@ -148,15 +107,12 @@ path_without_less() {
     page_session
     drive << 'EOF'
 term_shell
-pty_begin "bash \"\$TLOGGER\" show $ID"
-n=$REPLY
+show_begin
 pty_expect '# DERIVED transcript'
 pty_expect page-line-001
 pty_expect page-line-015
 pty_absent page-line-100 1
-pty_type q
-pty_end $n
-(( PTY_STATUS == 0 )) || pty_fail "show returned $PTY_STATUS"
+show_quit
 shell_works
 pty_close
 EOF
@@ -170,16 +126,13 @@ EOF
     drive << 'EOF'
 term_shell "SHELL=$HOME/bin/jj" "VISUAL=$HOME/bin/jj" "EDITOR=$HOME/bin/jj"
 pty_run 'cd ~'
-pty_begin "bash \"\$TLOGGER\" show $ID"
-n=$REPLY
+show_begin
 pty_expect page-line-015
 for keys in $'!jj\n' $'|.jj\n' $'v\n' $'-Ojj\n'; do
     pty_type $keys
     pty_expect 'not available'
 done
-pty_type q
-pty_end $n
-(( PTY_STATUS == 0 )) || pty_fail "show returned $PTY_STATUS"
+show_quit
 shell_works
 [[ ! -e $HOME/tool-ran ]] || pty_fail 'a pager key ran a command'
 pty_close
@@ -191,14 +144,11 @@ EOF
     page_session
     drive << 'EOF'
 term_shell "SHELL=$HOME/bin/jj" 'LESSSECURE_ALLOW=shell'
-pty_begin "bash \"\$TLOGGER\" show $ID"
-n=$REPLY
+show_begin
 pty_expect page-line-015
 pty_type $'!jj\n'
 pty_expect 'not available'
-pty_type q
-pty_end $n
-(( PTY_STATUS == 0 )) || pty_fail "show returned $PTY_STATUS"
+show_quit
 [[ ! -e $HOME/tool-ran ]] || pty_fail 'the shell key ran a command'
 pty_close
 EOF
@@ -210,13 +160,10 @@ EOF
     # LESS_IS_MORE makes less read its options from MORE, and +G would open it on the last page.
     drive << 'EOF'
 term_shell 'LESS_IS_MORE=1' 'MORE=+G'
-pty_begin "bash \"\$TLOGGER\" show $ID"
-n=$REPLY
+show_begin
 pty_expect page-line-001
 pty_absent page-line-200 1
-pty_type q
-pty_end $n
-(( PTY_STATUS == 0 )) || pty_fail "show returned $PTY_STATUS"
+show_quit
 pty_close
 EOF
 }
@@ -227,13 +174,10 @@ EOF
     # LESS=+G would open the pager on the last page, and the other two would run jj.
     drive << 'EOF'
 term_shell 'LESS=+G' "LESSOPEN=|$HOME/bin/jj %s" "LESSCLOSE=$HOME/bin/jj %s %s"
-pty_begin "bash \"\$TLOGGER\" show $ID"
-n=$REPLY
+show_begin
 pty_expect page-line-001
 pty_absent page-line-200 1
-pty_type q
-pty_end $n
-(( PTY_STATUS == 0 )) || pty_fail "show returned $PTY_STATUS"
+show_quit
 shell_works
 [[ ! -e $HOME/tool-ran ]] || pty_fail 'LESSOPEN or LESSCLOSE ran a command'
 pty_close

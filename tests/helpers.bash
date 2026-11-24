@@ -2,8 +2,8 @@
 # Test helpers, sourced by every .bats file in tests/ through `load helpers`. Each test gets its
 # own home, so that neither the developer's git settings, denylist or zsh files can reach it.
 # Also: throwaway git repositories for the hook tests, need() for tests that only some machines
-# can run, a zsh stub first on PATH where zsh is missing, a fake sysfs, journal line checks and
-# synthetic session logs for render, show and replay.
+# can run, a zsh stub first on PATH where zsh is missing, a fake sysfs, journal line checks,
+# synthetic session logs for render, show and replay, and drive, which runs every e2e driver.
 
 # The repository under test, and the synthetic term the denylist tests use.
 REPO_ROOT="${BATS_TEST_DIRNAME%/*}"
@@ -420,4 +420,24 @@ refute_controls() {
         LC_ALL=C grep -n -m 5 -e '[[:cntrl:]]' -e $'\xc2[\x80-\x9f]' "$1" | od -c | head -n 20 >&2
         return 1
     fi
+}
+
+# Run the zsh code on stdin as a driver of an e2e test: zsh -f with tests/helpers/pty.zsh loaded,
+# then the zsh file that DRIVE_PRELUDE names, when the test file sets it, then the code. It runs
+# under a hard timeout, with fd 3 closed so that nothing it starts can hold bats up. A driver that
+# gives up fails the test with a report on stderr. SCREEN, which the test file sets, receives
+# everything the terminals printed.
+drive() {
+    local driver="$BATS_TEST_TMPDIR/driver.zsh"
+    {
+        if [[ -n ${DRIVE_PRELUDE-} ]]; then
+            cat -- "$DRIVE_PRELUDE"
+        fi
+        cat
+    } > "$driver"
+    : > "$SCREEN"
+    # zsh expands these, not bash.
+    # shellcheck disable=SC2016
+    PTY_SCREEN_FILE=$SCREEN timeout -k 5 150 zsh -f -c 'source "$1" && source "$2"' zsh \
+        "$REPO_ROOT/tests/helpers/pty.zsh" "$driver" < /dev/null 3>&-
 }

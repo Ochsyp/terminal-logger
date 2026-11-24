@@ -45,7 +45,7 @@ shellcheck_repo() {
         tests/stub-bin/tlogger-test-recorder
         tests/stub-bin/tlogger-test-ip tests/golden/rc-block.zsh
         tests/fixtures/skel-zshrc tests/fixtures/e2e-zshrc tests/fixtures/e2e-auto-zshrc
-        tests/helpers/pty.zsh tests/helpers/fakeproc.zsh)
+        tests/helpers/pty.zsh tests/helpers/fakeproc.zsh tests/helpers/view-tty.zsh)
     while IFS= read -r -d '' path; do
         if [[ -f "$REPO_ROOT/$path" ]]; then
             files+=("$REPO_ROOT/$path")

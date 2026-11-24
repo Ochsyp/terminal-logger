@@ -106,7 +106,10 @@ bats tests/
   into the test's HOME and drives an interactive zsh in a pseudo-terminal through zsh's own
   `zsh/zpty` module, with the functions in `tests/helpers/pty.zsh`. The driver types lines, waits
   for output at most 20 seconds a time and runs under `timeout`, and it frames each command with
-  marker commands that give its output and exit status. A wait that gives up, or that sees the
+  marker commands that give its output and exit status. Every e2e file runs its drivers through
+  `drive` in `tests/helpers.bash`; a file sets `DRIVE_PRELUDE` to a zsh file of its own driver
+  helpers, as `tests/e2e-view-tty.bats` does with `tests/helpers/view-tty.zsh`, and a lint test
+  keeps it that way. A wait that gives up, or that sees the
   shell in the terminal end first, fails the test with the end of the terminal output, control
   characters shown as `^X`; the whole transcript is the file `screen` in the test's temp folder,
   which `bats --no-tempdir-cleanup` keeps. The rc is `tests/fixtures/e2e-zshrc`, which turns the

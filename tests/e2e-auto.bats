@@ -30,18 +30,6 @@ setup() {
     [ -z "$(session_names)" ]
 }
 
-# Run the zsh code on stdin as the driver: zsh -f with tests/helpers/pty.zsh loaded, under a hard
-# timeout, with fd 3 closed so that nothing it starts can hold bats up. A driver that gives up
-# fails the test with a report on stderr. SCREEN receives everything the terminals printed.
-drive() {
-    cat > "$BATS_TEST_TMPDIR/driver.zsh"
-    : > "$SCREEN"
-    # zsh expands these, not bash.
-    # shellcheck disable=SC2016
-    PTY_SCREEN_FILE=$SCREEN timeout -k 5 150 zsh -f -c 'source "$1" && source "$2"' zsh \
-        "$REPO_ROOT/tests/helpers/pty.zsh" "$BATS_TEST_TMPDIR/driver.zsh" < /dev/null 3>&-
-}
-
 # Print the names in the sessions folder, one per line, sorted.
 session_names() {
     find "$SESSIONS" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort
