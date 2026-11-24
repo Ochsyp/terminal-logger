@@ -2786,7 +2786,8 @@ run_render() {
 # symlink, newer than output.raw and timing, with the header line that render writes for this
 # session and no control byte but LF and HT, so that show can page it as it is. The file sits in
 # a folder that a crafted session may have filled, so show prints it only when it looks like
-# render's own: no NUL or other C0 byte, no DEL and no UTF-8 C1 control (C2 80 to C2 9F).
+# render's own: valid UTF-8, with no NUL or other C0 byte, no DEL and no C1 control (C2 80 to
+# C2 9F). Without iconv the file counts as untrusted, which only costs a render.
 transcript_fresh() {
     local t=$SESSION_DIR/transcript.txt
     local LC_ALL=C first chunk carry=''
@@ -2797,6 +2798,8 @@ transcript_fresh() {
         return 1
     # tr deletes the bytes allowed; any byte left is a control byte.
     (( $(LC_ALL=C tr -d '\11\12\40-\176\200-\377' < "$t" | head -c 1 | wc -c) == 0 )) || return 1
+    # render writes only valid UTF-8, so a raw byte such as 0x9B cannot come from it.
+    iconv -f UTF-8 -t UTF-8 < "$t" > /dev/null 2>&1 || return 1
     # A chunk is checked with the last byte of the one before, so that no pair is split.
     while IFS= read -r -N 65536 chunk || [[ -n $chunk ]]; do
         if [[ $carry$chunk == *$'\xc2'[$'\x80'-$'\x9f']* ]]; then

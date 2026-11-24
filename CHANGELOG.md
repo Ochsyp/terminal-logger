@@ -127,6 +127,9 @@ All notable changes to this project are listed here. The format follows
 
 ### Fixed
 
+- `tlogger show` pages an existing transcript only when it is valid UTF-8, as `render` writes it.
+  Any other transcript, such as one with a raw byte 0x9B that a terminal could read as a control,
+  is rendered again from the logs.
 - Cleanup at the end of every command that `bin/tlogger` runs ignores HUP, INT, QUIT and TERM,
   so a second Ctrl+C or a closing terminal can no longer stop it halfway and leave a temp folder
   behind.

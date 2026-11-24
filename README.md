@@ -471,9 +471,9 @@ the session from the transcript, though not from `replay`; the marker line shows
 `LESSOPEN`, `LESSCLOSE`, `LESSSECURE_ALLOW`, `LESS_IS_MORE` and `MORE`, so that no input
 preprocessor runs and those variables cannot undo that mode. It prints or pages an existing
 `transcript.txt` as it is only when the file is newer than the logs, starts with the header line
-that `render` writes for this session and holds no control byte but LF and HT (no NUL or other
-C0 byte, no DEL, no C1 control in UTF-8). Any other file, such as one that someone put into the
-session folder, is rendered again.
+that `render` writes for this session, is valid UTF-8 and holds no control byte but LF and HT
+(no NUL or other C0 byte, no DEL, no C1 control). Any other file, such as one that someone put
+into the session folder, is rendered again.
 
 ### Replay and its filter
 
