@@ -87,8 +87,23 @@ shellcheck_repo() {
     need zsh
     local file
     for file in "$REPO_ROOT/lib/tlogger.zsh" "$REPO_ROOT/lib/config.zsh" \
-        "$REPO_ROOT/tests/helpers/pty.zsh" "$REPO_ROOT/tests/helpers/fakeproc.zsh"; do
+        "$REPO_ROOT/tests/helpers/pty.zsh" "$REPO_ROOT/tests/helpers/fakeproc.zsh" \
+        "$REPO_ROOT/tests/helpers/view-tty.zsh"; do
         zsh -n "$file"
+    done
+}
+
+@test "every e2e file runs its drivers through drive in tests/helpers.bash and defines none" {
+    local file
+    local -a files=("$REPO_ROOT"/tests/e2e-*.bats)
+    (( ${#files[@]} >= 5 ))
+    grep -q '^drive() {$' "$REPO_ROOT/tests/helpers.bash"
+    for file in "${files[@]}"; do
+        if grep -qE '^[[:space:]]*(function[[:space:]]+)?drive[[:space:]]*(\(\)|\{)' "$file"; then
+            printf '%s defines its own drive\n' "${file##*/}" >&2
+            return 1
+        fi
+        grep -qF "drive << 'EOF'" "$file"
     done
 }
 
