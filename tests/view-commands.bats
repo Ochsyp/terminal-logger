@@ -84,6 +84,19 @@ fi
 cat -- "$HOME/replay-out"'
 }
 
+# Wait at most 10 seconds until FILE exists; fail when it does not.
+wait_for_file() {
+    local i
+    for (( i = 0; i < 100; i++ )); do
+        if [[ -e $1 ]]; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    printf '%s did not appear within 10 seconds\n' "$1" >&2
+    return 1
+}
+
 # Print the header line that render writes to the transcript of the session NAME.
 transcript_header() {
     printf '# DERIVED transcript of session %s; the evidence is output.raw with timing. tlogger 0.1.0, rendered 2026-11-12T10:00:00Z\n' "$1"
@@ -337,6 +350,35 @@ crafted_transcript() {
     [ "$stderr" = "tlogger: scriptreplay: scriptreplay: cannot open ~/replay-out: No such file or directory
 tlogger: the replay of session $ID failed: scriptreplay exited with status 3" ]
     refute_home_shown
+    refute_temp_left
+}
+
+@test "a second SIGTERM while replay cleans up does not cut the cleanup short" {
+    need python3-signals
+    need proc
+    local pid status real_rm
+    real_rm=$(command -v rm)
+    # The replay runs long enough for the first SIGTERM, and rm holds cleanup open for the second.
+    # shellcheck disable=SC2016 # sh expands these, not bash.
+    make_tool scriptreplay ': > "$HOME/replay-started"; sleep 2; printf "shown\n"'
+    # It waits only when it removes the work folder's files, which cleanup alone does.
+    # shellcheck disable=SC2016 # sh expands $HOME, $* and $@, not bash.
+    make_tool rm 'case "$*" in *"/tlogger."*) : > "$HOME/rm-started"; sleep 2 ;; esac
+exec '"$real_rm"' "$@"'
+    session_new "$LOGS/$ID"
+    session_out 'hello\r\n'
+    session_end
+    PATH="$HOME/bin:$PATH" TLOGGER_PYTHON=$PYTHON3 TLOGGER_SCRIPTREPLAY=$HOME/bin/scriptreplay \
+        bash "$TLOGGER" replay "$ID" < /dev/null > "$BATS_TEST_TMPDIR/out" \
+        2> "$BATS_TEST_TMPDIR/err" 3>&- &
+    pid=$!
+    wait_for_file "$HOME/replay-started"
+    kill -TERM "$pid"
+    wait_for_file "$HOME/rm-started"
+    kill -TERM "$pid"
+    status=0
+    wait "$pid" || status=$?
+    [ "$status" -eq 143 ]
     refute_temp_left
 }
 

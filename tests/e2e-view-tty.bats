@@ -37,6 +37,8 @@ setup() {
 # clears that flag before it reads its next line. Its trap is not an ignore, because bash cannot
 # trap a signal that was ignored when it started. no-tstp-replay starts a replay with SIGTSTP
 # ignored. The Ctrl+Z tests start bash directly, since a wrapper would stop at once on Ctrl+Z.
+# slow-flush-python stands in for python3 and holds the key flush at the end of a replay open
+# for 3 seconds, so that a second Ctrl+C lands inside cleanup.
 make_tools() {
     cat > "$HOME/bin/jj" << 'EOF'
 #!/bin/sh
@@ -57,7 +59,15 @@ EOF
 trap '' TSTP
 exec bash "$TLOGGER" replay "$@"
 EOF
-    chmod 755 "$HOME/bin/jj" "$HOME/bin/tty-replay" "$HOME/bin/no-tstp-replay"
+    cat > "$HOME/bin/slow-flush-python" << 'EOF'
+#!/bin/sh
+case "$*" in
+*tcflush*) : > "$HOME/flush-started"; sleep 3 ;;
+esac
+exec /usr/bin/python3 "$@"
+EOF
+    chmod 755 "$HOME/bin/jj" "$HOME/bin/tty-replay" "$HOME/bin/no-tstp-replay" \
+        "$HOME/bin/slow-flush-python"
 }
 
 # Create the session ID with 200 numbered lines, more than one screen of the pager holds.
@@ -303,6 +313,27 @@ pty_end $n
 (( PTY_STATUS == 130 )) || pty_fail "replay returned $PTY_STATUS"
 [[ $PTY_OUT == *ctrl-one*"$FILTER_RESTORE"* ]] || pty_fail "no restore in ${(V)PTY_OUT}"
 [[ $PTY_OUT != *ctrl-two* ]] || pty_fail 'the replay went on after Ctrl+C'
+tty_is $saved
+shell_works
+pty_close
+EOF
+    refute_temp_left
+}
+
+@test "a second Ctrl+C while a replay cleans up does not cut the cleanup short" {
+    timed_session 0.100000 twice-one 30.000000 twice-two
+    drive << 'EOF'
+term_shell "TLOGGER_PYTHON=$HOME/bin/slow-flush-python"
+pty_stty
+saved=$REPLY
+pty_begin "tty-replay $ID"
+n=$REPLY
+pty_expect twice-one
+pty_type $'\x03'
+pty_wait_file $HOME/flush-started
+pty_type $'\x03'
+pty_end $n
+(( PTY_STATUS == 130 )) || pty_fail "replay returned $PTY_STATUS"
 tty_is $saved
 shell_works
 pty_close
