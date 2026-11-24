@@ -106,6 +106,9 @@ All notable changes to this project are listed here. The format follows
 
 ### Changed
 
+- The five e2e test files run their zsh drivers through one `drive` in `tests/helpers.bash`
+  instead of a copy each, and a new lint test keeps it that way. The pager tests share small
+  helpers in `tests/helpers/view-tty.zsh`. No other test is added or removed.
 - CI runs the tests in a `kalilinux/kali-rolling` container pinned by digest, with real zsh: as a
   non-root user, then the tests tagged root as root. It fails when a test fails or is skipped.
 - `bin/tlogger` reads the config by the line rules of `lib/config.zsh`: values are trimmed, and
