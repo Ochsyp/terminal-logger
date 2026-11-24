@@ -103,6 +103,11 @@ shellcheck_repo() {
             printf '%s defines its own drive\n' "${file##*/}" >&2
             return 1
         fi
+        # A launcher copied under another name still starts zsh this way.
+        if grep -qF "zsh -f -c 'source" "$file"; then
+            printf '%s starts a driver without drive\n' "${file##*/}" >&2
+            return 1
+        fi
         grep -qF "drive << 'EOF'" "$file"
     done
 }
