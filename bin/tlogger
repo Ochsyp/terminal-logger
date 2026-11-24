@@ -317,9 +317,12 @@ usage_error() {
 # Remove what this run made and did not keep: the work folder, the smoke test's folder, temp
 # files and links, a partial backup and a release folder being built or replaced, after moving a
 # release that was set aside back into place; and put back the terminal settings that replay
-# changed. Runs from the EXIT trap, ignores every failure and never changes the exit status.
+# changed. Runs from the EXIT trap, ignores every failure and never changes the exit status. It
+# ignores HUP, INT, QUIT and TERM from its first line: bash ends an EXIT trap that a trapped
+# signal interrupts, so a second Ctrl+C would otherwise leave temp files behind.
 cleanup() {
     local p
+    trap '' HUP INT QUIT TERM
     restore_tty
     remove_smoke_dir
     for p in "${TEMP_PATHS[@]}"; do
