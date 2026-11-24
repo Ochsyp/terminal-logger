@@ -472,6 +472,31 @@ exec '"$real_rm"' "$@"'
     assert_refused 1 'tlogger: show needs python3'
 }
 
+@test "show does not print a transcript that is not valid UTF-8, and renders it again" {
+    session_new "$LOGS/$ID"
+    local body
+    # Raw C1 bytes outside a character, a byte no UTF-8 holds, an overlong form, a surrogate and
+    # a character cut off at the end of the file.
+    for body in 'x\x9b6ny\n' 'x\x80y\n' 'x\x9fy\n' 'x\xffy\n' 'x\xc0\x80y\n' 'x\xed\xa0\x80y\n' \
+        'x\xe2\x94'; do
+        crafted_transcript "$body"
+        TLOGGER_PYTHON=$HOME/missing run_tlogger show
+        assert_refused 1 'tlogger: show needs python3'
+    done
+}
+
+@test "show keeps a transcript whose UTF-8 character crosses 64 KiB" {
+    local pad
+    session_new "$LOGS/$ID"
+    # The padding puts the 3-byte character 1 byte before the 64 KiB mark, so that a check read in
+    # 64 KiB chunks sees it cut in two.
+    printf -v pad '%*s' $(( 65536 - 1 - $(transcript_header "$ID" | wc -c) )) ''
+    crafted_transcript "${pad// /a}"'\xe2\x94\x80\n'
+    TLOGGER_PYTHON=$HOME/missing run_tlogger show
+    [ "$status" -eq 0 ]
+    [ "${output##*$'\n'}" = "${pad// /a}"$'\xe2\x94\x80' ]
+}
+
 @test "show keeps a transcript with tabs and UTF-8 that is no C1 control" {
     session_new "$LOGS/$ID"
     crafted_transcript 'a\tb caf\xc3\xa9 \xe2\x94\x80 \xc2\xa0 \xc2\xa9\n'
