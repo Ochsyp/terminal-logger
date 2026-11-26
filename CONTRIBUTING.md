@@ -393,9 +393,12 @@ config, `.gitattributes` or the release files, and `tests/release-check.bats` ch
 of HEAD in every test run. Tests, CI files and tooling stay out through the `export-ignore` lines
 of `.gitattributes`.
 
-A user installs a release on their own machine, never a host for others. They check the
-download first: `sha256sum -c SHA256SUMS`, and `gh attestation verify` on the archive, which
-proves that this repository's `release.yml` built it from `main`. Then they unpack it anywhere
+A user installs a release on their own machine, never a host for others. They download the two
+assets with `curl` from the release's download URLs, which needs no login, and check the archive
+with `sha256sum -c SHA256SUMS` before they unpack it. Those signed in to the GitHub CLI can also
+run `gh attestation verify` on the archive, which proves that this repository's `release.yml`
+built it from `main`; the docs show it as that optional extra, after the steps without a login,
+and `tests/lint.bats` keeps it so. Then they unpack it anywhere
 and run `./bin/tlogger install` in the folder. That copies the release files to
 `~/.local/share/tlogger/releases/X.Y.Z`, points `~/.local/share/tlogger/current` at it, and
 keeps the release before it. It refuses an unpacked release whose manifest names another version

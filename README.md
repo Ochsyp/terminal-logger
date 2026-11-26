@@ -44,23 +44,31 @@ on a host that others use.
 ### Install from a release
 
 Each [release](https://github.com/Ochsyp/terminal-logger/releases) has two assets: the archive
-`terminal-logger-X.Y.Z.tar.gz` and `SHA256SUMS`. Download both into an empty folder, and check
+`terminal-logger-X.Y.Z.tar.gz` and `SHA256SUMS`. The repository is public, so no account or login
+is needed. Download both into an empty folder, with the version in place of `X.Y.Z`, and check
 them before you unpack anything:
 
 ```bash
-gh release download vX.Y.Z --repo Ochsyp/terminal-logger
+curl -fLO https://github.com/Ochsyp/terminal-logger/releases/download/vX.Y.Z/terminal-logger-X.Y.Z.tar.gz
+curl -fLO https://github.com/Ochsyp/terminal-logger/releases/download/vX.Y.Z/SHA256SUMS
 sha256sum -c SHA256SUMS
-gh attestation verify terminal-logger-X.Y.Z.tar.gz --repo Ochsyp/terminal-logger
 tar -xzf terminal-logger-X.Y.Z.tar.gz
 cd terminal-logger-X.Y.Z
 ./bin/tlogger install --mode auto
 ```
 
-`sha256sum -c` must print `OK` for the archive. `gh attestation verify` proves that this
-repository's `release` workflow built the archive from `main`; it needs `gh`, signed in once with
-`gh auth login`. Without `gh`, download the two assets from the release page; `sha256sum -c`
-then still proves that the download matches the release, but nothing proves where the archive
-was built.
+`sha256sum -c` must print `terminal-logger-X.Y.Z.tar.gz: OK`; if it does not, unpack nothing.
+It proves that the archive is the one the release lists.
+
+If you use the GitHub CLI and are signed in to it, you can also check where the archive was built,
+before you unpack it:
+
+```bash
+gh attestation verify terminal-logger-X.Y.Z.tar.gz --repo Ochsyp/terminal-logger
+```
+
+It proves that this repository's `release` workflow built the archive from `main`, on GitHub's own
+runners. `gh` needs a login for it, even for a public repository.
 
 `install` copies the release to `~/.local/share/tlogger/releases/X.Y.Z` and points
 `~/.local/share/tlogger/current` at it, so the unpacked folder can go afterwards. It keeps the
