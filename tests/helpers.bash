@@ -1,13 +1,15 @@
 # shellcheck shell=bash
-# Test helpers, sourced by every .bats file in tests/ through `load helpers`. Each test gets its
-# own home, so that neither the developer's git settings, denylist or zsh files can reach it.
-# Also: throwaway git repositories for the hook tests, need() for tests that only some machines
-# can run, a zsh stub first on PATH where zsh is missing, a fake sysfs, journal line checks,
-# synthetic session logs for render, show and replay, and drive, which runs every e2e driver.
+# Test helpers, sourced by every .bats file in tests/ through `load helpers`: the standard's
+# lib.bash first, as in every repository of the standard, then the helpers these tests add or
+# redefine. Each test gets its own home, so that neither the developer's git settings nor zsh
+# files can reach it. Also: need() for tests that only some machines can run, a zsh stub first on
+# PATH where zsh is missing, a fake sysfs, journal line checks, synthetic session logs for render,
+# show and replay, and drive, which runs every e2e driver.
+# shellcheck source=.github/standard/tests/lib.bash
+source "${BASH_SOURCE[0]%/*}/../.github/standard/tests/lib.bash"
 
-# The repository under test, and the synthetic term the denylist tests use.
+# The repository under test.
 REPO_ROOT="${BATS_TEST_DIRNAME%/*}"
-DENY_TERM=forbidden-term-example
 
 # bin/tlogger, and the block it writes for the default layout, byte for byte.
 TLOGGER="$REPO_ROOT/bin/tlogger"
@@ -49,10 +51,11 @@ if [[ -z $REAL_ZSH ]]; then
     PATH="$REPO_ROOT/tests/stub-bin:$PATH"
 fi
 
-# Give the test its own HOME, XDG_CONFIG_HOME and TMPDIR under BATS_TEST_TMPDIR, and set DENYLIST
-# to the path the hooks read there. Keeps out the system and global git config, git's identity
-# variables, TERMINAL_LOGGER_DENYLIST and the repository variables a hook exports, such as
-# GIT_DIR and GIT_INDEX_FILE. Call from setup(), so that every test starts from an empty home.
+# Give the test its own HOME, XDG_CONFIG_HOME and TMPDIR under BATS_TEST_TMPDIR. Keeps out the
+# system and global git config, git's identity variables and the repository variables a hook
+# exports, such as GIT_DIR and GIT_INDEX_FILE. Call from setup(), so that every test starts from an
+# empty home. It replaces lib.bash's isolate_home, whose empty global git config these tests do not
+# need.
 isolate_home() {
     local var
     export HOME="$BATS_TEST_TMPDIR/home"
@@ -62,9 +65,8 @@ isolate_home() {
     while IFS= read -r var; do
         unset "$var"
     done < <(git rev-parse --local-env-vars)
-    unset GIT_CONFIG_GLOBAL GIT_TEMPLATE_DIR TERMINAL_LOGGER_DENYLIST \
+    unset GIT_CONFIG_GLOBAL GIT_TEMPLATE_DIR \
         GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
-    DENYLIST="$XDG_CONFIG_HOME/terminal-logger-dev/denylist"
     mkdir -p "$XDG_CONFIG_HOME" "$TMPDIR"
 }
 
@@ -89,30 +91,6 @@ require_test_home() {
         printf 'HOME is not under BATS_TEST_TMPDIR, so bin/tlogger does not run on it\n' >&2
         return 1
     fi
-}
-
-# Create a git repository at $REPO under BATS_TEST_TMPDIR, on main, with a test identity and
-# without commit signing. Makes one commit before the hooks are turned on, then points
-# core.hooksPath at the hooks under test. Sets REPO; call after isolate_home.
-make_repo() {
-    REPO="$BATS_TEST_TMPDIR/repo"
-    git init -q -b main "$REPO"
-    git -C "$REPO" config user.name "Test User"
-    git -C "$REPO" config user.email test@example.invalid
-    git -C "$REPO" config commit.gpgsign false
-    printf 'synthetic test repository\n' > "$REPO/README.md"
-    git -C "$REPO" add README.md
-    git -C "$REPO" commit -q -m "chore: initial commit"
-    git -C "$REPO" config core.hooksPath "$REPO_ROOT/.githooks"
-}
-
-# Write the denylist the hooks read, $DENYLIST, one line per argument.
-# Without arguments it holds a comment, a blank line and DENY_TERM. Every line must be
-# synthetic; call after isolate_home.
-write_denylist() {
-    (( $# )) || set -- '# Synthetic denylist for the hook tests.' '' "$DENY_TERM"
-    mkdir -p "${DENYLIST%/*}"
-    printf '%s\n' "$@" > "$DENYLIST"
 }
 
 # Skip the test unless this machine has FEATURE: zsh (a real one), zpty (zsh with the zsh/zpty

@@ -1,0 +1,65 @@
+#!/bin/bash
+# ci/kali-suite: the bats suite of tests/ inside the pinned Kali container that ci/test starts,
+# with the repository mounted read-only at /src and a folder for the TAP files at /tap. It
+# installs the test tools, then runs the suite as the non-root user tester and the root-only
+# tests as root, each on its own clone of HEAD. Exits 1 when a test fails, or when the two runs
+# together miss a test; ci/test checks the skips.
+set -euo pipefail
+
+readonly SHELLCHECK_VERSION=0.11.0
+# SHA-256 of shellcheck-v0.11.0.linux.x86_64.tar.xz, as GitHub lists it for the release asset.
+readonly SHELLCHECK_SHA256=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+# The non-root user that runs the suite; the tests tagged root run as root.
+readonly TEST_USER=tester
+
+apt-get update
+apt-get install -y --no-install-recommends ca-certificates curl xz-utils git zsh bats \
+    bsdutils util-linux coreutils diffutils gawk mawk python3 python3-pyte less
+
+archive="shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+curl --fail --silent --show-error --location --output "/tmp/$archive" \
+    "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/$archive"
+echo "${SHELLCHECK_SHA256}  /tmp/$archive" | sha256sum --check --strict
+tar -xJf "/tmp/$archive" -C /tmp
+install -m 0755 "/tmp/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+shellcheck --version | grep -qx "version: ${SHELLCHECK_VERSION}"
+
+# The tool versions, for the log. sed reads all of its input, so nothing dies of SIGPIPE.
+sed -n 's/^PRETTY_NAME=//p' /etc/os-release
+bash --version | sed -n 1p
+zsh --version
+bats --version
+shellcheck --version | sed -n 2p
+script --version
+scriptreplay --version
+python3 --version
+dpkg-query -W python3-pyte less
+git --version
+diff --version | sed -n 1p
+gawk --version | sed -n 1p
+mawk -W version 2>&1 | sed -n 1p
+
+# Each run gets its own clone, so that no test writes into the mounted tree, and git, which
+# refuses a repository that another user owns, sees each clone owned by its runner.
+git config --global --add safe.directory /src
+git clone --quiet /src /work-user
+git clone --quiet /src /work-root
+useradd -m "$TEST_USER"
+chown -R "$TEST_USER:" /work-user
+
+status=0
+(cd /work-user &&
+    runuser -u "$TEST_USER" -- env TLOGGER_CI=1 bats --tap --filter-tags '!root' tests/) |
+    tee /tap/user.tap || status=1
+(cd /work-root && TLOGGER_CI=1 bats --tap --filter-tags root tests/) | tee /tap/root.tap ||
+    status=1
+
+# A filter that selects too little passes with fewer tests, so the two runs together must cover
+# the whole suite, and the root run at least one test.
+total=$(cd /work-root && bats --count tests/)
+ran=$(cat /tap/user.tap /tap/root.tap | grep -cE '^(not )?ok [0-9]+ ' || true)
+if [[ $ran != "$total" ]] || ! grep -qE '^ok [0-9]+ ' /tap/root.tap; then
+    echo "ci/kali-suite: $ran of $total tests ran, or none of them as root." >&2
+    status=1
+fi
+exit "$status"
