@@ -84,7 +84,7 @@ run_check() {
 @test "release-check refuses an archive that holds a development file or an unknown entry" {
     local extra
     build_archive "$VERSION_TEXT"
-    for extra in tests/x.bats .github/x ci/x CONTRIBUTING.md notes.txt; do
+    for extra in tests/x.bats .github/x ci/x CONTRIBUTING.md notes.txt docs/notes.md; do
         rm -rf "$BUILD/tree"
         unpack
         mkdir -p "$TREE/$(dirname "$extra")"
@@ -105,6 +105,12 @@ run_check() {
     run_check 9.9.9
     [ "$status" -eq 1 ]
     [[ $stderr == *9.9.9* ]]
+    unpack
+    printf '9.9.9\n' > "$TREE/VERSION"
+    repack
+    run_check
+    [ "$status" -eq 1 ]
+    [[ $stderr == *"VERSION holds 9.9.9"* ]]
 }
 
 @test "release-check takes --archive FILE and --version X.Y.Z only" {

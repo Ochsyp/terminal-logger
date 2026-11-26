@@ -386,10 +386,12 @@ The archive holds one folder, `terminal-logger-X.Y.Z/`, with exactly these entri
 - `terminal-logger-release.json`, the manifest the build adds: schema 1, with the name, the
   version, the tag and the commit.
 
-`ci/release-check` stops a build, the dry run on every pull request included, unless the archive
-holds exactly that, `bin/tlogger` is executable, and `VERSION` and the manifest both name the
-version being built. Tests, CI files and tooling stay out through the `export-ignore` lines of
-`.gitattributes`.
+`ci/release-check` stops a build unless the archive holds exactly that, `bin/tlogger` is
+executable, and `VERSION` and the manifest both name the version being built. The `release`
+workflow builds the archive twice as a dry run on each pull request that touches `VERSION`, the
+config, `.gitattributes` or the release files, and `tests/release-check.bats` checks the archive
+of HEAD in every test run. Tests, CI files and tooling stay out through the `export-ignore` lines
+of `.gitattributes`.
 
 A user installs a release on their own machine, never a host for others. They check the
 download first: `sha256sum -c SHA256SUMS`, and `gh attestation verify` on the archive, which

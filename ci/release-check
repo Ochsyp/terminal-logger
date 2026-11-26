@@ -63,6 +63,11 @@ for entry in "$tree"/*; do
         fail "the archive holds $entry, which no release holds"
     fi
 done
+# docs/ holds the guide and nothing else.
+for entry in "$tree"/docs/*; do
+    [[ ${entry##*/} == guide.md ]] ||
+        fail "the archive holds docs/${entry##*/}, which no release holds"
+done
 shopt -u dotglob
 
 # The files that install copies, as bin/tlogger lists them, and the documents.
