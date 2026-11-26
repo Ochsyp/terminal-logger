@@ -1659,8 +1659,8 @@ ensure_dir() {
 # Read the config into CONFIG_MODE and CONFIG_LOGDIR without running it, by the line rules of
 # lib/config.zsh: key=value lines, blank lines and '#' comments, with the whitespace around a
 # value trimmed and a logdir's trailing slashes dropped. Every other key, the plugin's
-# record_input, min_free_mb, record_ssh, record_tmux, recorder, prompt, stamp, stamp_vpn,
-# vpn_ifaces and history_timestamps included, is accepted unchecked, and install keeps its line
+# record_input, min_free_mb, record_ssh, record_tmux, recorder, prompt, prompt_time, stamp,
+# stamp_vpn, vpn_ifaces and history_timestamps included, is accepted unchecked, and install keeps its line
 # as it is; the recorder value goes to CONFIG_RECORDER and its line number to
 # CONFIG_RECORDER_LINE, for resolve_recorder. Sets CONFIG_ERROR, instead of exiting, for an
 # unsafe file, a bad line, a repeated key or an invalid mode or logdir.
@@ -1794,10 +1794,12 @@ install_config() {
 # mode: auto records every new terminal, manual only on tlogger start.
 # Optional: record_input=yes|no (default yes), min_free_mb=<MB> (default 200),
 # record_ssh=yes|no (default yes) for SSH logins, record_tmux=yes|no (default yes) for tmux panes,
-# prompt=on|off (default on) for the REC/NOREC/EXT segment in the prompt, stamp=on|off (default on)
-# for the UTC stamp at each recorded command, stamp_vpn=on|off (default on) for the VPN addresses
-# in both, vpn_ifaces=<patterns> (default tun* wg* tap*) for the VPN interfaces, and
-# history_timestamps=yes|no (default no) for start times in the zsh history.
+# prompt=on|off (default on) for the time, VPN and REC/NOREC/EXT segment in the prompt,
+# prompt_time=iso|readable (default readable) for its time, stamp=on|off|hidden (default hidden)
+# for the UTC stamp at each recorded command (hidden: kept in the recording, not shown),
+# stamp_vpn=on|off (default on) for the VPN addresses in both, vpn_ifaces=<patterns> (default
+# tun* wg* tap*) for the VPN interfaces, and history_timestamps=yes|no (default no) for start
+# times in the zsh history.
 mode=$MODE
 logdir=$SESSIONS_DIR
 EOF

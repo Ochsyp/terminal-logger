@@ -33,8 +33,8 @@ typeset -g _tlogger_release=${${(%):-%x}:A:h:h}
 # PWD and typed are quoted as the (q+) flag quotes, so that a tab or a newline in them stays
 # inside its line; vpn is the VPN list, or - when the list is empty or stamp_vpn=off.
 
-# Print 'tlogger: MESSAGE' on stderr, in COLOR (red or yellow; plain for none) when stderr is a
-# terminal and NO_COLOR is empty. The colour wraps the whole line, so the text stays one piece.
+# Print 'tlogger: MESSAGE' on stderr, in COLOR (red, yellow or green; plain for none) when stderr
+# is a terminal and NO_COLOR is empty. The colour wraps the whole line, so the text stays one piece.
 _tlogger_say() {
     emulate -L zsh
     local on= off=
@@ -42,6 +42,7 @@ _tlogger_say() {
         case $1 in
             red) on=$'\e[31m' off=$'\e[0m' ;;
             yellow) on=$'\e[33m' off=$'\e[0m' ;;
+            green) on=$'\e[32m' off=$'\e[0m' ;;
         esac
     fi
     print -ru2 -- "${on}tlogger: $2$off"
@@ -448,9 +449,9 @@ _tlogger_record() {
     fi
     if [[ $_tlogger_cfg[record_input] == yes ]]; then
         login=(--log-in $dir/input.raw)
-        _tlogger_say plain "recording session $id; everything typed and shown is saved, passwords included; tlogger stop pauses"
+        _tlogger_say green "recording session $id; everything typed and shown is saved, passwords included; tlogger stop pauses"
     else
-        _tlogger_say plain "recording session $id; everything shown is saved, keystrokes are not; tlogger stop pauses"
+        _tlogger_say green "recording session $id; everything shown is saved, keystrokes are not; tlogger stop pauses"
     fi
     TLOGGER_HS=$dir TLOGGER_HS_TZSET=$tzset TLOGGER_HS_TZ=$tzval TZ=UTC0 SHELL=$zsh_bin \
         $_tlogger_cfg[recorder] --quiet --flush --return --logging-format advanced \
@@ -673,15 +674,46 @@ _tlogger_vpn_update() {
     done
 }
 
-# Put the segment SEG into PROMPT, as _tlogger_precmd does before every prompt. First remove the
-# text added last time, which _tlogger_seg keeps, where PROMPT still holds it; then, unless
-# prompt=off, insert ' SEG' before the first newline of PROMPT, at the end of its first line, or
-# 'SEG ' in front of a PROMPT without one, with every % doubled so that prompt expansion shows it
-# as it is, and keep the inserted text in _tlogger_seg. Never replaces PROMPT wholesale, and
-# leaves a read-only PROMPT and every other prompt parameter as they are.
+# Set REPLY to the prompt text of the segment: '[TIME] [VPN] [STATE]', each field in brackets of
+# its own, the time yellow, the VPN field magenta and the state green for REC, red for NOREC and
+# cyan for EXT, as zsh's %F and %f give them, so that the prompt keeps its width; without the VPN
+# field when VPN is empty. Every % in a field is doubled, so that prompt expansion shows it as it
+# is. NO_COLOR set and not empty leaves every colour out.
+_tlogger_prompt_text() {
+    emulate -L zsh
+    local -a fields colours
+    local state=$3 i
+    fields=("${1//[%]/%%}")
+    colours=(yellow)
+    if [[ -n $2 ]]; then
+        fields+=("${2//[%]/%%}")
+        colours+=(magenta)
+    fi
+    fields+=("${state//[%]/%%}")
+    case $state in
+        REC) colours+=(green) ;;
+        NOREC) colours+=(red) ;;
+        *) colours+=(cyan) ;;
+    esac
+    REPLY=
+    for i in {1..$#fields}; do
+        if [[ -z ${NO_COLOR-} ]]; then
+            REPLY+="${REPLY:+ }[%F{$colours[i]}$fields[i]%f]"
+        else
+            REPLY+="${REPLY:+ }[$fields[i]]"
+        fi
+    done
+}
+
+# Put the prompt text TEXT, which _tlogger_prompt_text builds, into PROMPT, as _tlogger_precmd
+# does before every prompt. First remove the text added last time, which _tlogger_seg keeps, where
+# PROMPT still holds it; then, unless prompt=off, insert ' TEXT' before the first newline of
+# PROMPT, at the end of its first line, or 'TEXT ' in front of a PROMPT without one, and keep the
+# inserted text in _tlogger_seg. Never replaces PROMPT wholesale, and leaves a read-only PROMPT and
+# every other prompt parameter as they are.
 _tlogger_prompt() {
     emulate -L zsh
-    local text=${1//[%]/%%}
+    local text=$1
     if [[ ${(t)PROMPT} == *readonly* ]]; then
         return 0
     fi
@@ -704,11 +736,14 @@ _tlogger_prompt() {
 
 # preexec hook: zsh runs it as each command line starts, with what the user typed, a short form
 # and the full text as its arguments. Acts only in a REC shell (_tlogger_state REC and
-# TLOGGER_SESSION set), nested ones included: appends the S line for ${1:-$3} to the journal,
-# keeps the session folder in _tlogger_cmd for the E line of _tlogger_precmd and, with stamp=on
-# and stderr a terminal, prints the stamp '-- <UTC> <vpn> REC' on stderr, dim while NO_COLOR is
-# empty, without <vpn> when the list is empty or stamp_vpn=off. A journal it cannot write stays
-# silent. Forks only for ip, at the rate _tlogger_vpn_update keeps.
+# TLOGGER_SESSION set), nested ones included: appends the S line for ${1:-$3} to the journal and
+# keeps the session folder in _tlogger_cmd for the E line of _tlogger_precmd. With stderr a
+# terminal it then writes the stamp there: stamp=on prints '-- <UTC> <vpn> REC', dim while
+# NO_COLOR is empty; stamp=hidden, the default, writes '<UTC> <vpn>' as the OSC 7711 string
+# 'ESC ] 7711 ; tlogger-stamp <UTC> <vpn> ST', which terminals do not show but script records,
+# and which render turns into the same line; stamp=off writes nothing. <vpn> is left out, with its
+# space, when the list is empty or stamp_vpn=off. A journal it cannot write stays silent. Forks
+# only for ip, at the rate _tlogger_vpn_update keeps.
 _tlogger_preexec() {
     emulate -L zsh
     local utc vpn= on= off=
@@ -725,12 +760,20 @@ _tlogger_preexec() {
     f=(S $now $utc $$ ${(q+)PWD} ${vpn:--} ${(q+)${1:-$3}})
     _tlogger_append $TLOGGER_SESSION/commands.tsv ${(pj:\t:)f}
     _tlogger_cmd=$TLOGGER_SESSION
-    if [[ ${_tlogger_cfg[stamp]-} == on && -t 2 ]]; then
-        if [[ -z ${NO_COLOR-} ]]; then
-            on=$'\e[2m' off=$'\e[0m'
-        fi
-        print -ru2 -- "$on-- $utc${vpn:+ $vpn} REC$off"
+    if [[ ! -t 2 ]]; then
+        return 0
     fi
+    case ${_tlogger_cfg[stamp]-} in
+        on)
+            if [[ -z ${NO_COLOR-} ]]; then
+                on=$'\e[2m' off=$'\e[0m'
+            fi
+            print -ru2 -- "$on-- $utc${vpn:+ $vpn} REC$off"
+            ;;
+        hidden)
+            print -nru2 -- $'\e]7711;tlogger-stamp '"$utc${vpn:+ $vpn}"$'\e\\'
+            ;;
+    esac
 }
 
 # precmd hook: zsh runs it before every prompt, after a precmd function such as Kali's. It reads
@@ -740,13 +783,16 @@ _tlogger_preexec() {
 # not count. Then appends the E line of the command that _tlogger_preexec journaled, if any;
 # works out this terminal's state again with _tlogger_tty_state; in a REC shell checks the free
 # space of the session at most every 300 seconds (_tlogger_df_time) and below min_free_mb warns
-# in yellow; exports the segment '[<UTC> <vpn> <state>]' as TLOGGER_SEGMENT, without <vpn> when
-# the list is empty or stamp_vpn=off; and puts it into PROMPT with _tlogger_prompt. Prints nothing
-# else, and forks only for df and ip, at their rates.
+# in yellow; exports the segment '[<UTC> <vpn> <state>]' as TLOGGER_SEGMENT, plain, without
+# <vpn> when the list is empty or stamp_vpn=off; and puts the prompt text of the same time, VPN
+# list and state into PROMPT with _tlogger_prompt_text and _tlogger_prompt: the time as
+# '<YYYY-MM-DD HH:MM:SS> UTC', or as in the segment with prompt_time=iso, and the VPN field as
+# 'no vpn' when the list is empty, or not at all with stamp_vpn=off. Prints nothing else, and
+# forks only for df and ip, at their rates.
 _tlogger_precmd() {
     local -i st=$?
     emulate -L zsh
-    local REPLY utc vpn= min
+    local REPLY utc shown vpn= field= min
     local -a reply f
     local -i now=$EPOCHSECONDS
     if [[ -n ${_tlogger_cmd-} ]]; then
@@ -771,10 +817,17 @@ _tlogger_precmd() {
     if [[ ${_tlogger_cfg[stamp_vpn]-} == on ]]; then
         _tlogger_vpn_update
         vpn=$_tlogger_vpn
+        field=${vpn:-no vpn}
     fi
     _tlogger_utc utc '%Y-%m-%dT%H:%M:%SZ' $now
     export TLOGGER_SEGMENT="[$utc${vpn:+ $vpn} $_tlogger_state]"
-    _tlogger_prompt $TLOGGER_SEGMENT
+    if [[ ${_tlogger_cfg[prompt_time]-} == iso ]]; then
+        shown=$utc
+    else
+        _tlogger_utc shown '%Y-%m-%d %H:%M:%S UTC' $now
+    fi
+    _tlogger_prompt_text "$shown" "$field" "$_tlogger_state"
+    _tlogger_prompt "$REPLY"
 }
 
 # In a shell that script started for a recording, restore TZ and unset TLOGGER_HS* before
