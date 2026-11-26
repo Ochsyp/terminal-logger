@@ -7,45 +7,40 @@ Each version is the GitHub release `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-26
+
+Sealed sessions, the older logger's prompt, and the first sealed release.
+
 ### Added
 
-- `stamp=hidden`: each recorded command's stamp goes into the recording as a control string that
-  terminals do not show, an OSC 7711 string, and `tlogger render` turns it into the stamp line of
-  the transcript. tmux and GNU screen show none of it, and CI checks both.
-- `prompt_time=iso|readable` chooses how the prompt shows the UTC time.
-- Sealed sessions: a recording that ends with `exit`, Ctrl+D or `tlogger stop` is sealed at once.
-  `SHA256SUMS` lists the SHA-256 of each log and marker, they become 0400, `SEAL` records the
-  version, the time and the sum of `SHA256SUMS`, the data goes to the disk, and `MANIFEST` in the
-  log folder gets the session's line; the terminal prints the sum to keep apart (phase 9)
+- Sealed sessions. A recording that ends with `exit`, Ctrl+D or `tlogger stop` is sealed at once:
+  `SHA256SUMS` lists the SHA-256 of each log, the logs become read-only, `SEAL` names the version,
+  the time and the sum of `SHA256SUMS`, and `MANIFEST` in the log folder gets the session's line.
+  The terminal prints the sum; keep it, or a copy of `MANIFEST`, apart from the logs.
 - `tlogger seal [SESSION | --all]` seals by hand, for example a recording that ended
-  unexpectedly; it refuses a session whose recorder still runs (phase 9)
-- `tlogger verify [SESSION | --all]` reports each session as ok, changed, unsealed or recording,
-  with each change, and `tlogger list` shows every session's state, start, duration, commands
-  and transcript (phase 9)
+  unexpectedly; it never seals a session that is still recorded. After the upgrade,
+  `tlogger seal --all` seals the sessions recorded with 0.1.0.
+- `tlogger verify [SESSION | --all]` says for each session ok, changed, unsealed or recording,
+  and names each change. `tlogger list` shows every session with its state, start, duration,
+  number of commands and transcript.
+- `stamp=hidden`, the new default: each command's start time goes into the recording without
+  showing on the screen, and `tlogger render` turns it into the stamp line of the transcript.
+  QTerminal, tmux and GNU screen show nothing of it.
+- `prompt_time=iso|readable` chooses how the prompt shows the time.
 
 ### Changed
 
-- Repository standard 1.3.0: sealed releases (`SEAL=yes`). From 0.2.0 on, the maintainer seals
-  each published release with an offline SSH key, as the tag `seal/vX.Y.Z`, and the README's
-  install steps check that seal with `git verify-tag`, without a login, before anything is
-  unpacked. The Release contract names the hold for a sealed release that must not be installed.
-- A recording that ends unexpectedly says that its session is not sealed, and how to seal it.
-- The README points to the releases and this changelog instead of a status note, and says that
-  QTerminal, Kali's default terminal, hides the hidden stamp, checked by hand.
 - The prompt shows what the older logger's prompt showed: the UTC time as
   `2026-11-26 13:20:52 UTC` in yellow, the VPN list in magenta, or `no vpn`, and the state, `REC`
-  green, `NOREC` red and `EXT` cyan, each in brackets of its own. `NO_COLOR` drops the colours,
-  and `TLOGGER_SEGMENT` stays as it was.
-- The notice that a recording has started is green.
-- `stamp` defaults to `hidden`, so no stamp line shows after each command any more. A config
-  that names `stamp` keeps its value: `stamp=on` the visible line, and `stamp=off` no stamp at
-  all. A `stamp=off` line written to hide the visible line in 0.1.0 can now go, or become
-  `stamp=hidden`, so that the recording keeps each command's time.
-- `VERSION` is `0.1.1-dev` after the release of 0.1.0, so an install from a checkout of `main`
-  names a development version again.
-- The README, `docs/guide.md` and the Release contract install a release without a login: `curl`
-  downloads the two assets from the release's URLs, and `sha256sum -c SHA256SUMS` checks them.
-  `gh attestation verify`, which needs a GitHub login, follows as an optional extra.
+  green, `NOREC` red and `EXT` cyan, each in brackets of its own. `NO_COLOR` turns the colours
+  off. The notice that a recording has started is green.
+- No stamp line shows after each command any more. A config that names `stamp` keeps its value:
+  a `stamp=off` line, as 0.1.0 needed to hide the line, keeps every stamp out of the recording;
+  change it to `stamp=hidden`, or remove it.
+- A recording that ends unexpectedly says that it is not sealed, and how to seal it.
+- Releases are sealed from this one on: after publishing, the maintainer signs each release with
+  an offline SSH key, as the tag `seal/vX.Y.Z`. The README's install steps check the seal before
+  anything is unpacked, and download and check a release without a GitHub login.
 
 ## [0.1.0] - 2026-11-26
 
@@ -85,5 +80,6 @@ for penetration tests.
 - `docs/guide.md`, an engagement from start to end.
 - Each release is a tar archive with `SHA256SUMS` and a GitHub build attestation.
 
-[Unreleased]: https://github.com/Ochsyp/terminal-logger/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Ochsyp/terminal-logger/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Ochsyp/terminal-logger/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Ochsyp/terminal-logger/releases/tag/v0.1.0
