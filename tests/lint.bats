@@ -110,6 +110,31 @@ shellcheck_repo() {
     done
 }
 
+@test "the README and docs/guide.md install a release without a gh login" {
+    local file block url=https://github.com/Ochsyp/terminal-logger/releases/download/vX.Y.Z
+    for file in README.md docs/guide.md; do
+        # The first fenced block that unpacks a release, up to its tar line: the download and the
+        # checks that come before anything is unpacked.
+        block=$(awk '/^```/ { fence = !fence; buf = ""; next }
+            fence { buf = buf $0 "\n" }
+            fence && /^tar -xzf terminal-logger-/ { printf "%s", buf; exit }' "$REPO_ROOT/$file")
+        if [[ -z $block ]]; then
+            printf '%s has no block that unpacks a release\n' "$file" >&2
+            return 1
+        fi
+        if [[ $block != *"curl -fLO $url/terminal-logger-X.Y.Z.tar.gz"* ||
+            $block != *"curl -fLO $url/SHA256SUMS"* ||
+            $block != *'sha256sum -c SHA256SUMS'* ]]; then
+            printf '%s does not download both assets with curl and check SHA256SUMS\n' "$file" >&2
+            return 1
+        fi
+        if grep -qE '^gh ' <<< "$block"; then
+            printf '%s needs gh, and so a login, before the release is unpacked\n' "$file" >&2
+            return 1
+        fi
+    done
+}
+
 @test "every e2e file runs its drivers through drive in tests/helpers.bash and defines none" {
     local file
     local -a files=("$REPO_ROOT"/tests/e2e-*.bats)
