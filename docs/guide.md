@@ -11,7 +11,9 @@ included. So keep the log folder on encrypted storage, readable by you only. By 
 volume. Mount that volume before you open the first terminal of the day.
 
 **Install, as the user whose terminals you record, not as root.** Download a release into an
-empty folder, with no login, and check it before you unpack it. Then install from the folder:
+empty folder, with no login, and check it before you unpack it. Then install from the folder. If
+you are signed in to the GitHub CLI, add the extra check below the block between `sha256sum` and
+`tar`:
 
 ```bash
 curl -fLO https://github.com/Ochsyp/terminal-logger/releases/download/vX.Y.Z/terminal-logger-X.Y.Z.tar.gz
@@ -22,9 +24,9 @@ cd terminal-logger-X.Y.Z
 ./bin/tlogger install --mode auto
 ```
 
-`sha256sum -c` must print `OK`. Signed in to the GitHub CLI, you can also run
-`gh attestation verify terminal-logger-X.Y.Z.tar.gz --repo Ochsyp/terminal-logger` before you
-unpack, which proves where the archive was built; the README's Install section says more.
+`sha256sum -c` must print `OK`. The extra check, right after it and before `tar`, is
+`gh attestation verify terminal-logger-X.Y.Z.tar.gz --repo Ochsyp/terminal-logger`, which proves
+where the archive was built; the README's Install section says more.
 
 `--mode auto` records every new terminal as its shell starts, which suits an engagement: no
 terminal is forgotten. `--mode manual` records only after `tlogger start`. Add `--dry-run` to see

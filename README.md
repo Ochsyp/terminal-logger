@@ -46,7 +46,8 @@ on a host that others use.
 Each [release](https://github.com/Ochsyp/terminal-logger/releases) has two assets: the archive
 `terminal-logger-X.Y.Z.tar.gz` and `SHA256SUMS`. The repository is public, so no account or login
 is needed. Download both into an empty folder, with the version in place of `X.Y.Z`, and check
-them before you unpack anything:
+them before you unpack anything (signed in to the GitHub CLI, add the extra check below between
+`sha256sum` and `tar`):
 
 ```bash
 curl -fLO https://github.com/Ochsyp/terminal-logger/releases/download/vX.Y.Z/terminal-logger-X.Y.Z.tar.gz
@@ -60,8 +61,8 @@ cd terminal-logger-X.Y.Z
 `sha256sum -c` must print `terminal-logger-X.Y.Z.tar.gz: OK`; if it does not, unpack nothing.
 It proves that the archive is the one the release lists.
 
-If you use the GitHub CLI and are signed in to it, you can also check where the archive was built,
-before you unpack it:
+If you use the GitHub CLI and are signed in to it, you can also check where the archive was built.
+Run this right after `sha256sum -c`, before the `tar` line:
 
 ```bash
 gh attestation verify terminal-logger-X.Y.Z.tar.gz --repo Ochsyp/terminal-logger
