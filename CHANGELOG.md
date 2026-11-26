@@ -2,163 +2,48 @@
 
 All notable changes to this project are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html). There are no releases yet.
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+Each version is the GitHub release `vX.Y.Z`.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-26
+
+The first release: a recorder for zsh terminals on Kali Linux, keystrokes included, as evidence
+for penetration tests.
+
 ### Added
 
-- Repository scaffolding: the README, the MIT licence, a security policy, a contribution guide,
-  this changelog, a pull request template, and editor, git and ShellCheck settings.
-- Git hooks in `.githooks`: they refuse commits on `main` or `master`, merge commits included,
-  and pushes to them, and they refuse a commit whose staged content, path names, author,
-  committer or message holds a term from the local denylist.
-- CI: a `tests` workflow that runs the bats suite with a pinned ShellCheck and fails when a test
-  is skipped, a gitleaks secret scan, and Dependabot updates for the pinned GitHub Actions.
-- `tlogger install`, `uninstall`, `status`, `version` and `help` in `bin/tlogger`. `install` puts
-  a 4-line block at the top of the zsh rc and installs the plugin under `~/.local/share/tlogger`,
-  the config under `~/.config/tlogger` and the state folders under `~/.local/state/tlogger`;
-  `uninstall` takes the block and the code out again and keeps the logs and rc backups. The
-  plugin, `lib/tlogger.zsh`, defines the `tlogger` command, and `libexec/rcblock.awk` finds the
-  block in an rc.
-- `tlogger start` and `tlogger stop` record a zsh terminal on request with util-linux `script`:
-  keystrokes, passwords at hidden prompts included, screen output and timing go into a session
-  folder of its own (0700, files 0600) under the log folder, with UTC timestamps, while the
-  recorded shell keeps its time zone. `tlogger stop` pauses and `tlogger start` resumes in a new
-  session; `tlogger status` shows whether the terminal is recorded (REC, EXT or NOREC). A kill
-  switch, a recorded terminal, an old or missing `script`, an unusable log folder, one that other
-  users may write in, a session folder that cannot stay private or too little free space stop
-  `tlogger start` with a red notice and leave the shell working. A recording whose `script`
-  process dies counts as ended unexpectedly. The config takes `record_input` and `min_free_mb`,
-  and `TLOGGER_<KEY>` variables win over it; `lib/config.zsh` reads it as data.
-- Tests for the config parser, for the terminal state over a fake `/proc`, and end to end in a
-  pseudo-terminal that zsh's `zpty` module drives, also under the rc built from Kali's
-  `/etc/skel/.zshrc`.
-- Automatic mode: with `mode=auto`, every new interactive zsh terminal records itself as its shell
-  starts, through the same checks and recording as `tlogger start`. `exit` and Ctrl+D end the
-  recording and close the terminal; `tlogger stop` pauses and keeps it open, as does a recording
-  that is refused, fails to start or ends unexpectedly, with its notice. `zsh -c` and `zsh -i -c`
-  commands, VS Code's environment probe, asciinema recordings, shells without a terminal and
-  terminals that are recorded already do not record themselves, and say nothing. The kill
-  switches, `TLOGGER_DISABLE=1` and the `disable` file, stop it with a red notice in each new
-  terminal, and exported `TLOGGER_<KEY>` variables, such as `TLOGGER_MODE=manual`, set the policy
-  of a terminal profile.
-- `tlogger mode` prints the mode in the config, and `tlogger mode auto|manual` sets it: it
-  changes only the `mode=` line and writes the config with mode 0600 through a temp file and a
-  rename.
-- The config keys `record_ssh` and `record_tmux` (`yes` or `no`, default `yes`) decide whether an
-  SSH login or a tmux pane records itself in auto mode.
-- A smoke test of the recorder: `install` in auto mode, a dry run included, and
-  `tlogger mode auto` first record the command `true` with `script` in a private temp folder, and
-  refuse auto mode when that fails.
-- Tests of the autostart guard in a real zsh, of `tlogger mode` and the smoke test with a stub
-  recorder, and end to end in auto mode in a pseudo-terminal that zsh's `zpty` module drives.
-- Per-command UTC start stamps, a `commands.tsv` journal and a REC/NOREC/EXT prompt segment, with
-  VPN addresses. A recorded shell, nested shells included, appends an S line as each command
-  starts (time, pid, folder, VPN list and the command as typed, quoted so that it stays on one
-  line) and an E line with its exit status before the next prompt, and prints a dim
-  `-- <UTC> <VPN list> REC` stamp. Every shell with the plugin shows `[<UTC> <VPN list> <state>]`
-  at the end of the first line of a two-line prompt, or in front of a one-line one, and exports
-  it as `TLOGGER_SEGMENT` for prompt frameworks. Kali's prompt, its `precmd()` and the shell's
-  options stay untouched; the hooks fork nothing per command. The VPN list comes from
-  `/sys/class/net` and `ip`, which runs again when the VPN interfaces change or a minute has
-  passed, or 5 seconds after it showed a VPN interface without an address. A recorded shell
-  warns, at most every five minutes, when its log folder has less than `min_free_mb` free.
-- The config keys `prompt`, `stamp` and `stamp_vpn` (`on` or `off`, default `on`), `vpn_ifaces`
-  (default `tun* wg* tap*`) and `history_timestamps` (`yes` or `no`, default `no`, which turns on
-  zsh's `extended_history`), each with its `TLOGGER_<KEY>` preset. `tlogger status` shows
-  `prompt`, `stamp` and the VPN list.
-- Unit tests of the journal, the stamps, the VPN list and the segment in a real zsh, Kali's
-  `configure_prompt` in both Ctrl+P states included, and end-to-end tests of the journal, the
-  stamp and the segment, with Ctrl+P under the rc built from `/etc/skel/.zshrc`.
-- `tlogger render`, `show` and `replay`, which build a derived plain-text transcript with
-  `python3-pyte` and replay through an escape-sequence filter, without tmux. Each takes a session
-  id, a path to a session folder or nothing for the newest session, and never writes the
-  evidence files. `libexec/tlogger_view.py`, run with `/usr/bin/python3 -I`, does the work.
-  - `render` writes `transcript.txt` (mode 0600, through `transcript.txt.part` and a rename) in
-    the session folder, or prints it with `--stdout`: the lines that scroll off the screen or
-    that `clear` erases, the screen at the end and one marker line for a full-screen program,
-    with no escape sequences. A note line ends the transcript when `output.raw` ends early or
-    holds more output than its timing covers, or when timing lines are malformed.
-  - `show` pages the transcript with `less` in secure mode. It renders it first when it is
-    missing, older than the logs, or not what `render` writes: its header line, and no control
-    byte but LF and HT.
-  - `replay` runs util-linux `scriptreplay`, with `--speed` and `--maxdelay`, through a filter
-    that keeps only an allow-list of what draws the screen. It drops `CSI 3 J`, which would
-    erase the scrollback of the terminal that replays, and `CSI S` and `CSI T` with more than one
-    parameter (xterm's highlight mouse tracking). Control strings are dropped whole however
-    long, and a sequence over 4096 bytes is dropped whole. At the end of its input, and on a
-    signal after dropping what it had not finished writing, it restores the terminal.
-- Tests of the renderer on synthetic logs, of the replay filter and of the three commands, and an
-  end-to-end test that renders and replays a session recorded in a pseudo-terminal.
-- Moving from an older logger with `tlogger install`. `--remove-block START END` takes the block
-  between two given whole lines out of the rc in the same checked write that adds the tlogger
-  block, and saves its exact bytes in `~/.local/state/tlogger/quarantine` (0700, files 0600).
-  `--block-sha256 HASH`, which `--yes` needs outside a dry run, holds it to the block the dry run
-  showed. `--quarantine FILE` moves the older logger's stale backup there, with mode 0600 and its
-  timestamp; it refuses links, start-up files, tlogger's own files and logs, and anything outside
-  the home and zsh folders. A real run prints the commands that put the block back. A release
-  holds `libexec/legacyblock.awk`, which finds the block.
-- Tests of the block scan under each awk, and of the cut, the fingerprint, the refusals, the move
-  and the undo.
-- `tests/e2e-view-tty.bats` runs `tlogger show` and `replay` in a real pseudo-terminal: the pager
-  and its secure mode, the replay keys, Ctrl+C and the terminal they leave. The CI test job
-  installs `less` for it; what the tool needs on a user's machine does not change.
-- `ci/release-check`, which the standard's release build runs on every archive, dry runs
-  included: it stops any build whose archive breaks the new Release contract in CONTRIBUTING.md
-  (phase 7)
-- `tlogger install` refuses an unpacked release whose manifest names another version than its
-  `VERSION` (phase 7)
-- `docs/guide.md`: an engagement from start to end, with the README as the reference (phase 7)
+- `tlogger start` records a zsh terminal with util-linux `script`: keystrokes, passwords at
+  hidden prompts included, screen output and timing, in a session folder of its own (0700, files
+  0600) with UTC timestamps. `tlogger stop` pauses, and `tlogger start` resumes in a new session.
+- Auto mode: with `mode=auto`, every new interactive zsh terminal records itself as its shell
+  starts. `zsh -c` commands, VS Code's environment probe, shells without a terminal and terminals
+  that are recorded already do not. `record_ssh` and `record_tmux` decide for SSH logins and tmux
+  panes, and `tlogger mode auto|manual` switches the mode.
+- Refusals that leave the shell working, with a red notice: the kill switches `TLOGGER_DISABLE=1`
+  and the `disable` file, a missing or old `script`, a log folder that is unusable or that other
+  users may write in, and too little free space.
+- A command journal, `commands.tsv`, with each command's start time in UTC, folder, VPN addresses
+  and exit status; a dim stamp before each command; and a `[<UTC> <VPN list> REC]` segment in the
+  prompt (`REC`, `NOREC` or `EXT`). Kali's own prompt stays as it is.
+- A config under `~/.config/tlogger`, read as data, with `TLOGGER_<KEY>` variables that win over
+  it: `record_input`, `min_free_mb`, `prompt`, `stamp`, `stamp_vpn`, `vpn_ifaces`,
+  `history_timestamps` and the mode keys.
+- `tlogger render`, `show` and `replay`: a plain-text transcript derived from the logs, paged with
+  `less` in secure mode, and a replay with `--speed` and `--maxdelay` through a filter that keeps
+  only what draws the screen. None of them writes the evidence files.
+- `tlogger install`, `uninstall`, `status`, `version` and `help`. `install` shows its plan and the
+  change to the rc as a diff and asks first; `--dry-run` writes nothing. In auto mode it first
+  records a test command, to prove that `script` works. `uninstall` keeps the logs.
+- Installs from a release go to `~/.local/share/tlogger/releases/X.Y.Z`, with `current` pointing
+  at it, and keep the release before it. `install` refuses an older release over a newer one, and
+  an unpacked release whose manifest names another version.
+- Moving from an older logger: `install --remove-block START END` takes its block out of the rc
+  in the same checked write, keeps its bytes in a private quarantine, and prints how to undo it.
+  `--block-sha256` holds a real run to the block the dry run showed.
+- `docs/guide.md`, an engagement from start to end.
+- Each release is a tar archive with `SHA256SUMS` and a GitHub build attestation.
 
-### Changed
-
-- Repository standard 1.2.0: adopted, with the hooks, checks, workflows and blocks.
-- Repository standard 1.2.0: releases are tar archives (`RELEASE_KIND=tar`), and CONTRIBUTING.md
-  has the standard's "Releasing" block. A pull request that touches the release files builds the
-  archive twice as a dry run; a merge that changes `VERSION` drafts a release.
-- The tests run through `ci/test`, which starts the same pinned Kali container as before and runs
-  `ci/kali-suite` there. The own `tests.yml`, `.githooks/denylist.sh` and `tests/hooks.bats` are
-  gone: the standard's hooks, workflows and hook tests replace them.
-- `.github/standard.conf` sets up the shared repository standard's privacy scan ahead of its
-  adoption: the synthetic Kali home is allowed in the docs, tests and pull request template that
-  use it as example data. One `.gitignore` line is written so that it no longer reads as a host
-  name, and one more entry allows that tool file name in the older versions of `.gitignore`.
-- The five e2e test files run their zsh drivers through one `drive` in `tests/helpers.bash`
-  instead of a copy each, and a new lint test keeps it that way. The pager tests share small
-  helpers in `tests/helpers/view-tty.zsh`. No other test is added or removed.
-- CI runs the tests in a `kalilinux/kali-rolling` container pinned by digest, with real zsh: as a
-  non-root user, then the tests tagged root as root. It fails when a test fails or is skipped.
-- `bin/tlogger` reads the config by the line rules of `lib/config.zsh`: values are trimmed, and
-  indented comments and lines of blanks are skipped. `install` keeps the `record_input`,
-  `min_free_mb` and `recorder` lines as they are, and a release holds `lib/config.zsh` as well.
-  `bin/tlogger start` and `stop`, which a terminal still on the plugin it loaded before an
-  install sends there, exit 2 and say that they work only in a zsh terminal that has loaded the
-  plugin.
-- The config that `install` writes for a new user names the optional keys `record_input`,
-  `min_free_mb`, `record_ssh` and `record_tmux` in its comments, and `prompt`, `stamp`,
-  `stamp_vpn`, `vpn_ifaces` and `history_timestamps` as well.
-- A session folder also holds `commands.tsv`, created empty with mode 0600 before the recording
-  starts; a session that never started, with nothing but empty logs, is still removed.
-- CI installs `python3` and `python3-pyte` and prints the versions of `scriptreplay`, `python3`
-  and `python3-pyte`. A release holds `libexec/tlogger_view.py` as well.
-
-### Fixed
-
-- `tlogger show` pages an existing transcript only when it is valid UTF-8, as `render` writes it.
-  Any other transcript, such as one with a raw byte 0x9B that a terminal could read as a control,
-  is rendered again from the logs.
-- Cleanup at the end of every command that `bin/tlogger` runs ignores HUP, INT, QUIT and TERM,
-  so a second Ctrl+C or a closing terminal can no longer stop it halfway and leave a temp folder
-  behind.
-- Ctrl+Z during `tlogger replay` gives a clean prompt: the filter restores the screen and the
-  terminal settings before the replay stops, and `fg` carries on from the same place. After `bg`
-  the replay waits for `fg`, and with no job-control shell above it Ctrl+Z does nothing.
-- `tlogger show` also clears `LESSSECURE_ALLOW`, `LESS_IS_MORE` and `MORE`. A `LESSSECURE_ALLOW`
-  in the environment could turn the pager's blocked keys back on, and the other two could pass
-  it options.
-- `tlogger replay` discards the keys still queued in the terminal when it ends. A line typed late
-  in a replay could otherwise run as a command in the shell.
-- The in-place write of a hard-linked rc also ignores QUIT, so that Ctrl+\ cannot cut it short.
-
-[Unreleased]: https://github.com/Ochsyp/terminal-logger/commits/main
+[Unreleased]: https://github.com/Ochsyp/terminal-logger/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Ochsyp/terminal-logger/releases/tag/v0.1.0

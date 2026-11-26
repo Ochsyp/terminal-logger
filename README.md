@@ -3,13 +3,13 @@
 A recorder for zsh terminal sessions on Kali Linux, keystrokes included, as evidence for
 penetration tests.
 
-> **Status:** phase 6. In auto mode every new zsh terminal records itself as its shell starts; in
-> manual mode `tlogger start` records a terminal on request. `tlogger stop` pauses the recording,
-> and `tlogger mode` switches between the modes. A recorded shell journals each command with its
-> start time in UTC, and the prompt shows whether the terminal is recorded. `tlogger render`,
-> `show` and `replay` turn a session into a plain-text transcript, page it and replay it.
-> `tlogger install`, `uninstall` and `status` put the plugin in place and take it out again, and
-> `install` can [replace an older logger](#moving-from-an-older-logger).
+> **Status:** 0.1.0, the first release. In auto mode every new zsh terminal records itself as its
+> shell starts; in manual mode `tlogger start` records a terminal on request. `tlogger stop`
+> pauses the recording, and `tlogger mode` switches between the modes. A recorded shell journals
+> each command with its start time in UTC, and the prompt shows whether the terminal is recorded.
+> `tlogger render`, `show` and `replay` turn a session into a plain-text transcript, page it and
+> replay it. `tlogger install`, `uninstall` and `status` put the plugin in place and take it out
+> again, and `install` can [replace an older logger](#moving-from-an-older-logger).
 > [CONTRIBUTING.md](CONTRIBUTING.md) describes the workflow, and [CHANGELOG.md](CHANGELOG.md)
 > lists what changed. [docs/guide.md](docs/guide.md) walks through an engagement from start to
 > end.
@@ -38,14 +38,47 @@ The finished `tlogger` command:
 
 ## Install
 
-Until the first release, install from a checkout of this repository, as the user whose terminals
-are to be recorded, not as root:
+Install as the user whose terminals are to be recorded, not as root, and on your own machine, not
+on a host that others use.
+
+### Install from a release
+
+Each [release](https://github.com/Ochsyp/terminal-logger/releases) has two assets: the archive
+`terminal-logger-X.Y.Z.tar.gz` and `SHA256SUMS`. Download both into an empty folder, and check
+them before you unpack anything:
+
+```bash
+gh release download vX.Y.Z --repo Ochsyp/terminal-logger
+sha256sum -c SHA256SUMS
+gh attestation verify terminal-logger-X.Y.Z.tar.gz --repo Ochsyp/terminal-logger
+tar -xzf terminal-logger-X.Y.Z.tar.gz
+cd terminal-logger-X.Y.Z
+./bin/tlogger install --mode auto
+```
+
+`sha256sum -c` must print `OK` for the archive. `gh attestation verify` proves that this
+repository's `release` workflow built the archive from `main`; it needs `gh`, signed in once with
+`gh auth login`. Without `gh`, download the two assets from the release page and check the
+attestation there.
+
+`install` copies the release to `~/.local/share/tlogger/releases/X.Y.Z` and points
+`~/.local/share/tlogger/current` at it, so the unpacked folder can go afterwards. It keeps the
+release before it, refuses to put an older release over a newer one, and refuses an unpacked
+release whose `VERSION` and `terminal-logger-release.json` name different versions.
+`tlogger version` names the installed version.
+
+### Install from a checkout
+
+For development, install from a checkout of this repository in the same way:
 
 ```bash
 bin/tlogger install --mode auto
 ```
 
-Installing from a release, with a download you can check, comes with the first release.
+A checkout installs under the version in `VERSION`, which ends in `-dev` between releases, so it
+never passes for a released version.
+
+### What install does
 
 `install` shows its plan and the change to the rc as a diff, then asks before it writes anything.
 `--dry-run` shows the same and writes nothing, and `--print-only` prints only the block. Outside a
