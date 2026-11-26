@@ -183,11 +183,13 @@ SEAL_FILES=(output.raw timing input.raw commands.tsv recorder started exited sto
 SEAL_EXTRAS_RE='^(transcript\.txt(\.part)?|(SHA256SUMS|SEAL)(\.part\.[A-Za-z0-9]{6})?)$'
 
 # Set by recorder_state: yes while the recorder of a session still runs, no once it has gone,
-# unknown without a recorder file. Set by seal_session: SEAL_RESULT, sealed, already, live or
-# refused, SEAL_SUM, the SHA-256 of the new SHA256SUMS, and WHY, the reason of a refusal. Set by
-# verify_session: VERDICT, ok, changed, unsealed, recording or unknown. Set by
+# unknown without a recorder file. Set by seal_session: SEAL_RESULT, sealed, completed (a
+# missing MANIFEST line added), already, live, mismatch or refused, SEAL_SUM, the SHA-256 of
+# SHA256SUMS, and WHY, the reason of a refusal; by manifest_add: MANIFEST_ADDED, 1 when it
+# appended. Set by verify_session: VERDICT, ok, changed, unsealed, recording or unknown. Set by
 # parse_session_args: ARG_SESSION, the SESSION argument, and ARG_ALL, 1 for --all.
 LIVE=
+MANIFEST_ADDED=0
 ARG_SESSION=
 ARG_ALL=0
 SEAL_RESULT=
@@ -3199,13 +3201,14 @@ sha256_of() {
     printf '%s\n' "${sum%% *}"
 }
 
-# Seal the session folder DIR, unless it is sealed already. Refuses a session whose recorder
-# still runs or has no recorder file, and one that seal_check refuses. Writes SHA256SUMS over the
-# SEAL_FILES the session holds, in their order, through a temp file and a rename; makes them and
-# SHA256SUMS 0400; writes SEAL, 0400, with the tlogger version, the UTC time and the SHA-256 of
-# SHA256SUMS; flushes them to disk with sync; and appends '<sum>  <id>/SHA256SUMS' to the MANIFEST
-# of the folder that holds DIR, under flock, mode 0600 when it is new. Sets SEAL_RESULT, SEAL_SUM
-# and, on a refusal, WHY; returns 1 on a refusal or a failure.
+# Seal the session folder DIR. Refuses a session whose recorder still runs or has no recorder
+# file, and one that seal_check refuses. Writes SHA256SUMS over the SEAL_FILES the session holds,
+# in their order, through a temp file and a rename; makes them and SHA256SUMS 0400; writes SEAL,
+# 0400, with the tlogger version, the UTC time and the SHA-256 of SHA256SUMS; flushes them to
+# disk with sync; and appends '<sum>  <id>/SHA256SUMS' to the MANIFEST of the folder that holds
+# DIR with manifest_add. A session sealed already only gets its missing MANIFEST line, as long as
+# SHA256SUMS still has the sum SEAL names; else it is refused as a mismatch. Sets SEAL_RESULT,
+# SEAL_SUM and, on a refusal, WHY; returns 1 on a refusal or a failure.
 seal_session() {
     local dir=$1 id=${1##*/} parent=${1%/*} f tmp sum stamp manifest
     local -a files=() paths=()
@@ -3215,13 +3218,27 @@ seal_session() {
         SEAL_RESULT=already
         # A seal whose MANIFEST line never got written, as when the MANIFEST was read-only or the
         # run was cut short, gets it now, as long as SHA256SUMS still has the sum SEAL names.
-        if [[ -f $dir/SEAL && ! -L $dir/SEAL && -f $dir/SHA256SUMS && ! -L $dir/SHA256SUMS ]] &&
-            ! manifest_has "$manifest" "$id"; then
+        # Nothing else is written: no SEAL, no SHA256SUMS and no log. A line there already ends it
+        # without a write, so that a read-only MANIFEST stays fine; manifest_add checks again
+        # under its lock.
+        if manifest_has "$manifest" "$id"; then
+            return 0
+        fi
+        if [[ -L $dir/SEAL || ! -f $dir/SEAL || -L $dir/SHA256SUMS || ! -f $dir/SHA256SUMS ]]
+        then
+            sum=
+        else
             sum=$(sha256_of "$dir/SHA256SUMS") || sum=
-            if [[ -n $sum && $sum == "$(seal_sum "$dir")" ]]; then
-                manifest_add "$manifest" "$id" "$sum" || return 1
-                SEAL_RESULT=completed SEAL_SUM=$sum
-            fi
+        fi
+        if [[ -z $sum || $sum != "$(seal_sum "$dir" 2> /dev/null)" ]]; then
+            SEAL_RESULT=mismatch
+            WHY="session $id is sealed, but its SHA256SUMS does not match its SEAL, so seal adds"
+            WHY+=" no MANIFEST line; tlogger verify $id names what changed"
+            return 1
+        fi
+        manifest_add "$manifest" "$id" "$sum" 1 || return 1
+        if (( MANIFEST_ADDED )); then
+            SEAL_RESULT=completed SEAL_SUM=$sum
         fi
         return 0
     fi
@@ -3256,11 +3273,12 @@ seal_session() {
     TEMP_PATHS+=("$tmp")
     # Two spaces before each name, as sha256sum writes it in text mode, also where it marks
     # binary mode with '*'.
-    if ! (cd -- "$dir" && sha256sum -- "${files[@]}" |
-        sed 's/^\([0-9a-f]\{64\}\) [ *]/\1  /') > "$tmp" 2> /dev/null; then
+    # The || form, which alone sees a failed redirection (see manifest_add).
+    (cd -- "$dir" && sha256sum -- "${files[@]}" | sed 's/^\([0-9a-f]\{64\}\) [ *]/\1  /') \
+        2> /dev/null > "$tmp" || {
         WHY="cannot read the logs of session $id"
         return 1
-    fi
+    }
     if ! { chmod 400 -- "$tmp" && mv -f -T -- "$tmp" "$dir/SHA256SUMS"; }; then
         WHY="cannot write $(shown "$dir/SHA256SUMS")"
         return 1
@@ -3291,7 +3309,7 @@ seal_session() {
     # folder its entries. An older sync without -d syncs everything.
     sync -d -- "${paths[@]}" "$dir/SHA256SUMS" "$dir/SEAL" 2> /dev/null || sync
     sync -- "$dir" 2> /dev/null || true
-    manifest_add "$manifest" "$id" "$sum" || return 1
+    manifest_add "$manifest" "$id" "$sum" 1 || return 1
     SEAL_RESULT=sealed SEAL_SUM=$sum
 }
 
@@ -3308,30 +3326,54 @@ seal_sum() {
 
 # Succeed when the file MANIFEST has a line for the session ID, '<sum>  ID/SHA256SUMS'.
 manifest_has() {
-    [[ -f $1 && ! -L $1 ]] && grep -qE "^[0-9a-f]{64}  $2/SHA256SUMS\$" "$1"
+    [[ -f $1 && ! -L $1 ]] && grep -qE "^[0-9a-f]{64}  $2/SHA256SUMS\$" "$1" 2> /dev/null
 }
 
 # Append '<SUM>  <ID>/SHA256SUMS' to the file MANIFEST under flock, creating it with mode 0600,
-# and flush it to the disk. Sets WHY and fails when it cannot.
+# and flush it to the disk. With ONLY_MISSING 1, append nothing when a line for ID is there
+# already, which it checks under the same lock, so that two seals at once add it once. A file
+# that does not end with a newline, as after a write that a full disk cut short, gets one
+# first. Sets MANIFEST_ADDED to 1 when it appended, else 0; sets WHY and fails when it cannot
+# read or write the file.
 manifest_add() {
-    local manifest=$1 id=$2 sum=$3
+    local manifest=$1 id=$2 sum=$3 only_missing=${4:-0} rc=0
+    MANIFEST_ADDED=0
     if [[ -L $manifest || ( -e $manifest && ! -f $manifest ) ]]; then
         WHY="session $id is sealed, but $(shown "$manifest") is a symlink or not a regular file;"
         WHY+=" tlogger seal $id adds its line once that is fixed"
         return 1
     fi
-    # A failed redirection of a { } group is not reliably a failure in bash, so the check comes
-    # first and the append runs in a subshell, whose status is; stderr is closed before the
-    # redirection, so that bash's own message does not show.
-    if [[ ( -e $manifest && ! -w $manifest ) || ( ! -e $manifest && ! -w ${manifest%/*} ) ]] ||
-        ! (
-            flock -x 9 2> /dev/null || true
-            printf '%s  %s/SHA256SUMS\n' "$sum" "$id" >&9
-        ) 2> /dev/null 9>> "$manifest"; then
-        WHY="session $id is sealed, but cannot write its line in $(shown "$manifest");"
-        WHY+=" tlogger seal $id adds it once that is fixed"
-        return 1
-    fi
+    # Only the || form sees a failed redirection: bash does not invert that failure under !, so
+    # 'if ! ( ... ) 9>> FILE' would pass it as success. stderr is closed before the redirection,
+    # so that bash's own message, which names the full path, does not show.
+    # shellcheck disable=SC2094 # The reads come before the appends, which go through fd 9.
+    (
+        flock -x 9 2> /dev/null || true
+        if [[ ! -r $manifest ]]; then
+            exit 3
+        fi
+        if (( only_missing )) && grep -qE "^[0-9a-f]{64}  $id/SHA256SUMS\$" "$manifest"; then
+            exit 10
+        fi
+        if [[ -s $manifest && -n $(tail -c 1 "$manifest") ]]; then
+            printf '\n' >&9 || exit 1
+        fi
+        printf '%s  %s/SHA256SUMS\n' "$sum" "$id" >&9 || exit 1
+    ) 2> /dev/null 9>> "$manifest" || rc=$?
+    case $rc in
+        0) MANIFEST_ADDED=1 ;;
+        10) return 0 ;;
+        3)
+            WHY="session $id is sealed, but cannot read $(shown "$manifest");"
+            WHY+=" tlogger seal $id adds its line once that is fixed"
+            return 1
+            ;;
+        *)
+            WHY="session $id is sealed, but cannot write its line in $(shown "$manifest");"
+            WHY+=" tlogger seal $id adds it once that is fixed"
+            return 1
+            ;;
+    esac
     sync -- "$manifest" 2> /dev/null || true
 }
 
@@ -3533,8 +3575,9 @@ seal_notice() {
 # tlogger seal [SESSION | --all]: seal one session, by default the newest, or with --all every
 # session of the log folder whose recording has ended. Prints 'sealed session <id>; SHA-256 of
 # its SHA256SUMS: <sum>' for each one it seals. With --all, sessions still recorded and sessions
-# without a recorder file are named and left; sessions sealed already are passed over. Exits 0,
-# 1 when a session was refused or could not be sealed, 3 without sessions.
+# without a recorder file are named and left; sessions sealed already are passed over, unless
+# their MANIFEST line is missing, which they get. Exits 0, 1 when a session was refused or could
+# not be sealed, 3 without sessions.
 cmd_seal() {
     local dir status=0
     parse_session_args seal "$@"

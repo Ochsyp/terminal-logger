@@ -234,6 +234,26 @@ assert_usage_error() {
     printf 'x\n' > "$LOGS/$id/SHA256SUMS.part.Ab12Cd"
     run_tlogger verify "$id"
     [ "$status" -eq 0 ]
+    # A seal whose SHA256SUMS no longer has the sum SEAL names gets no MANIFEST line.
+    chmod 600 "$LOGS/$id/SHA256SUMS"
+    printf '%s  extra\n' "$sum" >> "$LOGS/$id/SHA256SUMS"
+    chmod 400 "$LOGS/$id/SHA256SUMS"
+    : > "$LOGS/MANIFEST"
+    run_tlogger seal "$id"
+    want="tlogger: session $id is sealed, but its SHA256SUMS does not match its SEAL, so seal adds"
+    assert_refused 1 "$want no MANIFEST line; tlogger verify $id names what changed"
+    [ ! -s "$LOGS/MANIFEST" ]
+}
+
+@test "a MANIFEST that ends without a newline gets one before the next line" {
+    local id=20261112T100000Z-a1B2c3
+    make_session "$id"
+    printf 'cut short' > "$LOGS/MANIFEST"
+    run_tlogger seal "$id"
+    [ "$status" -eq 0 ]
+    [ "$(sed -n 1p "$LOGS/MANIFEST")" = 'cut short' ]
+    [ "$(sed -n 2p "$LOGS/MANIFEST")" = "$(sha_of "$LOGS/$id/SHA256SUMS")  $id/SHA256SUMS" ]
+    [ "$(wc -l < "$LOGS/MANIFEST")" -eq 2 ]
 }
 
 @test "verify prints ok for an untouched seal, and changed for a byte, a mode or a file" {

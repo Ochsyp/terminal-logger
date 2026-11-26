@@ -415,12 +415,12 @@ _tlogger_preflight() {
 
 # Seal the session folder DIR, whose recording has just ended or paused, with the seal command
 # of this shell's release, which prints the session's sum, or why it could not. Says in yellow
-# when the seal did not finish; tlogger seal finishes it later.
+# when the session is not fully sealed, and that tlogger seal tries again.
 _tlogger_seal() {
     emulate -L zsh
     if ! $_tlogger_release/bin/tlogger seal -- $1 < /dev/null; then
-        _tlogger_say yellow "session ${1:t}: the seal did not finish;"\
-" tlogger seal ${1:t} finishes it"
+        _tlogger_say yellow "session ${1:t} is not fully sealed, for the reason above;"\
+" tlogger seal ${1:t} tries again"
     fi
 }
 
