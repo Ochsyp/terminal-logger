@@ -388,7 +388,9 @@ pty_session
 pty_send 'kill -KILL $$'
 pty_end $start
 (( PTY_STATUS == 1 )) || pty_fail "tlogger start returned $PTY_STATUS, not 1"
-[[ $PTY_OUT == *$'\e[33m'"tlogger: recording ended unexpectedly; session $PTY_ID kept, not sealed; tlogger seal $PTY_ID seals it"$'\e[0m\n' ]] ||
+want="tlogger: recording ended unexpectedly; session $PTY_ID kept, not sealed;"
+want+=" tlogger seal $PTY_ID seals it"
+[[ $PTY_OUT == *$'\e[33m'"$want"$'\e[0m\n' ]] ||
     pty_fail 'no yellow notice that the recording ended unexpectedly'
 [[ $PTY_OUT != *'tlogger: sealed session'* ]] || pty_fail 'an unexpected end sealed the session'
 pty_run 'tlogger status'
@@ -411,8 +413,11 @@ pty_session
 pty_send 'kill -KILL $PPID'
 pty_end $start
 (( PTY_STATUS == 1 )) || pty_fail "tlogger start returned $PTY_STATUS, not 1"
-[[ $PTY_OUT == *$'\e[33m'"tlogger: recording ended unexpectedly; session $PTY_ID kept"$'\e[0m'* ]] ||
+want="tlogger: recording ended unexpectedly; session $PTY_ID kept, not sealed;"
+want+=" tlogger seal $PTY_ID seals it"
+[[ $PTY_OUT == *$'\e[33m'"$want"$'\e[0m'* ]] ||
     pty_fail 'no yellow notice that the recording ended unexpectedly'
+[[ $PTY_OUT != *'tlogger: sealed session'* ]] || pty_fail 'a killed recorder sealed the session'
 pty_run 'tlogger status'
 pty_out_has 'state: NOREC, this terminal is NOT recorded' || pty_fail 'the outer shell is not NOREC'
 # Time for the hung-up shell to run its zshexit hook, which must write no exited.
