@@ -11,11 +11,12 @@ setopt extendedglob
 
 # The zpty command name. PTY_BUF holds the output no wait has consumed yet, PTY_LOG all output
 # read so far, PTY_BEFORE what the last pty_expect skipped before its text. PTY_OUT and PTY_STATUS
-# are the output and exit status of the last frame; PTY_ID and PTY_BANNER come from pty_session.
+# are the output and exit status of the last frame; PTY_ID, PTY_BANNER and PTY_BANNER_SGR come
+# from pty_session.
 # PTY_PID is the pid of the shell in the terminal, whose end cuts every wait short; pty_shell and
 # pty_auto_shell set it, and pty_auto_shell also sets PTY_OUTER, PTY_RECORDER and PTY_INNER.
 # PTY_SEQ counts the frames, and _pty_mark keeps the length of PTY_LOG when each frame began.
-typeset -g PTY_NAME=e2e PTY_BUF= PTY_LOG= PTY_BEFORE= PTY_OUT= PTY_ID= PTY_BANNER=
+typeset -g PTY_NAME=e2e PTY_BUF= PTY_LOG= PTY_BEFORE= PTY_OUT= PTY_ID= PTY_BANNER= PTY_BANNER_SGR=
 typeset -gi PTY_STATUS=0 PTY_SEQ=0 PTY_PID=0 PTY_OUTER=0 PTY_RECORDER=0 PTY_INNER=0
 typeset -ga _pty_mark
 # The longest a wait lasts, in seconds.
@@ -197,21 +198,32 @@ pty_out_is() {
     [[ $PTY_OUT == "$1"$'\n' ]]
 }
 
-# Wait at most SECONDS for the prompt segment of STATE (REC, NOREC or EXT) without a VPN list,
-# '[<UTC> STATE]', followed by TAIL, such as ' e2e% ' or the line end of a two-line prompt. Ends
-# the driver unless a UTC time opens the segment. Consumes the output up to the end of TAIL and sets
-# PTY_BEFORE to the part before ' STATE]'.
+# Wait at most SECONDS for the prompt segment of STATE (REC, NOREC or EXT) as the prompt shows it,
+# '[<UTC> UTC] [<VPN list or no vpn>] [STATE]', followed by TAIL, such as ' e2e% ' or the line end
+# of a two-line prompt. Each field may come with its SGR colour codes, which zsh prints for %F and
+# %f. Ends the driver unless the readable UTC time and a VPN field open the segment. Consumes the
+# output up to the end of TAIL and sets PTY_BEFORE to the part before ' [STATE]'.
 pty_segment() {
-    pty_expect " $1]$2" $3
-    [[ $PTY_BEFORE == *'['[0-9](#c4)-[0-9](#c2)-[0-9](#c2)T[0-9](#c2):[0-9](#c2):[0-9](#c2)Z ]] ||
-        pty_fail "no [<UTC> opens the $1 segment: ${(V)PTY_BEFORE[-80,-1]}"
+    local state=$1 tail=$2 plain sgr=$'\e''\[[0-9;]#m'
+    local day='[0-9](#c4)-[0-9](#c2)-[0-9](#c2)' clock='[0-9](#c2):[0-9](#c2):[0-9](#c2)'
+    _pty_until '[[ $PTY_BUF == *" ["(${~sgr})#"$state"(${~sgr})#"]$tail"* ]]' \
+        "the $state segment" $3
+    PTY_BEFORE=${PTY_BUF%%" ["(${~sgr})#"$state"(${~sgr})#"]$tail"*}
+    PTY_BUF=${PTY_BUF#*" ["(${~sgr})#"$state"(${~sgr})#"]$tail"}
+    plain=${PTY_BEFORE//${~sgr}}
+    [[ $plain == *'['${~day}' '${~clock}' UTC] ['[^]]##']' ]] ||
+        pty_fail "no [<UTC> UTC] [<vpn>] opens the $state segment: ${(V)PTY_BEFORE[-80,-1]}"
 }
 
 # Wait for the banner of a recording and the REC line of the recorded shell; set PTY_BANNER to
-# the banner line and PTY_ID to the session id it names.
+# the banner line without its colour codes, PTY_BANNER_SGR to the SGR code that opens it (empty
+# without colour) and PTY_ID to the session id it names.
 pty_session() {
+    local sgr=$'\e''\[[0-9;]#m'
     pty_expect 'tlogger: recording session '
+    PTY_BANNER_SGR=${(M)PTY_BEFORE%$'\e'\[[0-9;]##m}
     pty_expect $'\r\n'
+    PTY_BEFORE=${PTY_BEFORE//${~sgr}}
     PTY_BANNER="tlogger: recording session $PTY_BEFORE"
     PTY_ID=${PTY_BEFORE%%;*}
     if [[ $PTY_ID != [0-9](#c8)T[0-9](#c6)Z-[A-Za-z0-9](#c6) ]]; then

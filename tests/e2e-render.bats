@@ -79,6 +79,18 @@ EOF
     assert_transcript_header "$transcript" "$id" "$VERSION_TEXT"
     refute_controls "$transcript"
     grep -qF "tlogger: REC $id" "$transcript"
+    # The hidden stamp of each command becomes its stamp line in the transcript, at the UTC time of
+    # its S line, and output.raw holds no visible stamp line.
+    local row
+    local -a rows
+    mapfile -t rows < <(grep '^S' "$dir/commands.tsv")
+    [ "${#rows[@]}" -ge 5 ]
+    for row in "${rows[@]}"; do
+        split_tabs "$row"
+        # The machine's own VPN list, if any, stands between the time and REC.
+        grep -qxE -- "-- ${FIELDS[2]}( .*)? REC" "$transcript"
+        run ! grep -qaF -- "-- ${FIELDS[2]}" "$dir/output.raw"
+    done
     # The output of the commands, in order, the lines before clear included.
     before=$(line_of "$transcript" e2e-before-clear-42)
     after=$(line_of "$transcript" e2e-after-clear)

@@ -210,8 +210,9 @@ bats tests/
 - Tests tagged `root` (`# bats test_tags=root`) run only as root and skip otherwise. The other
   tests expect a non-root user: tlogger refuses root with a HOME that is not root's, so a run as
   root fails them by design.
-- To run the suite as CI does, on Linux with zsh, util-linux, mawk, gawk, `less`, `python3` and
-  `python3-pyte` installed, run the untagged tests as yourself, then the root tests as root:
+- To run the suite as CI does, on Linux with zsh, util-linux, mawk, gawk, `less`, `python3`,
+  `python3-pyte`, tmux and GNU screen installed, run the untagged tests as yourself, then the root
+  tests as root:
 
   ```bash
   TLOGGER_CI=1 bats --filter-tags '!root' tests/
@@ -222,7 +223,8 @@ bats tests/
   `/etc/skel/.zshrc`. It exists for the tests only.
 - CI's `test` stage runs `ci/test`, and so can any Linux machine with docker: `bash ci/test`. It
   starts the pinned `kalilinux/kali-rolling` container, where `ci/kali-suite` installs zsh,
-  util-linux, `less`, `python3`, `python3-pyte`, bats and ShellCheck 0.11.0. There the suite, the
+  util-linux, `less`, `python3`, `python3-pyte`, tmux, GNU screen, bats and ShellCheck 0.11.0.
+  tmux and screen are there for `tests/stamp-terminals.bats` alone. There the suite, the
   zsh-based tests included, runs as a non-root user with `--filter-tags '!root'`, and the tests
   tagged root run afterwards as root. It fails when any test fails or is skipped, and when the two
   runs together do not run every test that `bats --count tests/` counts.

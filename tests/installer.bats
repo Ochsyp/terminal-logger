@@ -642,7 +642,7 @@ list_releases() {
     [ "$status" -eq 0 ]
     printf '  # tuned for this engagement\nrecord_input=no\nmin_free_mb=500\nrecorder=/usr/bin/script\nrecord_ssh=no\nrecord_tmux=no\n' \
         >> "$CONF/config"
-    printf 'prompt=off\nstamp=off\nstamp_vpn=off\nvpn_ifaces=tun*, wg0\nhistory_timestamps=yes\n' \
+    printf 'prompt=off\nprompt_time=iso\nstamp=hidden\nstamp_vpn=off\nvpn_ifaces=tun*, wg0\nhistory_timestamps=yes\n' \
         >> "$CONF/config"
     cp "$CONF/config" "$BATS_TEST_TMPDIR/config-before"
     run_tlogger install --yes
@@ -660,7 +660,8 @@ list_releases() {
     grep -qx 'record_ssh=no' "$CONF/config"
     grep -qx 'record_tmux=no' "$CONF/config"
     grep -qx 'prompt=off' "$CONF/config"
-    grep -qx 'stamp=off' "$CONF/config"
+    grep -qx 'prompt_time=iso' "$CONF/config"
+    grep -qx 'stamp=hidden' "$CONF/config"
     grep -qx 'stamp_vpn=off' "$CONF/config"
     grep -qxF 'vpn_ifaces=tun*, wg0' "$CONF/config"
     grep -qx 'history_timestamps=yes' "$CONF/config"
@@ -675,10 +676,12 @@ list_releases() {
     printf 'alias ll=ls\n' > "$RC"
     run_tlogger install --mode manual --yes
     [ "$status" -eq 0 ]
-    for key in record_input min_free_mb record_ssh record_tmux prompt stamp stamp_vpn vpn_ifaces \
-        history_timestamps; do
+    for key in record_input min_free_mb record_ssh record_tmux prompt prompt_time stamp stamp_vpn \
+        vpn_ifaces history_timestamps; do
         grep -q "^#.*$key=" "$CONF/config"
     done
+    # stamp names its three values, and hidden as the default.
+    grep -q '^#.*stamp=on|off|hidden (default hidden)' "$CONF/config"
     [ "$(grep -v '^#' "$CONF/config")" = "mode=manual"$'\n'"logdir=$STATE/sessions" ]
 }
 

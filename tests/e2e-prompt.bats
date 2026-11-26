@@ -63,7 +63,7 @@ journal_home() {
     zsh -f -c 'print -r -- ${(q+)1}' zsh "$(cd "$HOME" && pwd -P)"
 }
 
-@test "commands typed in a recorded terminal get S and E lines with their status, and a dim stamp each" {
+@test "commands typed in a recorded terminal get S and E lines with their status, and a hidden stamp each" {
     local pid home row vpn='tun0 192.0.2.10'
     local -a rows
     # Frames 1 and 2 run in the outer shell, which journals nothing; 3 and 4 in the recorded one.
@@ -73,6 +73,7 @@ pty_shell TLOGGER_SYSFS=$E2E_SYS TLOGGER_IP=$E2E_IP
 pty_begin 'tlogger start'
 start=$REPLY
 pty_session
+[[ $PTY_BANNER_SGR == $'\e[32m' ]] || pty_fail "the banner is not green: ${(V)PTY_BANNER_SGR}"
 pty_run 'print -r -- $$'
 print -r -- ${PTY_OUT%$'\n'} >| ~/recorded-pid
 pty_send '(exit 42)'
@@ -98,11 +99,13 @@ EOF
     assert_e_line "${rows[7]}" "$pid" 0
     # exit ends the shell, so no E line follows its S line.
     assert_s_line "${rows[8]}" "$pid" "$home" "$vpn" exit
-    # Each S line has its stamp in output.raw, dim, with the same UTC time.
+    # Each S line has its stamp in output.raw, hidden in an OSC 7711 string, with the same UTC
+    # time, and no visible stamp line, which stamp=hidden, the default, does not print.
     for row in "${rows[@]}"; do
         split_tabs "$row"
         if [[ ${FIELDS[0]} == S ]]; then
-            grep -qaF $'\e[2m'"-- ${FIELDS[2]} $vpn REC"$'\e[0m' "$DIR/output.raw"
+            grep -qaF $'\e]7711;tlogger-stamp '"${FIELDS[2]} $vpn"$'\e\\' "$DIR/output.raw"
+            run ! grep -qaF -- "-- ${FIELDS[2]}" "$DIR/output.raw"
         fi
     done
 }
@@ -184,18 +187,19 @@ pty_run 'print -r -- "$PROMPT|$TLOGGER_SEGMENT"'
 pty_send exit
 pty_end $start
 [[ $PTY_LOG != *'] e2e% '* ]] || pty_fail 'a prompt shows a segment'
-[[ $PTY_LOG == *$'\e[2m-- '* ]] || pty_fail 'the recorded shell printed no stamp'
+[[ $PTY_LOG == *$'\e]7711;tlogger-stamp '* ]] || pty_fail 'the recorded shell wrote no hidden stamp'
 EOF
 }
 
-@test "NO_COLOR prints the stamp without its colour, and stamp=off prints none while the journal goes on" {
+@test "NO_COLOR prints the banner and stamp=on's stamp without colour, and stamp=off writes none while the journal goes on" {
     local id row
     local -a rows
     E2E_SYS=$SYS_NONE drive << 'EOF'
-pty_shell NO_COLOR=1 TLOGGER_SYSFS=$E2E_SYS
+pty_shell NO_COLOR=1 TLOGGER_STAMP=on TLOGGER_SYSFS=$E2E_SYS
 pty_begin 'tlogger start'
 start=$REPLY
 pty_session
+[[ -z $PTY_BANNER_SGR ]] || pty_fail "the banner has a colour: ${(V)PTY_BANNER_SGR}"
 print -r -- $PTY_ID >| ~/no-color-id
 pty_run true
 pty_send exit
@@ -228,6 +232,7 @@ EOF
         [ "${FIELDS[0]}" = S ]
         run ! grep -qaF -- "-- ${FIELDS[2]} REC" "$SESSIONS/$id/output.raw"
     done
+    run ! grep -qaF 'tlogger-stamp' "$SESSIONS/$id/output.raw"
 }
 
 @test "under the rc built from /etc/skel/.zshrc, the segment is back on the prompt after Ctrl+P twice" {
@@ -246,11 +251,11 @@ pty_out_is 'twoline 1' || pty_fail "the rc starts with: $PTY_OUT"
 pty_type $'\x10'
 pty_type $'\x10'
 # Enter on the empty line runs precmd, which puts the segment back into the PROMPT that Ctrl+P
-# rebuilt; the next command prints the end of PROMPT's first line, as long as the segment, and
-# TLOGGER_SEGMENT, which that precmd exported.
+# rebuilt; the next command prints the end of PROMPT's first line, as long as the text that
+# precmd inserted, and that text, which _tlogger_seg keeps.
 pty_send ''
-pty_run 'prompt_lines=(${(f)PROMPT}); print -r -- "$PROMPT_ALTERNATIVE $#prompt_lines ${prompt_lines[1][-$#TLOGGER_SEGMENT,-1]}|$TLOGGER_SEGMENT"'
+pty_run 'prompt_lines=(${(f)PROMPT}); print -r -- "$PROMPT_ALTERNATIVE $#prompt_lines ${prompt_lines[1][-$#_tlogger_seg,-1]}|$_tlogger_seg"'
 [[ $PTY_OUT == (#b)'twoline 2 '(*)'|'(*)$'\n' && $match[1] == "$match[2]" &&
-    $match[2] == '['*' NOREC]' ]] || pty_fail "after Ctrl+P twice the shell has: $PTY_OUT"
+    $match[2] == ' ['*'] [%F{red}NOREC%f]' ]] || pty_fail "after Ctrl+P twice the shell has: $PTY_OUT"
 EOF
 }

@@ -134,7 +134,7 @@ make_plugin_release() {
     grep -qx '  logdir: *~/\.local/state/tlogger/sessions' <<< "$output"
     grep -qx '  record_input: *yes' <<< "$output"
     grep -qx '  prompt: *on' <<< "$output"
-    grep -qx '  stamp: *on' <<< "$output"
+    grep -qx '  stamp: *hidden' <<< "$output"
     # The VPN list of the machine, or none.
     grep -qx '  vpn: *[^ ].*' <<< "$output"
     run --separate-stderr zsh -i -c 'tlogger version' < /dev/null
