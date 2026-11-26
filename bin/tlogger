@@ -4,13 +4,15 @@
 # 4-line block at the top of the zsh rc, the plugin files, the config and the state folders; the
 # plugin does the recording, on tlogger start or, in auto mode, in every new terminal.
 
-# Exit status: 0 done or nothing to change; 1 error or refusal, and for status an install in part;
-# 2 usage error, or --mode or --yes missing where no terminal can answer; 3 not installed, nothing
-# to remove or no session to view. Executing the file runs main; sourcing it only sets the
+# Exit status: 0 done or nothing to change; 1 error or refusal, for status an install in part, and
+# for verify a changed session; 2 usage error, or --mode or --yes missing where no terminal can
+# answer; 3 not installed, nothing to remove or no session to view; 4 for verify, a finished
+# session left unsealed. Executing the file runs main; sourcing it only sets the
 # globals and defines the functions, for tests.
 # TLOGGER_SKEL, the file a missing rc is seeded from, exists for tests, as do TLOGGER_PYTHON and
-# TLOGGER_SCRIPTREPLAY, which name the python3 and scriptreplay that render, show and replay run;
-# production never sets them.
+# TLOGGER_SCRIPTREPLAY, which name the python3 and scriptreplay that render, show and replay run,
+# and TLOGGER_PROC, the /proc whose boot id and processes seal's liveness check reads; production
+# never sets them.
 
 # =======================================================
 #                    GLOBAL SETTINGS
@@ -166,10 +168,32 @@ CONFIG_ERROR=
 RECORDER=
 SMOKE_DIR=
 
-# The session that render, show and replay work on, set by resolve_session: its folder, an
-# absolute path, and its id, the folder's name.
+# The session that render, show, replay, seal and verify work on, set by resolve_session: its
+# folder, an absolute path, and its id, the folder's name. LOGDIR is the log folder, set by
+# resolve_logdir, and SESSIONS its session folders, set by list_sessions.
 SESSION_DIR=
 SESSION_ID=
+LOGDIR=
+SESSIONS=()
+
+# The files a seal covers, in the order SHA256SUMS lists them: the logs that script writes, the
+# journal and the markers the plugin writes. A session holds the ones it has. Beside them a
+# session folder may hold only what render and seal write, and their temp files.
+SEAL_FILES=(output.raw timing input.raw commands.tsv recorder started exited stop-requested)
+SEAL_EXTRAS_RE='^(transcript\.txt(\.part)?|(SHA256SUMS|SEAL)(\.part\.[A-Za-z0-9]{6})?)$'
+
+# Set by recorder_state: yes while the recorder of a session still runs, no once it has gone,
+# unknown without a recorder file. Set by seal_session: SEAL_RESULT, sealed, already, live or
+# refused, SEAL_SUM, the SHA-256 of the new SHA256SUMS, and WHY, the reason of a refusal. Set by
+# verify_session: VERDICT, ok, changed, unsealed, recording or unknown. Set by
+# parse_session_args: ARG_SESSION, the SESSION argument, and ARG_ALL, 1 for --all.
+LIVE=
+ARG_SESSION=
+ARG_ALL=0
+SEAL_RESULT=
+SEAL_SUM=
+WHY=
+VERDICT=
 
 # The interpreter that runs libexec/tlogger_view.py, set by require_python, and the scriptreplay
 # that replay runs, set by require_scriptreplay.
@@ -263,6 +287,12 @@ Commands:
              than the logs.
   replay     Replay a session in this terminal at its recorded pace, through a filter that
              drops the escape sequences a target could abuse.
+  seal       Seal a session whose recording has ended: SHA256SUMS over its logs, the logs
+             read-only, a SEAL file and a line in the MANIFEST of the log folder. A recording
+             that ends normally is sealed by itself.
+  verify     Check that a sealed session is unchanged: its sums, its modes and its files.
+  list       List the sessions of the log folder with their state, start, duration and
+             number of commands.
   version    Print the version.
   help       Show this help; -h and --help do the same.
 
@@ -278,6 +308,9 @@ hidden prompts. render and show need python3 and python3-pyte, replay python3 an
   replay --speed N     Replay N times as fast; N is a positive number, such as 2 or 0.5.
   replay --maxdelay S  Wait at most S seconds between two outputs.
 During a replay, Space pauses, Up and Down change the speed, Ctrl+C stops and Ctrl+Z suspends it.
+seal and verify take one SESSION in the same way, or --all for every session of the log folder.
+  verify               Print '<session>  ok', changed, unsealed or recording for each; keep the
+                       SHA-256 that seal prints, or the MANIFEST, apart from the logs.
 
 Install options:
   --mode auto|manual  Record every new terminal (auto) or only on request, with tlogger start
@@ -301,9 +334,9 @@ Uninstall options:
   --yes               Do not ask for confirmation; needed outside a terminal.
   --purge-config      Remove the config as well.
 
-Exit status: 0 done or nothing to change; 1 error or refusal (status: installed only in part);
-2 usage error, or --mode or --yes missing outside a terminal; 3 not installed, nothing to remove
-or no session to view.
+Exit status: 0 done or nothing to change; 1 error or refusal (status: installed only in part;
+verify: a session changed); 2 usage error, or --mode or --yes missing outside a terminal; 3 not
+installed, nothing to remove or no session to view; 4 verify: a finished session is not sealed.
 EOF
 }
 
@@ -2705,24 +2738,8 @@ resolve_session() {
     if [[ -n $arg && ! $arg =~ $SESSION_NAME_RE ]]; then
         die 1 "'$arg' is not a session id; name a session folder elsewhere by a path with a /"
     fi
-    resolve_paths
-    read_config
-    if [[ -n $CONFIG_ERROR ]]; then
-        die 1 "the config $(shown "$CONFIG_FILE") $CONFIG_ERROR; fix it by hand"
-    fi
-    logdir=${CONFIG_LOGDIR:-$SESSIONS_DIR}
-    if [[ -L $logdir ]]; then
-        die 1 "the log folder $(shown "$logdir") is a symlink, which tlogger does not follow"
-    fi
-    if [[ ! -e $logdir ]]; then
-        die 3 "no sessions: the log folder $(shown "$logdir") does not exist"
-    fi
-    if [[ ! -d $logdir ]]; then
-        die 1 "the log folder $(shown "$logdir") is not a folder"
-    fi
-    if [[ ! -O $logdir ]]; then
-        die 1 "the log folder $(shown "$logdir") belongs to another user"
-    fi
+    resolve_logdir
+    logdir=$LOGDIR
     if [[ -n $arg ]]; then
         dir=$logdir/$arg
         if [[ ! -e $dir && ! -L $dir ]]; then
@@ -2744,6 +2761,44 @@ resolve_session() {
     fi
     check_session_dir "$dir"
     SESSION_DIR=$dir SESSION_ID=${dir##*/}
+}
+
+# Set LOGDIR to the log folder: the config's logdir, else the default. Exits 3 when it does not
+# exist, 1 for an unsafe config or a log folder that is a symlink, no folder or another user's.
+resolve_logdir() {
+    resolve_paths
+    read_config
+    if [[ -n $CONFIG_ERROR ]]; then
+        die 1 "the config $(shown "$CONFIG_FILE") $CONFIG_ERROR; fix it by hand"
+    fi
+    LOGDIR=${CONFIG_LOGDIR:-$SESSIONS_DIR}
+    if [[ -L $LOGDIR ]]; then
+        die 1 "the log folder $(shown "$LOGDIR") is a symlink, which tlogger does not follow"
+    fi
+    if [[ ! -e $LOGDIR ]]; then
+        die 3 "no sessions: the log folder $(shown "$LOGDIR") does not exist"
+    fi
+    if [[ ! -d $LOGDIR ]]; then
+        die 1 "the log folder $(shown "$LOGDIR") is not a folder"
+    fi
+    if [[ ! -O $LOGDIR ]]; then
+        die 1 "the log folder $(shown "$LOGDIR") belongs to another user"
+    fi
+}
+
+# Set SESSIONS to the session folders of LOGDIR, by name in byte order, which is time order: the
+# real folders named like sessions. Exits 3 when there is none.
+list_sessions() {
+    local entry LC_ALL=C
+    SESSIONS=()
+    for entry in "$LOGDIR"/*; do
+        if [[ ${entry##*/} =~ $SESSION_NAME_RE && -d $entry && ! -L $entry ]]; then
+            SESSIONS+=("$entry")
+        fi
+    done
+    if (( ${#SESSIONS[@]} == 0 )); then
+        die 3 "no sessions in $(shown "$LOGDIR")"
+    fi
 }
 
 # Set PYTHON to the interpreter that runs libexec/tlogger_view.py, /usr/bin/python3, run as
@@ -3053,6 +3108,493 @@ cmd_replay() {
 }
 
 # =======================================================
+#                  SEAL, VERIFY AND LIST
+# =======================================================
+
+# Set LIVE for the session folder DIR from its recorder file, '<pid> <starttime> <boot_id>
+# <tty_nr>' as the plugin's handshake writes it: yes while that process still runs, that is, the
+# boot id has not changed and <pid> has that start time, field 22 of its stat; no once it has
+# gone; unknown without a readable recorder file of that form. Reads the boot id and the stat
+# under TLOGGER_PROC, default /proc, and starts no process.
+recorder_state() {
+    local dir=$1 proc=${TLOGGER_PROC:-/proc} line='' pid start boot tty now='' stat=''
+    local -a f
+    LIVE=unknown
+    if [[ -L $dir/recorder || ! -f $dir/recorder || ! -r $dir/recorder ]]; then
+        return 0
+    fi
+    IFS= read -r line < "$dir/recorder" || true
+    read -r pid start boot tty <<< "$line" || true
+    if [[ ! $pid =~ ^[0-9]+$ || ! $start =~ ^[0-9]+$ || ! $boot =~ ^[0-9a-f-]+$ ]]; then
+        return 0
+    fi
+    LIVE=no
+    { now=$(< "$proc/sys/kernel/random/boot_id"); } 2> /dev/null || now=
+    if [[ -n $now && $now != "$boot" ]]; then
+        return 0
+    fi
+    { stat=$(< "$proc/$pid/stat"); } 2> /dev/null || stat=
+    if [[ $stat != *')'* ]]; then
+        return 0
+    fi
+    read -r -a f <<< "${stat##*)}" || true
+    if [[ ${f[19]-} == "$start" ]]; then
+        LIVE=yes
+    fi
+}
+
+# Print the entries of the folder DIR, dot entries included, one full path per line.
+dir_entries() {
+    local e
+    for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+        if [[ -e $e || -L $e ]]; then
+            printf '%s\n' "$e"
+        fi
+    done
+}
+
+# Succeed when the session folder DIR may be sealed as it is: a real folder of this user's whose
+# entries are only SEAL_FILES, each a readable regular file of this user's, not a symlink, with
+# output.raw and timing among them, and what SEAL_EXTRAS_RE allows. Else set WHY and fail.
+seal_check() {
+    local dir=$1 id=${1##*/} e name
+    if [[ -L $dir || ! -d $dir || ! -O $dir ]]; then
+        WHY="$(shown "$dir") is a symlink, not a folder or another user's"
+        return 1
+    fi
+    while IFS= read -r e; do
+        name=${e##*/}
+        if [[ " ${SEAL_FILES[*]} " != *" $name "* ]]; then
+            if [[ ! $name =~ $SEAL_EXTRAS_RE ]]; then
+                WHY="session $id holds $name, which no session holds; seal refuses it"
+                return 1
+            fi
+            continue
+        fi
+        if [[ -L $e ]]; then
+            WHY="$(shown "$e") is a symlink, which tlogger does not follow"
+        elif [[ ! -f $e ]]; then
+            WHY="$(shown "$e") is not a regular file"
+        elif [[ ! -O $e ]]; then
+            WHY="$(shown "$e") belongs to another user"
+        elif [[ ! -r $e ]]; then
+            WHY="cannot read $(shown "$e")"
+        fi
+        if [[ -n $WHY ]]; then
+            return 1
+        fi
+    done < <(dir_entries "$dir")
+    for name in output.raw timing; do
+        if [[ ! -f $dir/$name ]]; then
+            WHY="$(shown "$dir") holds no $name, so it is not a session folder"
+            return 1
+        fi
+    done
+}
+
+# Print the SHA-256 of FILE.
+sha256_of() {
+    local sum
+    sum=$(sha256sum < "$1") || return 1
+    printf '%s\n' "${sum%% *}"
+}
+
+# Seal the session folder DIR, unless it is sealed already. Refuses a session whose recorder
+# still runs or has no recorder file, and one that seal_check refuses. Writes SHA256SUMS over the
+# SEAL_FILES the session holds, in their order, through a temp file and a rename; makes them and
+# SHA256SUMS 0400; writes SEAL, 0400, with the tlogger version, the UTC time and the SHA-256 of
+# SHA256SUMS; flushes them to disk with sync; and appends '<sum>  <id>/SHA256SUMS' to the MANIFEST
+# of the folder that holds DIR, under flock, mode 0600 when it is new. Sets SEAL_RESULT, SEAL_SUM
+# and, on a refusal, WHY; returns 1 on a refusal or a failure.
+seal_session() {
+    local dir=$1 id=${1##*/} parent=${1%/*} f tmp sum stamp manifest
+    local -a files=() paths=()
+    SEAL_RESULT=refused SEAL_SUM='' WHY='' LIVE=''
+    if [[ -e $dir/SEAL || -L $dir/SEAL ]]; then
+        SEAL_RESULT=already
+        return 0
+    fi
+    seal_check "$dir" || return 1
+    recorder_state "$dir"
+    case $LIVE in
+        yes)
+            SEAL_RESULT=live
+            WHY="session $id is still being recorded"
+            return 1
+            ;;
+        unknown)
+            WHY="session $id has no recorder file, so tlogger cannot tell whether it is still"
+            WHY+=" being recorded"
+            return 1
+            ;;
+    esac
+    manifest=$parent/MANIFEST
+    if [[ -L $manifest || ( -e $manifest && ! -f $manifest ) ]]; then
+        WHY="$(shown "$manifest") is a symlink or not a regular file"
+        return 1
+    fi
+    for f in "${SEAL_FILES[@]}"; do
+        if [[ -f $dir/$f ]]; then
+            files+=("$f")
+            paths+=("$dir/$f")
+        fi
+    done
+    tmp=$(mktemp "$dir/SHA256SUMS.part.XXXXXX" 2> /dev/null) || {
+        WHY="cannot write in $(shown "$dir")"
+        return 1
+    }
+    TEMP_PATHS+=("$tmp")
+    # Two spaces before each name, as sha256sum writes it in text mode, also where it marks
+    # binary mode with '*'.
+    if ! (cd -- "$dir" && sha256sum -- "${files[@]}" |
+        sed 's/^\([0-9a-f]\{64\}\) [ *]/\1  /') > "$tmp" 2> /dev/null; then
+        WHY="cannot read the logs of session $id"
+        return 1
+    fi
+    if ! { chmod 400 -- "$tmp" && mv -f -T -- "$tmp" "$dir/SHA256SUMS"; }; then
+        WHY="cannot write $(shown "$dir/SHA256SUMS")"
+        return 1
+    fi
+    chmod 400 -- "${paths[@]}" || {
+        WHY="cannot make the logs of session $id read-only"
+        return 1
+    }
+    sum=$(sha256_of "$dir/SHA256SUMS") || {
+        WHY="cannot read $(shown "$dir/SHA256SUMS")"
+        return 1
+    }
+    stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ) || {
+        WHY="cannot read the clock"
+        return 1
+    }
+    tmp=$(mktemp "$dir/SEAL.part.XXXXXX" 2> /dev/null) || {
+        WHY="cannot write in $(shown "$dir")"
+        return 1
+    }
+    TEMP_PATHS+=("$tmp")
+    if ! { printf 'tlogger %s\nsealed %s\nsha256 %s\n' "$VERSION_STR" "$stamp" "$sum" > "$tmp" &&
+        chmod 400 -- "$tmp" && mv -f -T -- "$tmp" "$dir/SEAL"; }; then
+        WHY="cannot write $(shown "$dir/SEAL")"
+        return 1
+    fi
+    # script -f flushes to the kernel only; sync -d writes the data to the disk, and sync on the
+    # folder its entries. An older sync without -d syncs everything.
+    sync -d -- "${paths[@]}" "$dir/SHA256SUMS" "$dir/SEAL" 2> /dev/null || sync
+    sync -- "$dir" 2> /dev/null || true
+    {
+        flock -x 9 2> /dev/null || true
+        printf '%s  %s/SHA256SUMS\n' "$sum" "$id" >&9
+    } 9>> "$manifest" 2> /dev/null || {
+        WHY="session $id is sealed, but cannot write its line in $(shown "$manifest")"
+        return 1
+    }
+    sync -- "$manifest" 2> /dev/null || true
+    SEAL_RESULT=sealed SEAL_SUM=$sum
+}
+
+# Check the session folder DIR and print '<id>  <verdict>' on stdout, setting VERDICT. An
+# unsealed session is recording, unsealed or unknown, as recorder_state finds its recorder. A
+# sealed one is ok, or changed when a file SHA256SUMS names is missing, not a regular file, not
+# 0400 or of another sum; when SHA256SUMS or SEAL is not 0400; when the folder holds an entry the
+# seal does not cover; when SHA256SUMS does not have the sum SEAL names, or else the sum of its
+# MANIFEST line, or has no MANIFEST line. Each finding goes to stderr as '<id>: ...'.
+verify_session() {
+    local dir=$1 id=${1##*/} line name want got mode e sum sealed='' mline='' manifest
+    local -A listed=()
+    local changed=0
+    if [[ -L $dir/SEAL || ! -f $dir/SEAL ]]; then
+        recorder_state "$dir"
+        case $LIVE in
+            yes) VERDICT=recording ;;
+            no) VERDICT=unsealed ;;
+            *) VERDICT=unknown ;;
+        esac
+        printf '%s  %s\n' "$id" "$VERDICT"
+        return 0
+    fi
+    if [[ -L $dir/SHA256SUMS || ! -f $dir/SHA256SUMS ]]; then
+        msg "$id: SHA256SUMS is missing"
+        changed=1
+    else
+        while IFS= read -r line || [[ -n $line ]]; do
+            if [[ ! $line =~ ^([0-9a-f]{64})\ [\ *](.+)$ ]]; then
+                msg "$id: SHA256SUMS holds a line that is not a sum"
+                changed=1
+                continue
+            fi
+            want=${BASH_REMATCH[1]} name=${BASH_REMATCH[2]}
+            if [[ " ${SEAL_FILES[*]} " != *" $name "* ]]; then
+                msg "$id: SHA256SUMS names $name, which no session holds"
+                changed=1
+                continue
+            fi
+            listed[$name]=1
+            e=$dir/$name
+            if [[ -L $e ]]; then
+                msg "$id: $name is a symlink"
+                changed=1
+            elif [[ ! -e $e ]]; then
+                msg "$id: $name is missing"
+                changed=1
+            elif [[ ! -f $e ]]; then
+                msg "$id: $name is not a regular file"
+                changed=1
+            else
+                mode=$(stat -c %a -- "$e")
+                if [[ $mode != 400 ]]; then
+                    msg "$id: $name has mode $mode, not 400"
+                    changed=1
+                fi
+                got=$(sha256_of "$e") || got=
+                if [[ $got != "$want" ]]; then
+                    msg "$id: $name changed"
+                    changed=1
+                fi
+            fi
+        done < "$dir/SHA256SUMS"
+        for name in SHA256SUMS SEAL; do
+            mode=$(stat -c %a -- "$dir/$name")
+            if [[ $mode != 400 ]]; then
+                msg "$id: $name has mode $mode, not 400"
+                changed=1
+            fi
+        done
+    fi
+    while IFS= read -r e; do
+        name=${e##*/}
+        if [[ -z ${listed[$name]-} && ! $name =~ ^(SHA256SUMS|SEAL|transcript\.txt(\.part)?)$ ]]
+        then
+            msg "$id: $name is not covered by the seal"
+            changed=1
+        fi
+    done < <(dir_entries "$dir")
+    # The chain of sums: SHA256SUMS against SEAL, and against the copy in the MANIFEST.
+    if [[ -f $dir/SHA256SUMS && ! -L $dir/SHA256SUMS ]]; then
+        sum=$(sha256_of "$dir/SHA256SUMS") || sum=
+        while IFS= read -r line || [[ -n $line ]]; do
+            if [[ $line == 'sha256 '* ]]; then
+                sealed=${line#sha256 }
+            fi
+        done < "$dir/SEAL"
+        manifest=${dir%/*}/MANIFEST
+        if [[ -f $manifest && ! -L $manifest ]]; then
+            mline=$(grep -E "^[0-9a-f]{64}  $id/SHA256SUMS\$" "$manifest" | tail -n 1) || mline=
+        fi
+        if [[ $sum != "$sealed" ]]; then
+            msg "$id: SHA256SUMS does not match its SEAL"
+            changed=1
+        elif [[ -z $mline ]]; then
+            msg "$id: no line in the MANIFEST names this session"
+            changed=1
+        elif [[ ${mline%% *} != "$sum" ]]; then
+            msg "$id: SHA256SUMS does not match its line in the MANIFEST"
+            changed=1
+        fi
+    fi
+    if (( changed )); then
+        VERDICT=changed
+    else
+        VERDICT=ok
+    fi
+    printf '%s  %s\n' "$id" "$VERDICT"
+}
+
+# Print the state that list shows for the session folder DIR: recording, ended or unknown for an
+# unsealed one, as recorder_state finds its recorder; for a sealed one sealed, or changed when a
+# quick look finds a file of SHA256SUMS missing or not 0400, or SHA256SUMS without the sum that
+# SEAL names. verify checks every sum.
+list_state() {
+    local dir=$1 line name sealed='' sum
+    if [[ -L $dir/SEAL || ! -f $dir/SEAL ]]; then
+        recorder_state "$dir"
+        case $LIVE in
+            yes) printf 'recording\n' ;;
+            no) printf 'ended\n' ;;
+            *) printf 'unknown\n' ;;
+        esac
+        return 0
+    fi
+    if [[ -L $dir/SHA256SUMS || ! -f $dir/SHA256SUMS ]]; then
+        printf 'changed\n'
+        return 0
+    fi
+    while IFS= read -r line || [[ -n $line ]]; do
+        name=${line:66}
+        if [[ ! $line =~ ^[0-9a-f]{64}\ [\ *] || -L $dir/$name || ! -f $dir/$name ||
+            $(stat -c %a -- "$dir/$name") != 400 ]]; then
+            printf 'changed\n'
+            return 0
+        fi
+    done < "$dir/SHA256SUMS"
+    while IFS= read -r line || [[ -n $line ]]; do
+        if [[ $line == 'sha256 '* ]]; then
+            sealed=${line#sha256 }
+        fi
+    done < "$dir/SEAL"
+    sum=$(sha256_of "$dir/SHA256SUMS") || sum=
+    if [[ $sum != "$sealed" ]]; then
+        printf 'changed\n'
+    else
+        printf 'sealed\n'
+    fi
+}
+
+# Print the recorded time of the session folder DIR as HH:MM:SS: the DURATION that script writes
+# at its end into timing, else the sum of the delays of its I, O and S lines.
+list_duration() {
+    local timing=$1/timing
+    if [[ -L $timing || ! -f $timing ]]; then
+        printf -- '-\n'
+        return 0
+    fi
+    awk '$1 == "H" && $3 == "DURATION" && $4 ~ /^[0-9]+(\.[0-9]+)?$/ { d = $4; found = 1 }
+        ($1 == "I" || $1 == "O" || $1 == "S") && $2 ~ /^[0-9]+(\.[0-9]+)?$/ { sum += $2 }
+        END {
+            if (!found) d = sum
+            s = int(d)
+            printf "%02d:%02d:%02d\n", int(s / 3600), int(s % 3600 / 60), s % 60
+        }' "$timing"
+}
+
+# Read the arguments of seal and verify, CMD: one SESSION, --all, or nothing. Sets ARG_SESSION
+# and ARG_ALL; exits 2 on a usage error and 0 after -h.
+parse_session_args() {
+    local cmd=$1
+    local -i count=0
+    shift
+    ARG_SESSION='' ARG_ALL=0
+    while (( $# )); do
+        case $1 in
+            --all) ARG_ALL=1 ;;
+            -h | --help) usage; exit 0 ;;
+            --)
+                shift
+                count+=$#
+                if (( $# )); then
+                    ARG_SESSION=$1
+                fi
+                break
+                ;;
+            -?*) usage_error "unknown option for $cmd: $1" ;;
+            *) ARG_SESSION=$1; count+=1 ;;
+        esac
+        shift
+    done
+    (( count <= 1 )) || usage_error "$cmd takes one session at most"
+    if (( ARG_ALL && count )); then
+        usage_error "$cmd takes a session or --all, not both"
+    fi
+}
+
+# tlogger seal [SESSION | --all]: seal one session, by default the newest, or with --all every
+# session of the log folder whose recording has ended. Prints 'sealed session <id>; SHA-256 of
+# its SHA256SUMS: <sum>' for each one it seals. With --all, sessions still recorded and sessions
+# without a recorder file are named and left; sessions sealed already are passed over. Exits 0,
+# 1 when a session was refused or could not be sealed, 3 without sessions.
+cmd_seal() {
+    local dir status=0
+    parse_session_args seal "$@"
+    refuse_foreign_root
+    read_version
+    if (( ! ARG_ALL )); then
+        resolve_session "$ARG_SESSION"
+        if ! seal_session "$SESSION_DIR"; then
+            if [[ $SEAL_RESULT == live ]]; then
+                die 1 "$WHY; seal it once its recording has ended"
+            fi
+            die 1 "$WHY"
+        fi
+        case $SEAL_RESULT in
+            already) msg "session $SESSION_ID is sealed already" ;;
+            *) msg "sealed session $SESSION_ID; SHA-256 of its SHA256SUMS: $SEAL_SUM" ;;
+        esac
+        return 0
+    fi
+    resolve_logdir
+    list_sessions
+    for dir in "${SESSIONS[@]}"; do
+        if seal_session "$dir"; then
+            if [[ $SEAL_RESULT == sealed ]]; then
+                msg "sealed session ${dir##*/}; SHA-256 of its SHA256SUMS: $SEAL_SUM"
+            fi
+        elif [[ $SEAL_RESULT == live || $LIVE == unknown ]]; then
+            msg "$WHY; not sealed"
+        else
+            msg "$WHY"
+            status=1
+        fi
+    done
+    return "$status"
+}
+
+# tlogger verify [SESSION | --all]: check one session, by default the newest, or every session of
+# the log folder with --all, and print '<id>  <verdict>' for each (see verify_session). Exits 0
+# when no sealed session changed and every finished one is sealed, 1 when a sealed session
+# changed, 4 when none changed but a finished session is unsealed or has no recorder file, 3
+# without sessions. A session still recorded does not count.
+cmd_verify() {
+    local dir changed=0
+    local -i open=0
+    parse_session_args verify "$@"
+    refuse_foreign_root
+    if (( ARG_ALL )); then
+        resolve_logdir
+        list_sessions
+    else
+        resolve_session "$ARG_SESSION"
+        SESSIONS=("$SESSION_DIR")
+    fi
+    for dir in "${SESSIONS[@]}"; do
+        verify_session "$dir"
+        case $VERDICT in
+            changed) changed=1 ;;
+            unsealed | unknown) open+=1 ;;
+        esac
+    done
+    if (( changed )); then
+        return 1
+    fi
+    if (( open == 1 )); then
+        msg "1 finished session is not sealed; tlogger seal --all seals it"
+        return 4
+    elif (( open > 1 )); then
+        msg "$open finished sessions are not sealed; tlogger seal --all seals them"
+        return 4
+    fi
+}
+
+# tlogger list: print one line per session of the log folder, oldest first, under a header: its
+# id, its state (see list_state), its start in UTC, from its id, its recorded time, the number of
+# commands its journal started, and whether it has a transcript. Exits 0, 3 without sessions.
+cmd_list() {
+    local dir id state start count row='%-23s  %-9s  %-20s  %8s  %8s  %s\n'
+    while (( $# )); do
+        case $1 in
+            -h | --help) usage; exit 0 ;;
+            -?*) usage_error "unknown option for list: $1" ;;
+            *) usage_error "list takes no session" ;;
+        esac
+    done
+    refuse_foreign_root
+    resolve_logdir
+    list_sessions
+    # shellcheck disable=SC2059 # The format is the row above.
+    printf "$row" SESSION STATE 'START (UTC)' DURATION COMMANDS TRANSCRIPT
+    for dir in "${SESSIONS[@]}"; do
+        id=${dir##*/}
+        state=$(list_state "$dir")
+        start=${id:0:4}-${id:4:2}-${id:6:2}T${id:9:2}:${id:11:2}:${id:13:2}Z
+        count=0
+        if [[ -f $dir/commands.tsv && ! -L $dir/commands.tsv ]]; then
+            count=$(grep -c "^S"$'\t' "$dir/commands.tsv") || count=0
+        fi
+        # shellcheck disable=SC2059
+        printf "$row" "$id" "$state" "$start" "$(list_duration "$dir")" "$count" \
+            "$( [[ -f $dir/transcript.txt && ! -L $dir/transcript.txt ]] && echo yes || echo no)"
+    done
+}
+
+# =======================================================
 #                           MAIN
 # =======================================================
 
@@ -3079,6 +3621,9 @@ main() {
         render) cmd_render "$@" ;;
         show) cmd_show "$@" ;;
         replay) cmd_replay "$@" ;;
+        seal) cmd_seal "$@" ;;
+        verify) cmd_verify "$@" ;;
+        list) cmd_list "$@" ;;
         version | --version) cmd_version "$@" ;;
         help | -h | --help) usage ;;
         start | stop)

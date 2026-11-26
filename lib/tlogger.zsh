@@ -413,11 +413,22 @@ _tlogger_preflight() {
     REPLY=$dir
 }
 
+# Seal the session folder DIR, whose recording has just ended or paused, with the seal command
+# of this shell's release, which prints the session's sum. Says in yellow when it could not; the
+# session stays as it is, and tlogger seal seals it later.
+_tlogger_seal() {
+    emulate -L zsh
+    if ! $_tlogger_release/bin/tlogger seal -- $1 < /dev/null; then
+        _tlogger_say yellow "session ${1:t} not sealed; tlogger seal ${1:t} seals it"
+    fi
+}
+
 # Record this terminal, for tlogger start (KIND start) or for autostart (KIND auto): find the zsh
 # binary, run the preflight, print the banner and run the recorder in the foreground, with
 # TZ=UTC0 for its timestamps and SHELL set to that binary; then tell how the recording ended from
-# the markers in the session folder, never from the exit status or script's own messages. Prints
-# the notice of each outcome, but none for a recording that ended in KIND auto. Sets REPLY to
+# the markers in the session folder, never from the exit status or script's own messages, and
+# seal a session that ended or paused with _tlogger_seal. Prints the notice of each outcome, but
+# none for a recording that ended in KIND auto, and the line of the seal. Sets REPLY to
 # ended, paused, unexpected, failed or refused, and reply to the recorder's exit status, empty
 # unless it ran; callers declare both local. Returns 0 when the recording ended or was paused, 1
 # when a check refused it, it failed to start or it ended unexpectedly. Needs _tlogger_cfg filled.
@@ -462,6 +473,7 @@ _tlogger_record() {
     if [[ -s $dir/started ]]; then
         if [[ -s $dir/stop-requested ]]; then
             _tlogger_say plain 'recording paused; this terminal is NOT recorded; tlogger start resumes in a new session'
+            _tlogger_seal $dir
             REPLY=paused
             return 0
         fi
@@ -469,10 +481,12 @@ _tlogger_record() {
             if [[ $kind != auto ]]; then
                 _tlogger_say plain 'recording ended; this terminal is NOT recorded'
             fi
+            _tlogger_seal $dir
             REPLY=ended
             return 0
         fi
-        _tlogger_say yellow "recording ended unexpectedly; session $id kept"
+        _tlogger_say yellow "recording ended unexpectedly; session $id kept, not sealed;"\
+" tlogger seal $id seals it"
         REPLY=unexpected
         return 1
     fi
