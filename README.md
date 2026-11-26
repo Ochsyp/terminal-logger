@@ -323,9 +323,12 @@ transcript, and `tlogger replay` drops it:
 
 `stamp=on` prints that line on the screen as well, dim, or plain with `NO_COLOR` set to a
 non-empty value; `stamp=off` writes no stamp. Either way, `commands.tsv` keeps the start of every
-command. tmux and GNU screen show nothing of a hidden stamp, neither in the pane nor in a title or
-status line, and xterm and VTE terminals, such as GNOME Terminal, ignore such strings too. A
-terminal that shows `]7711;` or `tlogger-stamp` text after each command needs `stamp=off`.
+command. A config that sets `stamp=off` to hide the visible line of 0.1.0 keeps it; change it to
+`stamp=hidden`, or remove the line, to keep the stamps in the recording. tmux and GNU screen show
+nothing of a hidden stamp, neither in the pane nor in a title or status line, as the tests check;
+xterm and VTE terminals, such as GNOME Terminal, are documented to ignore OSC strings they do not
+know, and CONTRIBUTING.md has the hand check for them and QTerminal. A terminal that shows
+`]7711;` or `tlogger-stamp` text after each command needs `stamp=off`.
 
 Every shell where the plugin loaded shows a segment in its prompt, which it builds again before
 each prompt: the UTC time, the VPN list and the state, each in brackets of its own and in its

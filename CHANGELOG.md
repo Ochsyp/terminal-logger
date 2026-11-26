@@ -22,7 +22,9 @@ Each version is the GitHub release `vX.Y.Z`.
   and `TLOGGER_SEGMENT` stays as it was.
 - The notice that a recording has started is green.
 - `stamp` defaults to `hidden`, so no stamp line shows after each command any more. A config
-  that sets `stamp=on`, as an install of 0.1.0 never does, keeps the visible line.
+  that names `stamp` keeps its value: `stamp=on` the visible line, and `stamp=off` no stamp at
+  all. A `stamp=off` line written to hide the visible line in 0.1.0 can now go, or become
+  `stamp=hidden`, so that the recording keeps each command's time.
 - `VERSION` is `0.1.1-dev` after the release of 0.1.0, so an install from a checkout of `main`
   names a development version again.
 - The README, `docs/guide.md` and the Release contract install a release without a login: `curl`

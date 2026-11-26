@@ -73,6 +73,7 @@ setup() {
     title=$(screen -S probe -Q title)
     screen -S probe -X quit
     grep -q 'done' "$copy"
-    [ "$(sed -n 1p "$copy")" = AB ]
+    # hardcopy may pad a line with blanks to the width of the window.
+    [ "$(sed -n '1s/[[:space:]]*$//p' "$copy")" = AB ]
     [[ $title != *stamp* && $title != *7711* ]]
 }
