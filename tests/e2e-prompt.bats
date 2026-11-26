@@ -34,9 +34,10 @@ setup() {
     [ "$status" -eq 0 ]
 }
 
-# Print the names in the sessions folder, one per line, sorted.
+# Print the names in the sessions folder but the MANIFEST that sealing writes, one per line,
+# sorted.
 session_names() {
-    find "$SESSIONS" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort
+    find "$SESSIONS" -mindepth 1 -maxdepth 1 ! -name MANIFEST -printf '%f\n' | LC_ALL=C sort
 }
 
 # Set DIR to the only session folder. Fails unless there is exactly one, named as tlogger names
