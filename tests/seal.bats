@@ -209,6 +209,33 @@ assert_usage_error() {
     [ "$(sed -n 2p "$LOGS/MANIFEST")" = "$(sha_of "$LOGS/$b/SHA256SUMS")  $b/SHA256SUMS" ]
 }
 
+@test "a seal whose MANIFEST line could not be written gets it from the next seal" {
+    local id=20261112T100000Z-a1B2c3 sum want
+    make_session "$id"
+    : > "$LOGS/MANIFEST"
+    chmod 400 "$LOGS/MANIFEST"
+    run_tlogger seal "$id"
+    want="tlogger: session $id is sealed, but cannot write its line in"
+    want+=" ~/.local/state/tlogger/sessions/MANIFEST; tlogger seal $id adds it once that is fixed"
+    assert_refused 1 "$want"
+    [ -f "$LOGS/$id/SEAL" ]
+    run_tlogger verify "$id"
+    [ "$status" -eq 1 ]
+    chmod 600 "$LOGS/MANIFEST"
+    run_tlogger seal "$id"
+    [ "$status" -eq 0 ]
+    sum=$(sha_of "$LOGS/$id/SHA256SUMS")
+    want="tlogger: session $id is sealed already, and its MANIFEST line is added now;"
+    [ "$stderr" = "$want SHA-256 of its SHA256SUMS: $sum" ]
+    [ "$(cat "$LOGS/MANIFEST")" = "$sum  $id/SHA256SUMS" ]
+    run_tlogger verify "$id"
+    [ "$status" -eq 0 ]
+    # A seal temp file that a killed run left behind counts as seal's own, not as a change.
+    printf 'x\n' > "$LOGS/$id/SHA256SUMS.part.Ab12Cd"
+    run_tlogger verify "$id"
+    [ "$status" -eq 0 ]
+}
+
 @test "verify prints ok for an untouched seal, and changed for a byte, a mode or a file" {
     local s
     for s in aaaaaa bbbbbb cccccc dddddd eeeeee; do

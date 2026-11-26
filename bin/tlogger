@@ -3210,8 +3210,19 @@ seal_session() {
     local dir=$1 id=${1##*/} parent=${1%/*} f tmp sum stamp manifest
     local -a files=() paths=()
     SEAL_RESULT=refused SEAL_SUM='' WHY='' LIVE=''
+    manifest=$parent/MANIFEST
     if [[ -e $dir/SEAL || -L $dir/SEAL ]]; then
         SEAL_RESULT=already
+        # A seal whose MANIFEST line never got written, as when the MANIFEST was read-only or the
+        # run was cut short, gets it now, as long as SHA256SUMS still has the sum SEAL names.
+        if [[ -f $dir/SEAL && ! -L $dir/SEAL && -f $dir/SHA256SUMS && ! -L $dir/SHA256SUMS ]] &&
+            ! manifest_has "$manifest" "$id"; then
+            sum=$(sha256_of "$dir/SHA256SUMS") || sum=
+            if [[ -n $sum && $sum == "$(seal_sum "$dir")" ]]; then
+                manifest_add "$manifest" "$id" "$sum" || return 1
+                SEAL_RESULT=completed SEAL_SUM=$sum
+            fi
+        fi
         return 0
     fi
     seal_check "$dir" || return 1
@@ -3228,7 +3239,6 @@ seal_session() {
             return 1
             ;;
     esac
-    manifest=$parent/MANIFEST
     if [[ -L $manifest || ( -e $manifest && ! -f $manifest ) ]]; then
         WHY="$(shown "$manifest") is a symlink or not a regular file"
         return 1
@@ -3281,15 +3291,48 @@ seal_session() {
     # folder its entries. An older sync without -d syncs everything.
     sync -d -- "${paths[@]}" "$dir/SHA256SUMS" "$dir/SEAL" 2> /dev/null || sync
     sync -- "$dir" 2> /dev/null || true
-    {
-        flock -x 9 2> /dev/null || true
-        printf '%s  %s/SHA256SUMS\n' "$sum" "$id" >&9
-    } 9>> "$manifest" 2> /dev/null || {
-        WHY="session $id is sealed, but cannot write its line in $(shown "$manifest")"
-        return 1
-    }
-    sync -- "$manifest" 2> /dev/null || true
+    manifest_add "$manifest" "$id" "$sum" || return 1
     SEAL_RESULT=sealed SEAL_SUM=$sum
+}
+
+# Print the SHA-256 that the 'sha256 ' line of DIR/SEAL names, or nothing.
+seal_sum() {
+    local line sealed=''
+    while IFS= read -r line || [[ -n $line ]]; do
+        if [[ $line == 'sha256 '* ]]; then
+            sealed=${line#sha256 }
+        fi
+    done < "$1/SEAL"
+    printf '%s\n' "$sealed"
+}
+
+# Succeed when the file MANIFEST has a line for the session ID, '<sum>  ID/SHA256SUMS'.
+manifest_has() {
+    [[ -f $1 && ! -L $1 ]] && grep -qE "^[0-9a-f]{64}  $2/SHA256SUMS\$" "$1"
+}
+
+# Append '<SUM>  <ID>/SHA256SUMS' to the file MANIFEST under flock, creating it with mode 0600,
+# and flush it to the disk. Sets WHY and fails when it cannot.
+manifest_add() {
+    local manifest=$1 id=$2 sum=$3
+    if [[ -L $manifest || ( -e $manifest && ! -f $manifest ) ]]; then
+        WHY="session $id is sealed, but $(shown "$manifest") is a symlink or not a regular file;"
+        WHY+=" tlogger seal $id adds its line once that is fixed"
+        return 1
+    fi
+    # A failed redirection of a { } group is not reliably a failure in bash, so the check comes
+    # first and the append runs in a subshell, whose status is; stderr is closed before the
+    # redirection, so that bash's own message does not show.
+    if [[ ( -e $manifest && ! -w $manifest ) || ( ! -e $manifest && ! -w ${manifest%/*} ) ]] ||
+        ! (
+            flock -x 9 2> /dev/null || true
+            printf '%s  %s/SHA256SUMS\n' "$sum" "$id" >&9
+        ) 2> /dev/null 9>> "$manifest"; then
+        WHY="session $id is sealed, but cannot write its line in $(shown "$manifest");"
+        WHY+=" tlogger seal $id adds it once that is fixed"
+        return 1
+    fi
+    sync -- "$manifest" 2> /dev/null || true
 }
 
 # Check the session folder DIR and print '<id>  <verdict>' on stdout, setting VERDICT. An
@@ -3362,8 +3405,7 @@ verify_session() {
     fi
     while IFS= read -r e; do
         name=${e##*/}
-        if [[ -z ${listed[$name]-} && ! $name =~ ^(SHA256SUMS|SEAL|transcript\.txt(\.part)?)$ ]]
-        then
+        if [[ -z ${listed[$name]-} && ! $name =~ $SEAL_EXTRAS_RE ]]; then
             msg "$id: $name is not covered by the seal"
             changed=1
         fi
@@ -3371,11 +3413,7 @@ verify_session() {
     # The chain of sums: SHA256SUMS against SEAL, and against the copy in the MANIFEST.
     if [[ -f $dir/SHA256SUMS && ! -L $dir/SHA256SUMS ]]; then
         sum=$(sha256_of "$dir/SHA256SUMS") || sum=
-        while IFS= read -r line || [[ -n $line ]]; do
-            if [[ $line == 'sha256 '* ]]; then
-                sealed=${line#sha256 }
-            fi
-        done < "$dir/SEAL"
+        sealed=$(seal_sum "$dir")
         manifest=${dir%/*}/MANIFEST
         if [[ -f $manifest && ! -L $manifest ]]; then
             mline=$(grep -E "^[0-9a-f]{64}  $id/SHA256SUMS\$" "$manifest" | tail -n 1) || mline=
@@ -3426,11 +3464,7 @@ list_state() {
             return 0
         fi
     done < "$dir/SHA256SUMS"
-    while IFS= read -r line || [[ -n $line ]]; do
-        if [[ $line == 'sha256 '* ]]; then
-            sealed=${line#sha256 }
-        fi
-    done < "$dir/SEAL"
+    sealed=$(seal_sum "$dir")
     sum=$(sha256_of "$dir/SHA256SUMS") || sum=
     if [[ $sum != "$sealed" ]]; then
         printf 'changed\n'
@@ -3486,6 +3520,16 @@ parse_session_args() {
     fi
 }
 
+# Print the notice of seal_session's SEAL_RESULT, sealed or completed, for the session ID.
+seal_notice() {
+    local sum="SHA-256 of its SHA256SUMS: $SEAL_SUM"
+    if [[ $SEAL_RESULT == completed ]]; then
+        msg "session $1 is sealed already, and its MANIFEST line is added now; $sum"
+    else
+        msg "sealed session $1; $sum"
+    fi
+}
+
 # tlogger seal [SESSION | --all]: seal one session, by default the newest, or with --all every
 # session of the log folder whose recording has ended. Prints 'sealed session <id>; SHA-256 of
 # its SHA256SUMS: <sum>' for each one it seals. With --all, sessions still recorded and sessions
@@ -3506,7 +3550,7 @@ cmd_seal() {
         fi
         case $SEAL_RESULT in
             already) msg "session $SESSION_ID is sealed already" ;;
-            *) msg "sealed session $SESSION_ID; SHA-256 of its SHA256SUMS: $SEAL_SUM" ;;
+            *) seal_notice "$SESSION_ID" ;;
         esac
         return 0
     fi
@@ -3514,8 +3558,8 @@ cmd_seal() {
     list_sessions
     for dir in "${SESSIONS[@]}"; do
         if seal_session "$dir"; then
-            if [[ $SEAL_RESULT == sealed ]]; then
-                msg "sealed session ${dir##*/}; SHA-256 of its SHA256SUMS: $SEAL_SUM"
+            if [[ $SEAL_RESULT != already ]]; then
+                seal_notice "${dir##*/}"
             fi
         elif [[ $SEAL_RESULT == live || $LIVE == unknown ]]; then
             msg "$WHY; not sealed"

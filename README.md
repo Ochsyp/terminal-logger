@@ -591,10 +591,12 @@ tlogger: sealed session 20261104T101500Z-a1B2c3; SHA-256 of its SHA256SUMS: 9f86
 Sealing writes `SHA256SUMS` in the session folder, with the SHA-256 of each log and marker, makes
 those files and `SHA256SUMS` read-only (0400), writes `SEAL`, 0400, with the tlogger version, the
 UTC time and the SHA-256 of `SHA256SUMS`, and flushes them to the disk. It then adds the line
-`<SHA-256 of SHA256SUMS>  <session>/SHA256SUMS` to `MANIFEST` in the log folder, so that
-`sha256sum -c MANIFEST` there and `sha256sum -c SHA256SUMS` in a session folder check them with
-standard tools. The folder itself stays 0700, so that `render` can still write `transcript.txt`,
-which is derived and not sealed.
+`<SHA-256 of SHA256SUMS>  <session>/SHA256SUMS` to `MANIFEST` in the folder that holds the
+session, the log folder for a session id, so that `sha256sum -c MANIFEST` there and
+`sha256sum -c SHA256SUMS` in a session folder check them with standard tools. When that line
+cannot be written, as with a read-only `MANIFEST`, the session is sealed without it, and
+`tlogger seal` on it adds the line later. The folder itself stays 0700, so that `render` can
+still write `transcript.txt`, which is derived and not sealed.
 
 | Command | What it does |
 |---|---|

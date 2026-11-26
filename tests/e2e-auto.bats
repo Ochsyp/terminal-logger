@@ -113,7 +113,7 @@ EOF
     # The line as typed; only input.raw holds it in this form.
     # shellcheck disable=SC2016
     grep -qF 'echo e2e-typed-in-auto-$((6*7))' "$DIR/input.raw"
-    # The shell that recorded closes without a notice.
+    # The shell that recorded closes without the notice that the recording ended.
     run ! grep -qF 'tlogger: recording ended' "$SCREEN"
     run ! grep -qF 'handshake failed' "$SCREEN"
 }
