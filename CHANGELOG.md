@@ -11,6 +11,9 @@ Each version is the GitHub release `vX.Y.Z`.
 
 - `VERSION` is `0.1.1-dev` after the release of 0.1.0, so an install from a checkout of `main`
   names a development version again.
+- The README, `docs/guide.md` and the Release contract install a release without a login: `curl`
+  downloads the two assets from the release's URLs, and `sha256sum -c SHA256SUMS` checks them.
+  `gh attestation verify`, which needs a GitHub login, follows as an optional extra.
 
 ## [0.1.0] - 2026-11-26
 
