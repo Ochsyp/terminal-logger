@@ -416,9 +416,9 @@ check the seal against the maintainer's public key in their root-owned
 `/etc/tlogger/allowed_signers`, with `git verify-tag seal/vX.Y.Z`, in a tree-less clone they keep,
 which refuses a tag that has moved since it last saw it, and check that the seal, the release tag
 and the archive's manifest name the same commit, which is on `main`; the README's Install section
-gives the commands. The hold for a sealed release that must not be installed is the pre-release tick:
-the maintainer ticks **Set as a pre-release** on it and ships X.Y.Z+1, and users install only a
-release that the releases page does not mark as a pre-release. A seal is never moved or deleted.
+gives the commands. The hold for a sealed release that must not be installed is the pre-release
+tick: the maintainer ticks **Set as a pre-release** on it and ships X.Y.Z+1, and users install only
+a release that the releases page does not mark as a pre-release. A seal is never moved or deleted.
 
 A user installs a release on their own machine, never a host for others. They download the two
 assets with `curl` from the release's download URLs, which needs no login, and check the archive
