@@ -106,6 +106,10 @@ All notable changes to this project are listed here. The format follows
 
 ### Changed
 
+- `.github/standard.conf` sets up the shared repository standard's privacy scan ahead of its
+  adoption: the synthetic Kali home is allowed in the docs, tests and pull request template that
+  use it as example data, and one `.gitignore` line is written so that it no longer reads as a
+  host name.
 - The five e2e test files run their zsh drivers through one `drive` in `tests/helpers.bash`
   instead of a copy each, and a new lint test keeps it that way. The pager tests share small
   helpers in `tests/helpers/view-tty.zsh`. No other test is added or removed.
