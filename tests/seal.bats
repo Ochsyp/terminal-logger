@@ -245,6 +245,41 @@ assert_usage_error() {
     [ ! -s "$LOGS/MANIFEST" ]
 }
 
+@test "a session given by a path with any folder name gets one MANIFEST line beside it" {
+    local dir="$BATS_TEST_TMPDIR/cases/a+b(1)" sum
+    mkdir -p "$BATS_TEST_TMPDIR/cases"
+    make_session 20261112T100000Z-a1B2c3
+    mv "$LOGS/20261112T100000Z-a1B2c3" "$dir"
+    run_tlogger seal "$dir"
+    [ "$status" -eq 0 ]
+    run_tlogger seal "$dir"
+    [ "$status" -eq 0 ]
+    sum=$(sha_of "$dir/SHA256SUMS")
+    [ "$(cat "$BATS_TEST_TMPDIR/cases/MANIFEST")" = "$sum  a+b(1)/SHA256SUMS" ]
+    [ ! -e "$LOGS/MANIFEST" ]
+    run_tlogger verify "$dir"
+    [ "$status" -eq 0 ]
+    [ "$output" = 'a+b(1)  ok' ]
+}
+
+@test "a second first seal of a session whose MANIFEST holds an older sum fails" {
+    local id=20261112T100000Z-a1B2c3 want
+    make_session "$id"
+    run_tlogger seal "$id"
+    [ "$status" -eq 0 ]
+    # SEAL removed and a log changed, then sealed again: the MANIFEST keeps the first sum.
+    rm -f "$LOGS/$id/SEAL" "$LOGS/$id/SHA256SUMS"
+    chmod 600 "$LOGS/$id/commands.tsv"
+    printf 'S\t1794391300\t2026-11-12T10:01:40Z\t4300\t/srv/work\t-\tid\n' \
+        >> "$LOGS/$id/commands.tsv"
+    run_tlogger seal "$id"
+    want="tlogger: session $id is sealed, but the MANIFEST holds another sum for it from an"
+    assert_refused 1 "$want earlier seal; tlogger verify $id names what changed"
+    [ "$(wc -l < "$LOGS/MANIFEST")" -eq 1 ]
+    run_tlogger verify "$id"
+    [ "$status" -eq 1 ]
+}
+
 @test "a MANIFEST that ends without a newline gets one before the next line" {
     local id=20261112T100000Z-a1B2c3
     make_session "$id"

@@ -3210,7 +3210,7 @@ sha256_of() {
 # SHA256SUMS still has the sum SEAL names; else it is refused as a mismatch. Sets SEAL_RESULT,
 # SEAL_SUM and, on a refusal, WHY; returns 1 on a refusal or a failure.
 seal_session() {
-    local dir=$1 id=${1##*/} parent=${1%/*} f tmp sum stamp manifest
+    local dir=$1 id=${1##*/} parent=${1%/*} f tmp sum stamp manifest line
     local -a files=() paths=()
     SEAL_RESULT=refused SEAL_SUM='' WHY='' LIVE=''
     manifest=$parent/MANIFEST
@@ -3310,6 +3310,15 @@ seal_session() {
     sync -d -- "${paths[@]}" "$dir/SHA256SUMS" "$dir/SEAL" 2> /dev/null || sync
     sync -- "$dir" 2> /dev/null || true
     manifest_add "$manifest" "$id" "$sum" 1 || return 1
+    # A line there already, from an earlier seal of the same session, must have this sum.
+    if (( ! MANIFEST_ADDED )); then
+        line=$(manifest_line "$manifest" "$id")
+        if [[ ${line%% *} != "$sum" ]]; then
+            WHY="session $id is sealed, but the MANIFEST holds another sum for it from an earlier"
+            WHY+=" seal; tlogger verify $id names what changed"
+            return 1
+        fi
+    fi
     SEAL_RESULT=sealed SEAL_SUM=$sum
 }
 
@@ -3326,7 +3335,20 @@ seal_sum() {
 
 # Succeed when the file MANIFEST has a line for the session ID, '<sum>  ID/SHA256SUMS'.
 manifest_has() {
-    [[ -f $1 && ! -L $1 ]] && grep -qE "^[0-9a-f]{64}  $2/SHA256SUMS\$" "$1" 2> /dev/null
+    [[ -n $(manifest_line "$1" "$2") ]]
+}
+
+# Print the last line of the file MANIFEST for the session ID, '<sum>  ID/SHA256SUMS', or
+# nothing. ID is compared as a plain string, never as a pattern, since a session given by a path
+# may have any folder name; ENVIRON, unlike awk -v, keeps its backslashes as they are.
+manifest_line() {
+    if [[ -f $1 && ! -L $1 && -r $1 ]]; then
+        TLOGGER_WANT="$2/SHA256SUMS" awk '
+            substr($0, 1, 66) ~ /^[0-9a-f]+  $/ && substr($0, 67) == ENVIRON["TLOGGER_WANT"] {
+                line = $0
+            }
+            END { if (line != "") print line }' "$1" 2> /dev/null || true
+    fi
 }
 
 # Append '<SUM>  <ID>/SHA256SUMS' to the file MANIFEST under flock, creating it with mode 0600,
@@ -3352,7 +3374,7 @@ manifest_add() {
         if [[ ! -r $manifest ]]; then
             exit 3
         fi
-        if (( only_missing )) && grep -qE "^[0-9a-f]{64}  $id/SHA256SUMS\$" "$manifest"; then
+        if (( only_missing )) && [[ -n $(manifest_line "$manifest" "$id") ]]; then
             exit 10
         fi
         if [[ -s $manifest && -n $(tail -c 1 "$manifest") ]]; then
@@ -3457,9 +3479,7 @@ verify_session() {
         sum=$(sha256_of "$dir/SHA256SUMS") || sum=
         sealed=$(seal_sum "$dir")
         manifest=${dir%/*}/MANIFEST
-        if [[ -f $manifest && ! -L $manifest ]]; then
-            mline=$(grep -E "^[0-9a-f]{64}  $id/SHA256SUMS\$" "$manifest" | tail -n 1) || mline=
-        fi
+        mline=$(manifest_line "$manifest" "$id")
         if [[ $sum != "$sealed" ]]; then
             msg "$id: SHA256SUMS does not match its SEAL"
             changed=1
