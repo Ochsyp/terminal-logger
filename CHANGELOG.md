@@ -1,7 +1,8 @@
 # Changelog
 
 All notable changes to this project are listed here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). There are no releases yet.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html). There are no releases yet.
 
 ## [Unreleased]
 
@@ -106,6 +107,10 @@ All notable changes to this project are listed here. The format follows
 
 ### Changed
 
+- Repository standard 1.2.0: adopted, with the hooks, checks, workflows and blocks.
+- The tests run through `ci/test`, which starts the same pinned Kali container as before and runs
+  `ci/kali-suite` there. The own `tests.yml`, `.githooks/denylist.sh` and `tests/hooks.bats` are
+  gone: the standard's hooks, workflows and hook tests replace them.
 - `.github/standard.conf` sets up the shared repository standard's privacy scan ahead of its
   adoption: the synthetic Kali home is allowed in the docs, tests and pull request template that
   use it as example data. One `.gitignore` line is written so that it no longer reads as a host

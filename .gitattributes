@@ -1,2 +1,25 @@
-# Kali runs the scripts and zsh reads the plugin; CRLF breaks both.
+# standard:begin gitattributes
+# Store every text file with LF and check it out with LF, also on Windows: hooks, tools and tests
+# run under Linux shells too.
 * text=auto eol=lf
+# cmd.exe misparses labels in LF batch files, so PowerShell and batch files check out with CRLF;
+# git still stores LF. Harmless where no such file exists.
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf
+*.psd1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+/.githooks/** text eol=lf
+/.github/standard/** text eol=lf
+# Development files stay out of release archives and GitHub's source downloads.
+/.github/ export-ignore
+/.githooks/ export-ignore
+/ci/ export-ignore
+/tests/ export-ignore
+/.editorconfig export-ignore
+/.gitattributes export-ignore
+/.gitignore export-ignore
+/.gitleaksignore export-ignore
+/.shellcheckrc export-ignore
+/CONTRIBUTING.md export-ignore
+# standard:end gitattributes

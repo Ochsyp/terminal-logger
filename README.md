@@ -534,11 +534,13 @@ Turn on the git hooks once after cloning:
 git config core.hooksPath .githooks
 ```
 
-They refuse commits on `main` or `master` and pushes to them. They also refuse a commit whose
-staged content, path names, message, author or committer holds a term from your local denylist.
-[CONTRIBUTING.md](CONTRIBUTING.md) describes them, what they do not check, and the workflow.
+They refuse commits on `main` or `master` and pushes to them. They also refuse private data in
+what a commit or push brings in: denylist terms and the patterns of the rule packs in
+`.githooks/rules/`. [CONTRIBUTING.md](CONTRIBUTING.md), Guard rails, describes them and the
+workflow.
 
-Run the tests from the repository root with [bats-core](https://github.com/bats-core/bats-core):
+Run the tests from the repository root with [bats-core](https://github.com/bats-core/bats-core)
+1.13.0 or newer, which the standard's test library needs:
 
 ```bash
 bats tests/

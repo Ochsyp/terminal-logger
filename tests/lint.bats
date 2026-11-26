@@ -1,8 +1,9 @@
 #!/usr/bin/env bats
-# Lint checks: no CR byte in any file git tracks or would add, sh -n, bash -n and zsh -n syntax
-# checks, no ShellCheck finding in the shell files, rcblock.awk and legacyblock.awk under each awk,
-# tlogger_view.py compiled, its imports and the way bin/tlogger runs it, and the file modes git
-# stores: executable for hooks, scripts and .bats files, not for the files that are sourced or read.
+# Lint checks of this repository's own files: no CR byte in any file git tracks or would add,
+# bash -n and zsh -n syntax checks, no ShellCheck finding in the shell files, rcblock.awk and
+# legacyblock.awk under each awk, tlogger_view.py compiled, its imports and the way bin/tlogger
+# runs it, and the file modes git stores: executable for scripts and .bats files, not for the files
+# that are sourced or read. The standard's own lint.bats checks the hooks, its tools and ci/.
 
 load helpers
 
@@ -29,11 +30,11 @@ setup() {
     isolate_home
 }
 
-# Run ShellCheck in the repository root on the hooks, denylist.sh, bin/tlogger, the stubs,
-# helpers.bash and the .bats files. The paths stay relative, because some ShellCheck builds
-# cannot read the absolute paths a POSIX layer passes them.
+# Run ShellCheck in the repository root on bin/tlogger, the stubs, helpers.bash and the .bats
+# files. The paths stay relative, because some ShellCheck builds cannot read the absolute paths a
+# POSIX layer passes them.
 shellcheck_repo() {
-    (cd "$REPO_ROOT" && shellcheck .githooks/* bin/tlogger tests/stub-bin/zsh \
+    (cd "$REPO_ROOT" && shellcheck bin/tlogger tests/stub-bin/zsh \
         tests/stub-bin/tlogger-test-recorder tests/stub-bin/tlogger-test-ip tests/*.bash \
         tests/*.bats)
 }
@@ -66,13 +67,6 @@ shellcheck_repo() {
     run grep -U -l $'\r' -- "${files[@]}"
     [ "$status" -eq 1 ]
     [ -z "$output" ]
-}
-
-@test "the hooks and denylist.sh pass an sh -n syntax check" {
-    local file
-    for file in "$REPO_ROOT"/.githooks/*; do
-        sh -n "$file"
-    done
 }
 
 @test "bin/tlogger, the stubs and tests/helpers.bash pass a bash -n syntax check" {
@@ -177,16 +171,16 @@ shellcheck_repo() {
     (( runs >= 4 ))
 }
 
-@test "ShellCheck reports no finding in the hooks, the scripts, helpers.bash or the .bats files" {
+@test "ShellCheck reports no finding in the scripts, helpers.bash or the .bats files" {
     command -v shellcheck > /dev/null || skip "shellcheck is not on PATH"
     run shellcheck_repo
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
 
-@test "git stores the hooks, the scripts and the .bats files as executable, and the sourced files not" {
-    local mode path listing file want
-    local -i hooks=0 indexed_hooks=0
+@test "git stores the scripts and the .bats files as executable, and the sourced files not" {
+    local mode path listing want
+    local -i scripts=0
     # The scripts must be in the index at all; git add --chmod=+x stages one executable. A stub
     # that is missing or not executable would fail only the tests that run it, and not by name.
     for path in bin/tlogger tests/stub-bin/zsh tests/stub-bin/tlogger-test-recorder \
@@ -196,27 +190,23 @@ shellcheck_repo() {
             return 1
         fi
     done
-    # git runs a hook only when it is executable. denylist.sh, the plugin files, the two awk
-    # scanners, tlogger_view.py, which python3 -I reads, and the test helpers are sourced or read,
-    # never run themselves, so none of them is executable.
-    listing=$(git -C "$REPO_ROOT" ls-files -s -- .githooks bin lib libexec tests)
+    # The plugin files, the two awk scanners, tlogger_view.py, which python3 -I reads, and the test
+    # helpers are sourced or read, never run themselves, so none of them is executable.
+    listing=$(git -C "$REPO_ROOT" ls-files -s -- bin lib libexec tests)
     while read -r mode _ _ path; do
         case $path in
-            .githooks/denylist.sh | lib/* | libexec/* | tests/*.bash | tests/helpers/*) want=100644 ;;
-            .githooks/* | bin/* | tests/stub-bin/* | tests/*.bats) want=100755 ;;
+            lib/* | libexec/* | tests/*.bash | tests/helpers/*) want=100644 ;;
+            bin/* | tests/stub-bin/* | tests/*.bats) want=100755 ;;
             *) continue ;;
         esac
         if [[ $mode != "$want" ]]; then
             printf '%s is stored with mode %s, not %s\n' "$path" "$mode" "$want" >&2
             return 1
         fi
-        if [[ $path == .githooks/* && $path != .githooks/denylist.sh ]]; then
-            indexed_hooks+=1
+        if [[ $path == bin/* ]]; then
+            scripts+=1
         fi
     done <<< "$listing"
-    for file in "$REPO_ROOT"/.githooks/*; do
-        [[ "$file" == */denylist.sh ]] || hooks+=1
-    done
-    # Every hook in the work tree must be in the index, so an empty or failed listing fails here.
-    (( hooks > 0 && indexed_hooks == hooks ))
+    # An empty or failed listing fails here.
+    (( scripts > 0 ))
 }

@@ -1,61 +1,85 @@
 # Contributing
 
-Every change reaches `main` through a pull request, so that it is reviewed before it is merged.
-This holds for the maintainer too.
+terminal-logger records zsh terminals as evidence of a penetration test. One maintainer runs it.
 
+<!-- standard:begin workflow -->
 ## Workflow
 
-1. Start from an up-to-date `main` and create a branch for the change:
-   - `phase/<n>-<slug>` for a phase of the build, for example `phase/1-session-recorder`;
-   - `fix/<slug>`, `feat/<slug>`, `docs/<slug>` or `chore/<slug>` for anything else.
-2. Commit on that branch. Commit messages follow
-   [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/), for example
-   `feat: show the REC marker in the prompt`.
-3. Add an entry for the change under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md), on the
-   same branch.
-4. Run the tests described under Testing: `bats tests/` passes. Locally a test may skip only for
-   a reason listed there; CI fails on any skip.
-5. Push the branch and open a pull request against `main`. The secret scan and the tests run on
-   it.
-6. Start the next phase only after the pull request is reviewed and merged. Its branch starts from
-   the updated `main`.
+Every change reaches `main` through a pull request that the maintainer reviews and merges. This
+holds for the maintainer too.
+
+1. Branch from an up-to-date `main`: `phase/<n>-<slug>` for a phase of the plan, or `fix/`,
+   `feat/`, `docs/` or `chore/` plus a short slug.
+2. Write commit messages and the pull request title as Conventional Commits (`feat:`, `fix:`,
+   `docs:`, `chore:`, `ci:`, `test:`, `refactor:`).
+3. Add a line under `## [Unreleased]` in `CHANGELOG.md`. Three kinds of pull request add none
+   there: a release pull request (`chore/release-X.Y.Z`), which moves the lines into the new
+   version; the fix of a draft release (`fix/release-X.Y.Z-<slug>`), whose line goes into that
+   version's section; and a Dependabot pull request, whose updates the next release pull request
+   sums up.
+4. Run the checks in Checks below, and fix what they find.
+5. Push the branch and open a pull request against `main`. Before every `gh pr create` and
+   `gh pr edit`, run `.github/standard/bin/pr-text` on the title and the body: it refuses
+   denylist terms and rule pack hits, and never prints them.
+6. Start the next phase only after the pull request is merged.
 
 One pull request holds one phase or one change.
 
+Repository work happens only on a machine with the maintainer's git configuration, never in a
+cloud session. That configuration turns the hooks on and loads the denylists for every clone of
+this repository's GitHub URL. A clone made from a local path gets no hooks, so run
+`git config core.hooksPath .githooks` in it right after cloning.
+
+An outside contributor's pull request is reviewed in the browser and through CI. Hooks run from
+the checked-out tree with the maintainer's credentials, even during a fetch, so:
+- never check out a fork's pull request branch in a clone with the hooks on;
+- clone a fork only with `git clone <fork URL>` or `gh repo clone <fork> <folder> --no-upstream`,
+  into a scratch folder, and never add a remote for this repository there.
+<!-- standard:end workflow -->
+
+<!-- standard:begin guard-rails -->
 ## Guard rails
 
-`main` is never committed to or pushed to directly, and no personal data should enter the
-history. Git hooks in `.githooks` guard against both in each clone that turns them on:
+GitHub's ruleset on `main` blocks direct pushes, force pushes and its deletion, and the merge
+of a pull request whose `all-passed` or `scan` check failed.
 
-- `pre-commit` refuses a commit while `main` or `master` is checked out, and a commit whose
-  staged content, staged path names, author or committer holds a term from the denylist;
-- `pre-merge-commit` runs the same checks before `git merge` records a merge commit;
-- `commit-msg` refuses a commit message that holds a term from the denylist;
-- `pre-push` refuses a push to `main` or `master`.
+The hooks in `.githooks/` guard every commit and push:
+- `pre-commit` refuses a commit while `main` or `master` is checked out. It also refuses a changed
+  copy of the standard, a staged file above `MAX_BLOB_KB`, and staged content, path names, author
+  or committer that hold a denylist term or a rule pack hit. `pre-merge-commit` does the same for
+  a merge.
+- `commit-msg` refuses such a term or hit in the message.
+- `pre-push` refuses a push to `main` or `master`, and a branch or tag name with a term or hit. It
+  refuses every tag push except a `v*` tag under `RELEASE_KIND=legacy`; otherwise release tags
+  come from publishing a release. It also refuses a term or hit in what the pushed commits bring
+  in, which covers rebase, cherry-pick and `am` too.
 
-Turn them on once after cloning:
+The denylists hold names that must never be committed and never leave the maintainer's machine.
+The rule packs in `.githooks/rules/` hold the patterns: private addresses, local host names, MAC
+addresses, home paths and e-mail addresses, and disk and VM identifiers where the config enables
+them. A refusal names the file, the line and the kind of finding, never the value.
 
-```text
-git config core.hooksPath .githooks
-```
+The maintainer's git configuration turns the hooks on for every clone of this repository's GitHub
+URL. Anywhere else, such as a clone made from a local path, turn them on once after cloning:
+`git config core.hooksPath .githooks`. Never use `--no-verify`.
+<!-- standard:end guard-rails -->
 
-The denylist is a local file outside the repository, at
-`${XDG_CONFIG_HOME:-~/.config}/terminal-logger-dev/denylist`, or at the path in
-`TERMINAL_LOGGER_DENYLIST`. It lists the names, host names and home paths that must never be
-committed: one literal term per line, matched case-insensitively. Whitespace around a term is
-ignored, and a line whose first non-blank character is `#` is a comment. Save the file as UTF-8
-text: a byte order mark is ignored, and while the file holds NUL bytes, as UTF-16 text does,
-every commit is refused. When the file is missing or holds no term, the hooks skip the check and
-say so. A refusal names the offending files, never the term, and does not name a file whose path
-holds the term.
+<!-- standard:begin standard -->
+## The repository standard
 
-The hooks search binary files too, and match UTF-16 text against ASCII terms only. They run only
-for `git commit` and `git merge`, so the changes that `rebase`, `cherry-pick`, `revert` and `am`
-replay are not checked, and they never check tags. Commit with your GitHub noreply address, so
-that the author and committer fields hold no personal data either.
+Files listed in `.github/standard/MANIFEST` are copies of the repository standard. Never edit
+them here: change repo-standard, release it, and sync with a `chore/standard-X.Y.Z` pull request.
+CI fails when a copy differs or changes on another branch. Sync summaries and pull request texts
+here name no other repository. An exemption, an accepted finding or a dropped check comes in a
+`chore/privacy-*` pull request of its own.
 
-Do not bypass the hooks with `--no-verify`. After a pull request is merged, bring the local `main`
-up to date with `git switch main` and `git pull --ff-only`.
+When a private repository goes public, it does so in this order. A pull request sets
+`VISIBILITY=public`, and `tools/sync` writes the public block texts into it. The maintainer
+switches the repository to public on GitHub and turns on the security settings and the ruleset
+those texts promise. A new commit on that branch reruns its checks; a rerun from the Actions page
+keeps the old private flag. Then that pull request merges before anything else: until it does,
+`main` says private while GitHub says public, and CI on `main` and `tools/status` fail.
+<!-- standard:end standard -->
 
 ## Privacy
 
@@ -64,9 +88,10 @@ screenshot. Examples use the user `kali@kali`, the home `/home/kali` and address
 documentation ranges `192.0.2.0/24`, `198.51.100.0/24` and `203.0.113.0/24`, such as `tun0`
 `192.0.2.10` and `wg0` `198.51.100.7`.
 
-## Testing
+## Checks
 
-Run the suite from the repository root:
+Run the suite from the repository root, with bats 1.13.0 or newer, which the standard's
+`.github/standard/tests/lib.bash` needs; `tests/helpers.bash` sources it first:
 
 ```bash
 bats tests/
@@ -174,10 +199,12 @@ bats tests/
   transcript nor the replay keeps those sequences.
 - `tests/e2e-view-tty.bats` runs `show` and `replay` in a real pseudo-terminal on made-up
   sessions: the pager and its secure mode, the replay keys, Ctrl+C, Ctrl+Z with `fg` and `bg`, and
-  the terminal settings they leave. It needs `less`, which only the test job installs; the tool itself does not require it.
-- git stores the hooks, `bin/tlogger`, the stubs in `tests/stub-bin` and every `.bats` file as
-  executable files, and the sourced files as plain ones, `libexec/tlogger_view.py` among them; a
-  lint test checks the modes in the index. Where `core.filemode` is false, as on Git for Windows,
+  the terminal settings they leave. It needs `less`, which only the test container installs; the
+  tool itself does not require it.
+- git stores `bin/tlogger`, the stubs in `tests/stub-bin` and every `.bats` file as executable
+  files, and the sourced files as plain ones, `libexec/tlogger_view.py` among them; a lint test
+  checks the modes in the index, and the standard checks those of the hooks and of `ci/`. Where
+  `core.filemode` is false, as on Git for Windows,
   stage a new executable file with `git add --chmod=+x`, and check the modes with
   `git ls-files -s`.
 - Tests tagged `root` (`# bats test_tags=root`) run only as root and skip otherwise. The other
@@ -193,11 +220,12 @@ bats tests/
 
 - `TLOGGER_SKEL` names the file that `bin/tlogger` seeds a missing rc from, in place of
   `/etc/skel/.zshrc`. It exists for the tests only.
-- CI runs the suite on every pull request and every push to `main`, in a `kalilinux/kali-rolling`
-  container with real zsh, util-linux, `python3` and `python3-pyte`. There the suite, the
+- CI's `test` stage runs `ci/test`, and so can any Linux machine with docker: `bash ci/test`. It
+  starts the pinned `kalilinux/kali-rolling` container, where `ci/kali-suite` installs zsh,
+  util-linux, `less`, `python3`, `python3-pyte`, bats and ShellCheck 0.11.0. There the suite, the
   zsh-based tests included, runs as a non-root user with `--filter-tags '!root'`, and the tests
-  tagged root run afterwards as root. CI fails when any test fails or is skipped, and when the
-  two runs together do not run every test that `bats --count tests/` counts.
+  tagged root run afterwards as root. It fails when any test fails or is skipped, and when the two
+  runs together do not run every test that `bats --count tests/` counts.
 
 ### zsh pitfalls
 
@@ -303,8 +331,8 @@ restore sequence on Ctrl+Z, after any write in progress, before it stops the pro
 
 ### Moving the Kali image
 
-Dependabot does not update container images in workflow files, so `.github/workflows/tests.yml`
-pins `kalilinux/kali-rolling` by digest and a pull request of its own moves the pin. The current
+Dependabot does not update the container image that `ci/test` starts, so `ci/test` pins
+`kalilinux/kali-rolling` by digest and a pull request of its own moves the pin. The current
 digest of the `latest` tag, the index that covers every platform, is the `digest` field of the
 Docker Hub tags API:
 
@@ -312,5 +340,5 @@ Docker Hub tags API:
 curl -fsS https://hub.docker.com/v2/repositories/kalilinux/kali-rolling/tags/latest | jq -r .digest
 ```
 
-Put the digest after the `@` in `container.image`, and say in the pull request when Docker Hub
+Put the digest after the `@` in `image=` in `ci/test`, and say in the pull request when Docker Hub
 last updated the tag, its `last_updated` field.
