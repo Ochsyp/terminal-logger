@@ -88,11 +88,18 @@ shellcheck_repo() {
 }
 
 @test "docs/guide.md names only commands and options that tlogger help lists" {
-    local help word
+    local help code word
     local -a words
     help=$(bash "$TLOGGER" help)
     [[ -f "$REPO_ROOT/docs/guide.md" ]]
-    mapfile -t words < <(grep -oE 'tlogger [a-z]+|--[a-z][a-z-]*' "$REPO_ROOT/docs/guide.md" |
+    # The guide's code, fenced blocks and inline spans, on the lines that run tlogger; other
+    # tools' options, such as gh's, are not tlogger's.
+    code=$(awk '/^```/ { fence = !fence; next }
+        fence { print; next }
+        { while (match($0, /`[^`]+`/)) {
+            print substr($0, RSTART + 1, RLENGTH - 2); $0 = substr($0, RSTART + RLENGTH) } }' \
+        "$REPO_ROOT/docs/guide.md" | grep -E '(^|[^a-z-])tlogger( |$)') || code=
+    mapfile -t words < <(grep -oE 'tlogger [a-z]+|--[a-z][a-z-]*' <<< "$code" |
         sed 's/^tlogger //' | sort -u)
     (( ${#words[@]} > 0 ))
     for word in "${words[@]}"; do

@@ -342,3 +342,62 @@ curl -fsS https://hub.docker.com/v2/repositories/kalilinux/kali-rolling/tags/lat
 
 Put the digest after the `@` in `image=` in `ci/test`, and say in the pull request when Docker Hub
 last updated the tag, its `last_updated` field.
+
+<!-- standard:begin releasing -->
+## Releasing
+
+GitHub Actions builds each release, and the maintainer publishes it in the browser.
+
+1. A session opens the release pull request `chore/release-X.Y.Z`, written with
+   `.github/standard/bin/release-prepare`: `VERSION`, the `VERSION_COPY` files, and the
+   `CHANGELOG.md` section with its links. Its body names the dependency updates since the last
+   release. CI checks the version, the date and the links. The `release` workflow builds the
+   release twice and compares the builds.
+2. The maintainer reviews and squash-merges it. The push to `main` that changes `VERSION` runs
+   the `release` workflow: the checks of `ci` on that commit, the build, an attestation in the
+   public repositories, and a draft release `vX.Y.Z` of that commit.
+3. The maintainer checks the draft (notes, assets, target commit, image digest) and clicks
+   **Publish release**. GitHub creates the tag and the immutable release. The `verify` job then
+   checks the published release, and the maintainer looks for it to pass.
+4. To fix a draft, merge a pull request from `fix/release-X.Y.Z-<slug>`; its `CHANGELOG.md` line
+   goes into `## [X.Y.Z]`. Then run the `release` workflow on `main` (Actions, release, Run
+   workflow). Merge nothing else until the draft is published: CI says so on every pull request
+   while a release waits.
+5. Never delete a published release. Tick **Set as a pre-release** on a bad one instead, so that
+   clients and updaters ignore it, and ship X.Y.Z+1. For a container image, the tick also moves
+   `latest` back.
+
+Sessions prepare release pull requests. They never create a tag, and never publish, edit or
+delete a release.
+<!-- standard:end releasing -->
+
+## Release contract
+
+A release of terminal-logger is a GitHub release `vX.Y.Z` with two assets:
+
+- `terminal-logger-X.Y.Z.tar.gz`, the standard's generic archive of the release commit;
+- `SHA256SUMS`, the SHA-256 of the archive.
+
+The archive holds one folder, `terminal-logger-X.Y.Z/`, with exactly these entries:
+
+- `bin/tlogger`, executable, and `lib/` and `libexec/`, the files that `tlogger install` copies;
+- `VERSION`, which holds `X.Y.Z`;
+- `docs/guide.md`, `README.md`, `CHANGELOG.md`, `SECURITY.md` and `LICENSE`;
+- `terminal-logger-release.json`, the manifest the build adds: schema 1, with the name, the
+  version, the tag and the commit.
+
+`ci/release-check` stops a build, the dry run on every pull request included, unless the archive
+holds exactly that, `bin/tlogger` is executable, and `VERSION` and the manifest both name the
+version being built. Tests, CI files and tooling stay out through the `export-ignore` lines of
+`.gitattributes`.
+
+A user installs a release on their own machine, never a host for others. They check the
+download first: `sha256sum -c SHA256SUMS`, and `gh attestation verify` on the archive, which
+proves that this repository's `release.yml` built it from `main`. Then they unpack it anywhere
+and run `./bin/tlogger install` in the folder. That copies the release files to
+`~/.local/share/tlogger/releases/X.Y.Z`, points `~/.local/share/tlogger/current` at it, and
+keeps the release before it. It refuses an unpacked release whose manifest names another version
+than its `VERSION`, and it refuses to replace a newer release.
+
+After each release, the first pull request sets `VERSION` to `X.Y.(Z+1)-dev`. An install from a
+checkout is named after `VERSION`, so a checkout never passes for a released version.

@@ -445,6 +445,28 @@ read_version() {
     fi
 }
 
+# Exit 1 when the source tree is an unpacked release whose manifest, terminal-logger-release.json,
+# names another version than its VERSION: such a tree was mixed or edited, and would install under
+# a wrong name. A tree without the manifest, such as a checkout, passes. Needs VERSION_STR.
+check_release_manifest() {
+    local f=$SRC_ROOT/terminal-logger-release.json line named=''
+    if [[ ! -e $f && ! -L $f ]]; then
+        return 0
+    fi
+    if [[ ! -f $f || ! -r $f ]]; then
+        die 1 "cannot read the release manifest $(shown "$f"); unpack the release again"
+    fi
+    while IFS= read -r line || [[ -n $line ]]; do
+        if [[ $line =~ ^[[:space:]]*\"version\":[[:space:]]*\"([0-9A-Za-z.+-]{1,40})\",?[[:space:]]*$ ]]; then
+            named=${BASH_REMATCH[1]}
+            break
+        fi
+    done < "$f"
+    if [[ $named != "$VERSION_STR" ]]; then
+        die 1 "the release manifest $(shown "$f") names version ${named:-none}, but VERSION is $VERSION_STR; unpack the release again"
+    fi
+}
+
 # Exit 1 unless the source tree holds every release file, readable.
 check_source_tree() {
     local f
@@ -2228,6 +2250,7 @@ cmd_install() {
     refuse_foreign_root
     read_version
     check_source_tree
+    check_release_manifest
     resolve_paths
     build_block
     if (( OPT_PRINT_ONLY )); then
