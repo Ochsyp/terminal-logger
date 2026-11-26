@@ -7,8 +7,24 @@ Each version is the GitHub release `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Added
+
+- `stamp=hidden`: each recorded command's stamp goes into the recording as a control string that
+  terminals do not show, an OSC 7711 string, and `tlogger render` turns it into the stamp line of
+  the transcript. tmux and GNU screen show none of it, and CI checks both.
+- `prompt_time=iso|readable` chooses how the prompt shows the UTC time.
+
 ### Changed
 
+- The prompt shows what the older logger's prompt showed: the UTC time as
+  `2026-11-26 13:20:52 UTC` in yellow, the VPN list in magenta, or `no vpn`, and the state, `REC`
+  green, `NOREC` red and `EXT` cyan, each in brackets of its own. `NO_COLOR` drops the colours,
+  and `TLOGGER_SEGMENT` stays as it was.
+- The notice that a recording has started is green.
+- `stamp` defaults to `hidden`, so no stamp line shows after each command any more. A config
+  that names `stamp` keeps its value: `stamp=on` the visible line, and `stamp=off` no stamp at
+  all. A `stamp=off` line written to hide the visible line in 0.1.0 can now go, or become
+  `stamp=hidden`, so that the recording keeps each command's time.
 - `VERSION` is `0.1.1-dev` after the release of 0.1.0, so an install from a checkout of `main`
   names a development version again.
 - The README, `docs/guide.md` and the Release contract install a release without a login: `curl`

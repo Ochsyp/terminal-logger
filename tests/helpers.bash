@@ -70,13 +70,14 @@ isolate_home() {
     mkdir -p "$XDG_CONFIG_HOME" "$TMPDIR"
 }
 
-# Prepare a test of bin/tlogger: unset ZDOTDIR, the XDG base folder variables, BASH_ENV and every
-# TLOGGER_ variable but TLOGGER_CI, so that the defaults under the test's HOME apply and no file
-# of the developer's runs inside bash. Call after isolate_home; fails unless HOME is a test home.
+# Prepare a test of bin/tlogger: unset ZDOTDIR, the XDG base folder variables, BASH_ENV, NO_COLOR
+# and every TLOGGER_ variable but TLOGGER_CI, so that the defaults under the test's HOME apply, the
+# colours show unless a test sets NO_COLOR, and no file of the developer's runs inside bash. Call
+# after isolate_home; fails unless HOME is a test home.
 isolate_tlogger() {
     local var
     require_test_home || return 1
-    unset ZDOTDIR XDG_DATA_HOME XDG_CONFIG_HOME XDG_STATE_HOME BASH_ENV
+    unset ZDOTDIR XDG_DATA_HOME XDG_CONFIG_HOME XDG_STATE_HOME BASH_ENV NO_COLOR
     for var in "${!TLOGGER_@}"; do
         if [[ $var != TLOGGER_CI ]]; then
             unset "$var"

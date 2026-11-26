@@ -109,6 +109,12 @@ wait_for_size() {
         'abcdefgh'
 }
 
+@test "a hidden stamp is dropped whole, well-formed or not, as every OSC string is" {
+    # shellcheck disable=SC1003 # \\ is the backslash of ST for printf %b.
+    assert_filtered 'a\e]7711;tlogger-stamp 2026-11-26T13:20:52Z tun0 192.0.2.10\e\\b\e]7711;tlogger-stamp x\ac\xc2\x9d7711;tlogger-stamp 2026-11-26T13:20:52Z\xc2\x9cd' \
+        'abcd'
+}
+
 @test "control sequences that make a terminal answer, or act on its window, are dropped" {
     # Device attributes, status and cursor reports, window reports and resizes, DECREQTPARM,
     # cursor style, soft reset, DECRQM, XTVERSION, REP, tab clear, CBT, CHT, media copy and

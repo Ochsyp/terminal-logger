@@ -136,8 +136,20 @@ class Sink:
 # Tokens of terminal output
 # ---------------------------------------------------------------------------------------------
 
-# Token kinds: printable text, a C0 control, an escape sequence and a control sequence (CSI).
-TEXT, CTRL, ESC, CSI = range(4)
+# Token kinds: printable text, a C0 control, an escape sequence, a control sequence (CSI) and a
+# hidden stamp.
+TEXT, CTRL, ESC, CSI, STAMP = range(5)
+
+# A hidden stamp, as the plugin's preexec hook writes it with stamp=hidden: the OSC string
+# 'ESC ] 7711 ; tlogger-stamp <UTC> <vpn> ST', which terminals do not show. The tokenizer keeps
+# at most _STAMP_MAX characters of an OSC string that starts with _STAMP_PREFIX, and only a
+# string that _STAMP matches whole, ended by ST or BEL, becomes a STAMP token.
+_STAMP_PREFIX = "7711;tlogger-stamp "
+_STAMP = re.compile(
+    r"7711;tlogger-stamp ([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)"
+    r"((?: [0-9A-Za-z_.:-]{1,45})*)"
+)
+_STAMP_MAX = 512
 
 # An escape or control sequence that reaches this many bytes, counted from its first byte, stops
 # keeping its parameter and intermediate bytes, so that memory stays bounded. It is still read on
@@ -160,16 +172,19 @@ class Tokenizer:
     """Split terminal output, decoded to str, into tokens, keeping its state across feed calls.
 
     feed returns a list of tokens: (TEXT, run) for printable characters; (CTRL, char) for a C0
-    control other than ESC, CAN and SUB; (ESC, intermediates, final); and (CSI, parameters,
-    intermediates, final, c1), c1 true when U+009B introduced it. OSC, DCS, SOS, PM and APC
-    strings, introduced by ESC or by their C1 controls and ended by ST (ESC \\ or U+009C), BEL
-    for OSC, yield nothing. DEL, CAN, SUB, a stray ST and every other C1 control are dropped. A
-    C0 control inside a sequence is executed: its token comes before the sequence's, as on a
-    DEC terminal. ESC, CAN, SUB, a C1 control or a character above ASCII inside a sequence ends
-    it unfinished; such a character is then read again in the ground state. A control string is
-    dropped whole, however long, as a terminal shows none of it; the tokenizer keeps none of its
-    bytes. A sequence that reaches CAP bytes stops keeping its bytes, is read on to its end and
-    is dropped whole, as a malformed one is.
+    control other than ESC, CAN and SUB; (ESC, intermediates, final); (CSI, parameters,
+    intermediates, final, c1), c1 true when U+009B introduced it; and (STAMP, utc, vpn) for a
+    hidden stamp, an OSC 7711 string that _STAMP matches whole, vpn "" when it names none. Every
+    other OSC, DCS, SOS, PM and APC string, introduced by ESC or by its C1 control and ended by ST
+    (ESC \\ or U+009C), BEL for OSC, yields nothing, and so does a stamp that a CAN, a SUB, an
+    ESC or a C1 control cuts short. DEL, CAN, SUB, a stray ST and every other C1 control are
+    dropped. A C0 control inside a sequence is executed: its token comes before the sequence's,
+    as on a DEC terminal. ESC, CAN, SUB, a C1 control or a character above ASCII inside a
+    sequence ends it unfinished; such a character is then read again in the ground state. A
+    control string is dropped whole, however long, as a terminal shows none of it; the tokenizer
+    keeps none of its bytes but the first _STAMP_MAX characters of an OSC string that can still
+    be a stamp. A sequence that reaches CAP bytes stops keeping its bytes, is read on to its end
+    and is dropped whole, as a malformed one is.
     """
 
     def __init__(self):
@@ -180,6 +195,8 @@ class Tokenizer:
         self.c1 = False
         self.bad = False
         self.osc = False
+        # The OSC string read so far while it can still be a hidden stamp, else None.
+        self.keep = None
 
     def _begin(self, state, size, c1=False, osc=False):
         """Start a sequence or string in STATE whose introducer took SIZE bytes."""
@@ -190,6 +207,27 @@ class Tokenizer:
         self.c1 = c1
         self.bad = size >= CAP
         self.osc = osc
+        self.keep = "" if osc else None
+
+    def _keep(self, chunk):
+        """Add CHUNK of an OSC string to keep, or give it up once it can be no hidden stamp."""
+        if self.keep is None:
+            return
+        keep = self.keep + chunk
+        if len(keep) > _STAMP_MAX or not (
+            keep.startswith(_STAMP_PREFIX) or _STAMP_PREFIX.startswith(keep)
+        ):
+            self.keep = None
+        else:
+            self.keep = keep
+
+    def _end_string(self, out):
+        """End the control string properly, by ST or BEL: add its STAMP token, if it is one."""
+        if self.keep is not None:
+            match = _STAMP.fullmatch(self.keep)
+            if match is not None:
+                out.append((STAMP, match.group(1), match.group(2).strip()))
+        self.keep = None
 
     def _grow(self, count):
         """Count COUNT more bytes of the sequence; at the cap mark it bad. Returns False."""
@@ -281,28 +319,35 @@ class Tokenizer:
         return self._interrupt(ch, out)
 
     def _string(self, text, i, out):
-        """Read the control string in TEXT from index I on, keeping none of it.
+        """Read the control string in TEXT from index I on, keeping none of it but a stamp's.
 
         Returns the next index to read.
         """
         match = (_OSC_STOP if self.osc else _STRING_STOP).search(text, i)
         if match is None:
+            self._keep(text[i:])
             return len(text)
         end = match.start()
+        self._keep(text[i:end])
         ch = text[end]
         if ch == "\x1b":
             self.state = _STRING_ESC
             return end + 1
         self.state = _GROUND
-        if ch not in "\x07\x18\x1a\x9c":
-            # A C1 introducer ends the string unfinished and starts its own sequence.
-            self._control(ch, out)
+        if ch in "\x07\x9c":
+            self._end_string(out)
+        else:
+            self.keep = None
+            if ch not in "\x18\x1a":
+                # A C1 introducer ends the string unfinished and starts its own sequence.
+                self._control(ch, out)
         return end + 1
 
     def _string_esc(self, ch, out):
         """Read CH after an ESC inside a control string. Returns True to read CH again."""
         if ch == "\\":
             self.state = _GROUND
+            self._end_string(out)
             return False
         # Any other character ends the string unfinished; the ESC starts an escape sequence.
         self._begin(_ESCAPE, 1)
@@ -343,6 +388,7 @@ class Tokenizer:
     def finish(self):
         """Drop a sequence or string that the input left unfinished."""
         self.state = _GROUND
+        self.keep = None
 
 
 # ---------------------------------------------------------------------------------------------
@@ -416,7 +462,8 @@ def filter_tokens(tokens):
     """Return, as one str, what the replay filter passes of TOKENS.
 
     Passed: text; BS, HT, LF and CR; ESC 7, 8, D, E and M; ESC ( and ESC ) with B or 0; and
-    the control sequences that _filter_csi passes. Everything else is dropped.
+    the control sequences that _filter_csi passes. Everything else is dropped, hidden stamps
+    included.
     """
     out = []
     for token in tokens:
@@ -430,7 +477,7 @@ def filter_tokens(tokens):
             inter, final = token[1], token[2]
             if (inter == "" and final in "78DEM") or (inter in ("(", ")") and final in "B0"):
                 out.append("\x1b" + inter + final)
-        else:
+        elif kind == CSI:
             out.append(_filter_csi(token[1], token[2], token[3], token[4]))
     return "".join(out)
 
@@ -939,6 +986,19 @@ def load_screen_class():
             if row:
                 for x in [x for x in row if x >= self.columns]:
                     del row[x]
+
+        def stamp(self, utc, vpn):
+            """Draw the hidden stamp of UTC and VPN as the line that stamp=on prints.
+
+            The line, '-- UTC VPN REC' or '-- UTC REC' without a VPN, stands on its own: a stamp
+            met in the middle of a line starts a new one first, and what follows starts below.
+            """
+            if self.cursor.x:
+                self.control("\r")
+                self.control("\n")
+            self.put_text("-- %s%s REC" % (utc, " " + vpn if vpn else ""))
+            self.control("\r")
+            self.control("\n")
 
         def control(self, ch):
             """Act on the C0 control CH; BEL, SO, SI and the others leave the text as it is."""
@@ -1528,8 +1588,10 @@ def _dispatch(screen, tokens):
             screen.control(token[1])
         elif kind == ESC:
             screen.escape(token[1], token[2])
-        else:
+        elif kind == CSI:
             screen.csi(token[1], token[2], token[3])
+        else:
+            screen.stamp(token[1], token[2])
 
 
 # ---------------------------------------------------------------------------------------------

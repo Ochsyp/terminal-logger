@@ -175,6 +175,43 @@ wait_for() {
     assert_lines '$ ls' 'see link here'
 }
 
+@test "a hidden stamp becomes its stamp line, on a line of its own, where the command started" {
+    need pyte
+    session_new "$SESSION"
+    # shellcheck disable=SC1003 # \\ is the backslash of ST for printf %b.
+    session_out '$ ls\r\n\e]7711;tlogger-stamp 2026-11-26T13:20:52Z tun0 192.0.2.10\e\\file\r\n'
+    # shellcheck disable=SC1003
+    session_out '$ true\r\n\e]7711;tlogger-stamp 2026-11-26T13:20:53Z\e\\$ x'
+    # A BEL ends the OSC string as ST does.
+    session_out '\e]7711;tlogger-stamp 2026-11-26T13:20:54Z\ay\r\n'
+    session_end
+    render_stdout
+    # A stamp met in the middle of a line starts a line of its own, and the text goes on below it.
+    assert_lines '$ ls' '-- 2026-11-26T13:20:52Z tun0 192.0.2.10 REC' 'file' '$ true' \
+        '-- 2026-11-26T13:20:53Z REC' '$ x' '-- 2026-11-26T13:20:54Z REC' 'y'
+}
+
+@test "an OSC string that is no well-formed stamp, too long or cut short, leaves no text" {
+    need pyte
+    local long
+    long=$(printf 'tun0 %.0s' {1..120})
+    session_new "$SESSION"
+    # shellcheck disable=SC1003,SC2016 # \\ is the backslash of ST for printf %b; $(id) is text.
+    session_out 'a\e]7711;tlogger-stamp yesterday\e\\b\e]7711;tlogger-stamp 2026-11-26T13:20:52Z $(id)\e\\c\r\n'
+    # Another OSC number, or no stamp in OSC 7711, is no stamp; CAN cuts a stamp short.
+    # shellcheck disable=SC1003
+    session_out 'd\e]7712;tlogger-stamp 2026-11-26T13:20:52Z\e\\e\e]7711;other\e\\f'
+    session_out '\e]7711;tlogger-stamp 2026-11-26T13:20:52Z\x18g\r\n'
+    # shellcheck disable=SC1003
+    session_out "h\\e]7711;tlogger-stamp 2026-11-26T13:20:52Z $long\\e\\\\i\\r\\n"
+    # An ESC that starts another sequence inside the stamp ends it unfinished.
+    # shellcheck disable=SC1003
+    session_out 'j\e]7711;tlogger-stamp 2026-11-26T13:20:52Z\e]0;t\a\e\\k\r\n'
+    session_end
+    render_stdout
+    assert_lines 'abc' 'defg' 'hi' 'jk'
+}
+
 @test "a full-screen program leaves one marker, and the main screen comes back as it was" {
     need pyte
     local marker='[full-screen program: 24x80, not kept here; replay shows it]'

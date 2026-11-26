@@ -3,8 +3,8 @@
 # never runs or expands a value. bin/tlogger's read_config follows the same line rules.
 
 # Fill the global associative array _tlogger_cfg with mode, logdir, record_input, min_free_mb,
-# recorder, record_ssh, record_tmux, prompt, stamp, stamp_vpn, vpn_ifaces and history_timestamps,
-# and with config_dir, the folder that holds the config and the disable file. Lines are key=value,
+# recorder, record_ssh, record_tmux, prompt, prompt_time, stamp, stamp_vpn, vpn_ifaces and
+# history_timestamps, and with config_dir, the folder that holds the config and the disable file. Lines are key=value,
 # blank or '#' comments; whitespace around a value is trimmed, a repeated key keeps its first
 # value and an unknown key is ignored. An exported TLOGGER_<KEY in upper case> that is not empty
 # wins over the file. An invalid value, or a line that is not key=value, gets one warning on
@@ -38,11 +38,11 @@ _tlogger_load_config() {
     done
     state_dir=$base/tlogger
     # The keys in the order of their checks, and so of their warnings.
-    keys=(mode logdir record_input min_free_mb recorder record_ssh record_tmux prompt stamp
-        stamp_vpn vpn_ifaces history_timestamps)
+    keys=(mode logdir record_input min_free_mb recorder record_ssh record_tmux prompt prompt_time
+        stamp stamp_vpn vpn_ifaces history_timestamps)
     def=(mode manual logdir "$state_dir/sessions" record_input yes min_free_mb 200
-        recorder /usr/bin/script record_ssh yes record_tmux yes prompt on stamp on stamp_vpn on
-        vpn_ifaces 'tun* wg* tap*' history_timestamps no)
+        recorder /usr/bin/script record_ssh yes record_tmux yes prompt on prompt_time readable
+        stamp hidden stamp_vpn on vpn_ifaces 'tun* wg* tap*' history_timestamps no)
 
     file=$cfg_dir/config
     shown_file=$file
@@ -113,9 +113,19 @@ _tlogger_load_config() {
                     why='must be yes or no'
                 fi
                 ;;
-            prompt | stamp | stamp_vpn)
+            prompt | stamp_vpn)
                 if [[ $value != (on|off) ]]; then
                     why='must be on or off'
+                fi
+                ;;
+            prompt_time)
+                if [[ $value != (iso|readable) ]]; then
+                    why='must be iso or readable'
+                fi
+                ;;
+            stamp)
+                if [[ $value != (on|off|hidden) ]]; then
+                    why='must be on, off or hidden'
                 fi
                 ;;
             vpn_ifaces)

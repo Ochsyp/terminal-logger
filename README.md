@@ -310,25 +310,40 @@ quotes, and text with a tab, a newline or another control character in the `$'..
 every line holds one event. Nested shells write their own lines, with their own pid. A shell that
 is not recorded writes nothing.
 
-As each command starts, the recorded shell also prints a dim stamp, which `output.raw` keeps
-with the rest of the screen:
+As each command starts, the recorded shell also writes a stamp into the recording, with the UTC
+time, the VPN list and `REC`. By default, `stamp=hidden`, the terminal shows nothing of it:
+tlogger writes it as a control string that terminals do not display, the OSC string
+`ESC ] 7711 ; tlogger-stamp <UTC> <VPN list> ST`, and `script` keeps it in `output.raw` at the
+place where the command started. `tlogger render` turns each one into a stamp line of the
+transcript, and `tlogger replay` drops it:
 
 ```text
 -- 2026-11-11T10:00:00Z tun0 192.0.2.10 REC
 ```
 
-With `NO_COLOR` set to a non-empty value, the stamp is plain; `stamp=off` leaves it out.
+`stamp=on` prints that line on the screen as well, dim, or plain with `NO_COLOR` set to a
+non-empty value; `stamp=off` writes no stamp. Either way, `commands.tsv` keeps the start of every
+command. A config that sets `stamp=off` to hide the visible line of 0.1.0 keeps it; change it to
+`stamp=hidden`, or remove the line, to keep the stamps in the recording. tmux and GNU screen show
+nothing of a hidden stamp, neither in the pane nor in a title or status line, as the tests check;
+xterm and VTE terminals, such as GNOME Terminal, are documented to ignore OSC strings they do not
+know, and CONTRIBUTING.md has the hand check for them and QTerminal. A terminal that shows
+`]7711;` or `tlogger-stamp` text after each command needs `stamp=off`.
 
-Every shell where the plugin loaded shows a segment in its prompt, `[<UTC time> <VPN list>
-<state>]`, which it builds again before each prompt:
+Every shell where the plugin loaded shows a segment in its prompt, which it builds again before
+each prompt: the UTC time, the VPN list and the state, each in brackets of its own and in its
+colour, as the older logger's prompt showed them:
 
 ```text
-┌──(kali㉿kali)-[~] [2026-11-11T10:00:00Z tun0 192.0.2.10 REC]
+┌──(kali㉿kali)-[~] [2026-11-11 10:00:00 UTC] [tun0 192.0.2.10] [REC]
 └─$
 ```
 
-- `REC`: tlogger records this terminal; `NOREC`: nothing records it; `EXT`: another `script`
-  process records it.
+- `REC`: tlogger records this terminal, in green; `NOREC`: nothing records it, in red; `EXT`:
+  another `script` process records it, in cyan. The time is yellow and the VPN list magenta.
+  With `NO_COLOR` set to a non-empty value, the segment has no colour.
+- The VPN field says `no vpn` while no VPN interface exists, and is left out with
+  `stamp_vpn=off`. `prompt_time=iso` shows the time as `2026-11-11T10:00:00Z` instead.
 - In a prompt of more than one line, such as Kali's two-line one, a space and the segment end the
   first line; a one-line prompt gets the segment and a space in front. Kali's prompt and its
   `precmd()` stay as they are, and so do the shell's options, unless `history_timestamps=yes`:
@@ -337,9 +352,10 @@ Every shell where the plugin loaded shows a segment in its prompt, `[<UTC time> 
   `PROMPT_SP`. Ctrl+P, which switches Kali's prompt between one and two lines, builds a prompt
   without the segment; the segment is back from the next prompt on.
 - `prompt=off` leaves the prompt alone.
-- `TLOGGER_SEGMENT` holds the plain segment, exported, for prompt frameworks that build their own
-  prompt, such as powerlevel10k or starship: show it from a segment of the framework's own and
-  set `prompt=off`.
+- `TLOGGER_SEGMENT` holds the plain segment, exported, `[<UTC time> <VPN list> <state>]` in the
+  form `[2026-11-11T10:00:00Z tun0 192.0.2.10 REC]`, without colour and without the VPN list when
+  it is empty, for prompt frameworks that build their own prompt, such as powerlevel10k or
+  starship: show it from a segment of the framework's own and set `prompt=off`.
 - The plugin takes out only the exact text it added last time. A prompt that something saves
   with a segment in it and puts back later, as a Python venv's `activate` and `deactivate` do in
   a prompt other than Kali's colour one, keeps that old segment, with its old time and state,
@@ -361,10 +377,12 @@ prompt. An address that changes while its interface stays, as on a reconnect tha
 tunnel, shows from the next run of `ip` on: for up to a minute, the list can show the old
 address.
 
-> **Note:** the evidence holds the stamp lines and the VPN addresses. The stamps and the prompt
-> segments in `output.raw` and the S lines in `commands.tsv` name the addresses, and so does a
-> screenshot of the prompt. `stamp_vpn=off` keeps the addresses out of all of them, and
-> `tlogger status` then shows `vpn: off`; `stamp=off` keeps the stamp lines out.
+> **Note:** the evidence holds the stamps and the VPN addresses. The stamps, hidden or shown, and
+> the prompt segments in `output.raw` and the S lines in `commands.tsv` name the addresses, and so
+> does a screenshot of the prompt. `stamp_vpn=off` keeps the addresses out of all of them, and
+> `tlogger status` then shows `vpn: off`; `stamp=off` keeps the stamps out. A stamp line in a
+> transcript comes from the recorded output, which a program in the terminal could imitate;
+> `commands.tsv` is the record of when each command started.
 
 None of this slows the prompt noticeably: the hooks start no process for a command. `ip` runs only
 at the rate above, and `df` at most every five minutes, to check the free space of the session's
@@ -403,7 +421,8 @@ never runs it.
 | `record_ssh` | `yes`, or `no` so that an SSH login does not record itself in auto mode | `yes` |
 | `record_tmux` | `yes`, or `no` so that a tmux pane does not record itself in auto mode | `yes` |
 | `prompt` | `on`, or `off` for no segment in the prompt | `on` |
-| `stamp` | `on`, or `off` for no stamp as each recorded command starts | `on` |
+| `prompt_time` | `readable` for the time as `2026-11-11 10:00:00 UTC` in the prompt, or `iso` for `2026-11-11T10:00:00Z` | `readable` |
+| `stamp` | `hidden` to keep a stamp in the recording, not on the screen, as each recorded command starts; `on` to print it on the screen as well; `off` for none | `hidden` |
 | `stamp_vpn` | `on`, or `off` to keep the VPN list out of the stamps, the segment, the journal and `tlogger status` | `on` |
 | `vpn_ifaces` | The patterns of the VPN interface names, separated by spaces or commas, each of letters, digits, `_`, `.`, `-` and the wildcard `*` | `tun* wg* tap*` |
 | `history_timestamps` | `yes` to turn on zsh's `extended_history`, which keeps the start time of each command in the history file | `no` |
@@ -486,6 +505,11 @@ comes back as it was:
 ```text
 [full-screen program: 24x80, not kept here; replay shows it]
 ```
+
+A hidden stamp in `output.raw`, which `stamp=hidden` writes, becomes its stamp line,
+`-- <UTC> <VPN list> REC`, on a line of its own where the command started. An OSC 7711 string that
+is no well-formed stamp, or longer than 512 characters, leaves no text, as every other control
+string.
 
 When `output.raw` ends before its timing does, holds more output than its timing covers (past
 the closing line that `script` writes), or the timing file holds malformed lines, `render`

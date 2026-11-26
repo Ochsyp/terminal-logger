@@ -28,6 +28,10 @@ UTC_RE='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'
 VPN='tun0 192.0.2.10 wg0 198.51.100.7'
 VPN_RE='tun0 192\.0\.2\.10 wg0 198\.51\.100\.7'
 
+# A UTC time as the prompt shows it with prompt_time=readable, the default, as an extended regular
+# expression.
+READABLE_RE='[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} UTC'
+
 # Run before each test by bats.
 # Gives the test its own HOME and config folder, an empty folder for the fake /proc tree and an
 # empty fake sysfs, which every shell reads. ip is missing unless a test names the stub, so that
@@ -498,14 +502,17 @@ addressed-5s: 3 [tun0 192.0.2.10]" ]
 }
 
 @test "precmd puts the segment at the end of a two-line PROMPT's first line, or before a one-line PROMPT, once" {
-    local line label seg shown right want re="^\\[$UTC_RE (NOREC|EXT)\\]\$"
-    # Each line: a label, the segment, PROMPT with its newline shown as <NL>, and RPROMPT. The
-    # fake /proc turns the shell from NOREC to EXT on the way, so that the segment changes. A
-    # space and the segment end the first line of the two-line PROMPT; the segment and a space
-    # open the one-line PROMPT.
+    local line label seg ins shown right want state colour re="^\\[$UTC_RE (NOREC|EXT)\\]\$"
+    # The text precmd inserts, without the space before or after it: the time, no vpn (the fake
+    # sysfs has no VPN interface) and the state, each in its colour and brackets of its own.
+    local ins_re="\\[%F\\{yellow\\}$READABLE_RE%f\\] \\[%F\\{magenta\\}no vpn%f\\] \\[%F\\{(red|cyan)\\}(NOREC|EXT)%f\\]"
+    # Each line: a label, the segment, the inserted text, PROMPT with its newline shown as <NL>,
+    # and RPROMPT. The fake /proc turns the shell from NOREC to EXT on the way, so that the
+    # segment changes. A space and the text end the first line of the two-line PROMPT; the text
+    # and a space open the one-line PROMPT.
     J_TWO=$'top %~\nnext %# ' J_ONE='one %# ' run_hooks "$NOREC_TREE" '
         printf -v nl "\n"
-        show() { print -r -- "$1|$TLOGGER_SEGMENT|${PROMPT//$nl/<NL>}|$RPROMPT"; }
+        show() { print -r -- "$1|$TLOGGER_SEGMENT|$_tlogger_seg|${PROMPT//$nl/<NL>}|$RPROMPT"; }
         RPROMPT=right
         PROMPT=$J_TWO
         _tlogger_precmd; show two-NOREC
@@ -520,12 +527,24 @@ addressed-5s: 3 [tun0 192.0.2.10]" ]
     [ -z "$stderr" ]
     [ "${#lines[@]}" -eq 5 ]
     for line in "${lines[@]}"; do
-        IFS='|' read -r label seg shown right <<< "$line"
-        [[ $seg =~ $re && $seg == *" ${label#*-}]" ]]
+        IFS='|' read -r label seg ins shown right <<< "$line"
+        state=${label#*-}
+        [[ $seg =~ $re && $seg == *" $state]" ]]
         [ "$right" = right ]
+        case $state in
+            NOREC) colour=red ;;
+            *) colour=cyan ;;
+        esac
+        [[ $ins == *"[%F{$colour}$state%f]"* ]]
         case $label in
-            two-*) want="top %~ $seg<NL>next %# " ;;
-            *) want="$seg one %# " ;;
+            two-*)
+                [[ $ins =~ ^" "$ins_re$ ]]
+                want="top %~$ins<NL>next %# "
+                ;;
+            *)
+                [[ $ins =~ ^$ins_re" "$ ]]
+                want="${ins}one %# "
+                ;;
         esac
         if [[ $shown != "$want" ]]; then
             printf '%s: expected PROMPT\n%s\ngot\n%s\n' "$label" "$want" "$shown" >&2
@@ -534,12 +553,16 @@ addressed-5s: 3 [tun0 192.0.2.10]" ]
     done
 }
 
-@test "a % in the segment is doubled, prompt=off adds none and takes the last one out, and a read-only PROMPT stays" {
-    J_P='p> ' run_hooks "$NOREC_TREE" '
+@test "a % in the prompt's fields is doubled, prompt=off adds none and takes the last one out, and a read-only PROMPT stays" {
+    J_P='p> ' NO_COLOR=1 run_hooks "$NOREC_TREE" '
+        _tlogger_prompt_text "50%" "v%" REC
+        print -r -- "$REPLY|${(%)REPLY}|"
+        _tlogger_prompt_text "51%" "" NOREC
+        print -r -- "$REPLY|"
         PROMPT=$J_P
-        _tlogger_prompt "[50%]"
-        print -r -- "$PROMPT|${(%)PROMPT}|"
-        _tlogger_prompt "[60%]"
+        _tlogger_prompt "[60%%]"
+        print -r -- "$PROMPT|"
+        _tlogger_prompt "[70%%]"
         print -r -- "$PROMPT|"
         _tlogger_cfg[prompt]=off
         _tlogger_precmd
@@ -550,10 +573,14 @@ addressed-5s: 3 [tun0 192.0.2.10]" ]
         print -r -- "$PROMPT|"'
     [ "$status" -eq 0 ]
     [ -z "$stderr" ]
-    [ "${lines[0]}" = '[50%%] p> |[50%] p> |' ]
-    [ "${lines[1]}" = '[60%%] p> |' ]
-    [ "${lines[2]}" = 'p> |scalar-export' ]
-    [ "${lines[3]}" = 'p> |' ]
+    [ "${lines[0]}" = '[50%%] [v%%] [REC]|[50%] [v%] [REC]|' ]
+    # An empty VPN field, as stamp_vpn=off gives it, leaves its brackets out.
+    [ "${lines[1]}" = '[51%%] [NOREC]|' ]
+    # _tlogger_prompt inserts the prompt text it is given as it is.
+    [ "${lines[2]}" = '[60%%] p> |' ]
+    [ "${lines[3]}" = '[70%%] p> |' ]
+    [ "${lines[4]}" = 'p> |scalar-export' ]
+    [ "${lines[5]}" = 'p> |' ]
     # prompt=off in the config: no segment from the first prompt on, and TLOGGER_SEGMENT all the
     # same.
     printf 'prompt=off\n' > "$CONFIG"
@@ -565,6 +592,58 @@ addressed-5s: 3 [tun0 192.0.2.10]" ]
     [ "$status" -eq 0 ]
     [ -z "$stderr" ]
     [ "$output" = $'PROMPT as it was\nscalar-export' ]
+}
+
+@test "the prompt shows the readable UTC time, the VPN list and the state, each in its colour and brackets" {
+    local state tree colour re
+    fake_sysfs "$SYS" tun0=5 wg0=6
+    for state in REC NOREC EXT; do
+        tree=${state}_TREE
+        case $state in
+            REC) colour=green ;;
+            NOREC) colour=red ;;
+            EXT) colour=cyan ;;
+        esac
+        J_P='p> ' TLOGGER_IP=$STUB_IP run_hooks "${!tree}" '
+            PROMPT=$J_P
+            _tlogger_precmd
+            print -r -- "$PROMPT"
+            print -r -- "$TLOGGER_SEGMENT"'
+        [ "$status" -eq 0 ]
+        [ -z "$stderr" ]
+        re="^\\[%F\\{yellow\\}$READABLE_RE%f\\] \\[%F\\{magenta\\}$VPN_RE%f\\] \\[%F\\{$colour\\}$state%f\\] p> \$"
+        [[ ${lines[0]} =~ $re ]]
+        # TLOGGER_SEGMENT stays plain and in ISO form, at the same second.
+        re="^\\[$UTC_RE $VPN_RE $state\\]\$"
+        [[ ${lines[1]} =~ $re ]]
+        [ "${lines[0]:11:19}" = "${lines[1]:1:10} ${lines[1]:12:8}" ]
+    done
+}
+
+@test "NO_COLOR keeps the colours out of the prompt, prompt_time=iso shows ISO time and stamp_vpn=off no VPN" {
+    local re
+    # Without a VPN interface the VPN field says so; NO_COLOR set and not empty drops every colour.
+    J_P='p> ' NO_COLOR=1 run_hooks "$NOREC_TREE" 'PROMPT=$J_P; _tlogger_precmd; print -r -- "$PROMPT"'
+    [ "$status" -eq 0 ]
+    [ -z "$stderr" ]
+    re="^\\[$READABLE_RE\\] \\[no vpn\\] \\[NOREC\\] p> \$"
+    [[ $output =~ $re ]]
+    # An empty NO_COLOR keeps the colours, as the NO_COLOR convention says.
+    J_P='p> ' NO_COLOR='' run_hooks "$NOREC_TREE" 'PROMPT=$J_P; _tlogger_precmd; print -r -- "$PROMPT"'
+    re="^\\[%F\\{yellow\\}$READABLE_RE%f\\] \\[%F\\{magenta\\}no vpn%f\\] \\[%F\\{red\\}NOREC%f\\] p> \$"
+    [[ $output =~ $re ]]
+    J_P='p> ' TLOGGER_PROMPT_TIME=iso run_hooks "$NOREC_TREE" '
+        PROMPT=$J_P; _tlogger_precmd; print -r -- "$PROMPT"'
+    [ -z "$stderr" ]
+    re="^\\[%F\\{yellow\\}$UTC_RE%f\\] \\[%F\\{magenta\\}no vpn%f\\] \\[%F\\{red\\}NOREC%f\\] p> \$"
+    [[ $output =~ $re ]]
+    fake_sysfs "$SYS" tun0=5
+    J_P='p> ' TLOGGER_STAMP_VPN=off TLOGGER_IP=$STUB_IP run_hooks "$NOREC_TREE" '
+        PROMPT=$J_P; _tlogger_precmd; print -r -- "$PROMPT"'
+    [ -z "$stderr" ]
+    re="^\\[%F\\{yellow\\}$READABLE_RE%f\\] \\[%F\\{red\\}NOREC%f\\] p> \$"
+    [[ $output =~ $re ]]
+    [ ! -e "$TLOGGER_TEST_IP_LOG" ]
 }
 
 @test "the segment goes into the PROMPT that /etc/skel/.zshrc builds, in both of its Ctrl+P states" {
@@ -585,20 +664,25 @@ addressed-5s: 3 [tun0 192.0.2.10]" ]
         [[ $two == *$nl* && $one != *$nl* ]] && print -r -- "kali prompts"
         PROMPT_ALTERNATIVE=twoline; configure_prompt
         _tlogger_precmd
-        seg=$TLOGGER_SEGMENT
-        [[ ${PROMPT%%$nl*} == "${two%%$nl*} $seg" && ${PROMPT#*$nl} == "${two#*$nl}" ]] &&
+        # _tlogger_seg is the text precmd inserted: a space, then the time, no vpn and NOREC.
+        seg=$_tlogger_seg
+        [[ $seg == " [%F{yellow}"*"%f] [%F{magenta}no vpn%f] [%F{red}NOREC%f]" ]] &&
+            print -r -- "the time, no vpn and NOREC"
+        [[ ${PROMPT%%$nl*} == "${two%%$nl*}$seg" && ${PROMPT#*$nl} == "${two#*$nl}" ]] &&
             print -r -- "twoline: at the end of the first line"
-        [[ ${${(%%)PROMPT}%%$nl*} == *"] $seg" ]] && print -r -- "twoline: shown after the ]"
+        [[ ${${(%%)PROMPT}%%$nl*} == *"]${(%%)seg}" ]] && print -r -- "twoline: shown after the ]"
         PROMPT_ALTERNATIVE=oneline; configure_prompt
         _tlogger_precmd
-        [[ $PROMPT == "$TLOGGER_SEGMENT $one" ]] && print -r -- "oneline: in front"
-        [[ ${(%%)PROMPT} == "$TLOGGER_SEGMENT "* ]] && print -r -- "oneline: shown in front"
+        [[ $PROMPT == "$_tlogger_seg$one" && $_tlogger_seg == "[%F{yellow}"*"NOREC%f] " ]] &&
+            print -r -- "oneline: in front"
+        [[ ${(%%)PROMPT} == "${(%%)_tlogger_seg}"* ]] && print -r -- "oneline: shown in front"
         PROMPT_ALTERNATIVE=twoline; configure_prompt
         _tlogger_precmd
-        [[ $PROMPT == "${two%%$nl*} $TLOGGER_SEGMENT$nl${two#*$nl}" ]] && print -r -- "twoline again"'
+        [[ $PROMPT == "${two%%$nl*}$_tlogger_seg$nl${two#*$nl}" ]] && print -r -- "twoline again"'
     [ "$status" -eq 0 ]
     [ -z "$stderr" ]
     [ "$output" = 'kali prompts
+the time, no vpn and NOREC
 twoline: at the end of the first line
 twoline: shown after the ]
 oneline: in front
@@ -639,7 +723,7 @@ twoline again' ]
     [ "$status" -eq 0 ]
     [ -z "$stderr" ]
     grep -qx '  prompt: *on' <<< "$output"
-    grep -qx '  stamp: *on' <<< "$output"
+    grep -qx '  stamp: *hidden' <<< "$output"
     grep -qx "  vpn: *$VPN_RE" <<< "$output"
     fake_sysfs "$BATS_TEST_TMPDIR/no-vpn" lo=1 eth0=2
     TLOGGER_SYSFS="$BATS_TEST_TMPDIR/no-vpn" run_hooks "$NOREC_TREE" 'tlogger status'
