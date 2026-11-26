@@ -13,9 +13,21 @@ Each version is the GitHub release `vX.Y.Z`.
   terminals do not show, an OSC 7711 string, and `tlogger render` turns it into the stamp line of
   the transcript. tmux and GNU screen show none of it, and CI checks both.
 - `prompt_time=iso|readable` chooses how the prompt shows the UTC time.
+- Sealed sessions: a recording that ends with `exit`, Ctrl+D or `tlogger stop` is sealed at once.
+  `SHA256SUMS` lists the SHA-256 of each log and marker, they become 0400, `SEAL` records the
+  version, the time and the sum of `SHA256SUMS`, the data goes to the disk, and `MANIFEST` in the
+  log folder gets the session's line; the terminal prints the sum to keep apart (phase 9)
+- `tlogger seal [SESSION | --all]` seals by hand, for example a recording that ended
+  unexpectedly; it refuses a session whose recorder still runs (phase 9)
+- `tlogger verify [SESSION | --all]` reports each session as ok, changed, unsealed or recording,
+  with each change, and `tlogger list` shows every session's state, start, duration, commands
+  and transcript (phase 9)
 
 ### Changed
 
+- A recording that ends unexpectedly says that its session is not sealed, and how to seal it.
+- The README points to the releases and this changelog instead of a status note, and says that
+  QTerminal, Kali's default terminal, hides the hidden stamp, checked by hand.
 - The prompt shows what the older logger's prompt showed: the UTC time as
   `2026-11-26 13:20:52 UTC` in yellow, the VPN list in magenta, or `no vpn`, and the state, `REC`
   green, `NOREC` red and `EXT` cyan, each in brackets of its own. `NO_COLOR` drops the colours,
