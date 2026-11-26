@@ -202,17 +202,32 @@ pty_out_is() {
 # '[<UTC> UTC] [<VPN list or no vpn>] [STATE]', followed by TAIL, such as ' e2e% ' or the line end
 # of a two-line prompt. Each field may come with its SGR colour codes, which zsh prints for %F and
 # %f. Ends the driver unless the readable UTC time and a VPN field open the segment. Consumes the
-# output up to the end of TAIL and sets PTY_BEFORE to the part before ' [STATE]'.
+# output up to the end of TAIL after that segment, prompts of another state before it included,
+# and sets PTY_BEFORE to the part before ']TAIL', without colour codes.
 pty_segment() {
-    local state=$1 tail=$2 plain sgr=$'\e''\[[0-9;]#m'
-    local day='[0-9](#c4)-[0-9](#c2)-[0-9](#c2)' clock='[0-9](#c2):[0-9](#c2):[0-9](#c2)'
-    _pty_until '[[ $PTY_BUF == *" ["(${~sgr})#"$state"(${~sgr})#"]$tail"* ]]' \
-        "the $state segment" $3
-    PTY_BEFORE=${PTY_BUF%%" ["(${~sgr})#"$state"(${~sgr})#"]$tail"*}
-    PTY_BUF=${PTY_BUF#*" ["(${~sgr})#"$state"(${~sgr})#"]$tail"}
-    plain=${PTY_BEFORE//${~sgr}}
-    [[ $plain == *'['${~day}' '${~clock}' UTC] ['[^]]##']' ]] ||
+    local state=$1 tail=$2 sgr=$'\e''\[[0-9;]#m'
+    local re='\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} UTC\] \[[^]]+\] \['$state'$'
+    _pty_until '_pty_plain; [[ $_pty_plain_buf == *" [$state]$tail"* ]]' "the $state segment" $3
+    # Each pass takes one prompt, up to ']TAIL', until the one that ends with the segment.
+    while true; do
+        if [[ $PTY_BUF != *"]$tail"* ]]; then
+            pty_fail "the $state segment shows only once its colour codes are gone"
+        fi
+        PTY_BEFORE=${PTY_BUF%%"]$tail"*}
+        PTY_BUF=${PTY_BUF#*"]$tail"}
+        PTY_BEFORE=${PTY_BEFORE//${~sgr}}
+        if [[ $PTY_BEFORE == *" [$state" ]]; then
+            break
+        fi
+    done
+    [[ $PTY_BEFORE =~ $re ]] ||
         pty_fail "no [<UTC> UTC] [<vpn>] opens the $state segment: ${(V)PTY_BEFORE[-80,-1]}"
+}
+
+# Set _pty_plain_buf to PTY_BUF without its SGR codes, such as the colours zsh prints for %F and
+# %f.
+_pty_plain() {
+    typeset -g _pty_plain_buf=${PTY_BUF//$'\e'\[[0-9;]#m}
 }
 
 # Wait for the banner of a recording and the REC line of the recorded shell; set PTY_BANNER to

@@ -200,7 +200,7 @@ make_plugin_release() {
     ' zsh "$PLUGIN" < /dev/null
     [ "$status" -eq 0 ]
     local want_f want_p got_f got_p
-    want_f='functions: _tlogger_append _tlogger_autostart _tlogger_autostart_why _tlogger_df _tlogger_drop_empty _tlogger_handshake _tlogger_init _tlogger_load_config _tlogger_precmd _tlogger_preexec _tlogger_preflight _tlogger_prompt _tlogger_record _tlogger_say _tlogger_shown _tlogger_start _tlogger_stat _tlogger_status _tlogger_stop _tlogger_tty_state _tlogger_utc _tlogger_vpn_update _tlogger_write_new _tlogger_zshexit add-zsh-hook tlogger'
+    want_f='functions: _tlogger_append _tlogger_autostart _tlogger_autostart_why _tlogger_df _tlogger_drop_empty _tlogger_handshake _tlogger_init _tlogger_load_config _tlogger_precmd _tlogger_preexec _tlogger_preflight _tlogger_prompt _tlogger_prompt_text _tlogger_record _tlogger_say _tlogger_shown _tlogger_start _tlogger_stat _tlogger_status _tlogger_stop _tlogger_tty_state _tlogger_utc _tlogger_vpn_update _tlogger_write_new _tlogger_zshexit add-zsh-hook tlogger'
     want_p='parameters: _tlogger_cfg _tlogger_cmd _tlogger_df_time _tlogger_hs _tlogger_ip _tlogger_main _tlogger_release _tlogger_seg _tlogger_state _tlogger_vpn _tlogger_vpn_key _tlogger_vpn_time precmd_functions preexec_functions zshexit_functions'
     got_f=$(grep '^functions: ' <<< "$output") || got_f=
     got_p=$(grep '^parameters: ' <<< "$output") || got_p=
