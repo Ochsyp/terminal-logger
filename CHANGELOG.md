@@ -25,6 +25,10 @@ Each version is the GitHub release `vX.Y.Z`.
 
 ### Changed
 
+- Repository standard 1.3.0: sealed releases (`SEAL=yes`). From 0.2.0 on, the maintainer seals
+  each published release with an offline SSH key, as the tag `seal/vX.Y.Z`, and the README's
+  install steps check that seal with `git verify-tag`, without a login, before anything is
+  unpacked. The Release contract names the hold for a sealed release that must not be installed.
 - A recording that ends unexpectedly says that its session is not sealed, and how to seal it.
 - The README points to the releases and this changelog instead of a status note, and says that
   QTerminal, Kali's default terminal, hides the hidden stamp, checked by hand.

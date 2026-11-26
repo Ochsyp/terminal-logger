@@ -24,7 +24,9 @@ cd terminal-logger-X.Y.Z
 ./bin/tlogger install --mode auto
 ```
 
-`sha256sum -c` must print `OK`. The extra check, right after it and before `tar`, is
+`sha256sum -c` must print `OK`. From 0.2.0 on, check the release's seal as well, before `tar`:
+the README's Install section has the commands, which need the maintainer's public key once, and
+no login. The extra check, after those and before `tar`, is
 `gh attestation verify terminal-logger-X.Y.Z.tar.gz --repo Ochsyp/terminal-logger`, which proves
 where the archive was built; the README's Install section says more.
 

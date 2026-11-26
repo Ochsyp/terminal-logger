@@ -26,9 +26,9 @@ holds for the maintainer too.
 One pull request holds one phase or one change.
 
 Repository work happens only on a machine with the maintainer's git configuration, never in a
-cloud session. That configuration turns the hooks on and loads the denylists for every clone of
-this repository's GitHub URL. A clone made from a local path gets no hooks, so run
-`git config core.hooksPath .githooks` in it right after cloning.
+hosted environment such as a codespace or a cloud workspace. That configuration turns the hooks
+on and loads the denylists for every clone of this repository's GitHub URL. A clone made from a
+local path gets no hooks, so run `git config core.hooksPath .githooks` in it right after cloning.
 
 An outside contributor's pull request is reviewed in the browser and through CI. Hooks run from
 the checked-out tree with the maintainer's credentials, even during a fetch, so:
@@ -69,9 +69,8 @@ URL. Anywhere else, such as a clone made from a local path, turn them on once af
 
 Files listed in `.github/standard/MANIFEST` are copies of the repository standard. Never edit
 them here: change repo-standard, release it, and sync with a `chore/standard-X.Y.Z` pull request.
-CI fails when a copy differs or changes on another branch. Sync summaries and pull request texts
-here name no other repository. An exemption, an accepted finding or a dropped check comes in a
-`chore/privacy-*` pull request of its own.
+CI fails when a copy differs or changes on another branch. An exemption, an accepted finding or a
+dropped check comes in a `chore/privacy-*` pull request of its own.
 
 When a private repository goes public, it does so in this order. A pull request sets
 `VISIBILITY=public`, and `tools/sync` writes the public block texts into it. The maintainer
@@ -355,29 +354,38 @@ last updated the tag, its `last_updated` field.
 <!-- standard:begin releasing -->
 ## Releasing
 
-GitHub Actions builds each release, and the maintainer publishes it in the browser.
+GitHub Actions builds each release, and the maintainer publishes it in the browser, then seals
+it: hosts that install this repository's releases install a sealed release only.
 
-1. A session opens the release pull request `chore/release-X.Y.Z`, written with
+1. The maintainer opens the release pull request `chore/release-X.Y.Z`, written with
    `.github/standard/bin/release-prepare`: `VERSION`, the `VERSION_COPY` files, and the
    `CHANGELOG.md` section with its links. Its body names the dependency updates since the last
-   release. CI checks the version, the date and the links. The `release` workflow builds the
-   release twice and compares the builds.
+   release. CI checks the version, the date and the links. For a zip, tar or stack release, the
+   `release` workflow builds it twice and compares the builds.
 2. The maintainer reviews and squash-merges it. The push to `main` that changes `VERSION` runs
    the `release` workflow: the checks of `ci` on that commit, the build, an attestation in the
    public repositories, and a draft release `vX.Y.Z` of that commit.
 3. The maintainer checks the draft (notes, assets, target commit, image digest) and clicks
    **Publish release**. GitHub creates the tag and the immutable release. The `verify` job then
    checks the published release, and the maintainer looks for it to pass.
-4. To fix a draft, merge a pull request from `fix/release-X.Y.Z-<slug>`; its `CHANGELOG.md` line
+4. Then the maintainer seals the release. Double-click this repository's seal shortcut and check
+   what the dialog shows: the version, its commit, the release pull request, the commits since
+   the last seal and each check the tool ran. Click **Seal** and type the passphrase of the
+   offline signing key. The tool pushes the annotated, SSH-signed tag `seal/vX.Y.Z` on the
+   release's commit, from a mirror of its own; `pre-push` refuses `refs/tags/seal/*` from every
+   clone.
+5. To fix a draft, merge a pull request from `fix/release-X.Y.Z-<slug>`; its `CHANGELOG.md` line
    goes into `## [X.Y.Z]`. Then run the `release` workflow on `main` (Actions, release, Run
    workflow). Merge nothing else until the draft is published: CI says so on every pull request
    while a release waits.
-5. Never delete a published release. Tick **Set as a pre-release** on a bad one instead, so that
-   clients and updaters ignore it, and ship X.Y.Z+1. For a container image, the tick also moves
-   `latest` back.
+6. Never delete a published release, and never move or delete a seal: a host stops on a seal
+   that moved. To stop a release before its seal, leave it unsealed and tick **Set as a
+   pre-release**, so repo-standard's `tools/status` stops asking for its seal; then ship X.Y.Z+1.
+   To stop a sealed release, use the hold that the Release contract names, and ship X.Y.Z+1.
+   For a container image, the pre-release tick also moves `latest` back.
 
-Sessions prepare release pull requests. They never create a tag, and never publish, edit or
-delete a release.
+Only the maintainer publishes a release. No one creates a release tag or a seal by hand, and no
+script or automation publishes a release, or edits or deletes a published one.
 <!-- standard:end releasing -->
 
 ## Release contract
@@ -401,6 +409,16 @@ workflow builds the archive twice as a dry run on each pull request that touches
 config, `.gitattributes` or the release files, and `tests/release-check.bats` checks the archive
 of HEAD in every test run. Tests, CI files and tooling stay out through the `export-ignore` lines
 of `.gitattributes`.
+
+From 0.2.0 on, `SEAL=yes`: the maintainer seals each published release with the seal tool, as the
+Releasing section says, and a user installs only a sealed release. Before they unpack it, they
+check the seal against the maintainer's public key in their root-owned
+`/etc/tlogger/allowed_signers`, with `git verify-tag seal/vX.Y.Z`, in a tree-less clone they keep,
+which refuses a tag that has moved since it last saw it, and check that the seal, the release tag
+and the archive's manifest name the same commit, which is on `main`; the README's Install section
+gives the commands. The hold for a sealed release that must not be installed is the pre-release
+tick: the maintainer ticks **Set as a pre-release** on it and ships X.Y.Z+1, and users install only
+a release that the releases page does not mark as a pre-release. A seal is never moved or deleted.
 
 A user installs a release on their own machine, never a host for others. They download the two
 assets with `curl` from the release's download URLs, which needs no login, and check the archive
