@@ -108,6 +108,9 @@ All notable changes to this project are listed here. The format follows
 ### Changed
 
 - Repository standard 1.2.0: adopted, with the hooks, checks, workflows and blocks.
+- Repository standard 1.2.0: releases are tar archives (`RELEASE_KIND=tar`), and CONTRIBUTING.md
+  has the standard's "Releasing" block. A pull request that touches the release files builds the
+  archive twice as a dry run; a merge that changes `VERSION` drafts a release.
 - The tests run through `ci/test`, which starts the same pinned Kali container as before and runs
   `ci/kali-suite` there. The own `tests.yml`, `.githooks/denylist.sh` and `tests/hooks.bats` are
   gone: the standard's hooks, workflows and hook tests replace them.
