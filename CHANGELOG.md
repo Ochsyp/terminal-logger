@@ -7,6 +7,11 @@ Each version is the GitHub release `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Changed
+
+- `VERSION` is `0.1.1-dev` after the release of 0.1.0, so an install from a checkout of `main`
+  names a development version again.
+
 ## [0.1.0] - 2026-11-26
 
 The first release: a recorder for zsh terminals on Kali Linux, keystrokes included, as evidence
