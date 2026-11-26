@@ -413,9 +413,10 @@ of `.gitattributes`.
 From 0.2.0 on, `SEAL=yes`: the maintainer seals each published release with the seal tool, as the
 Releasing section says, and a user installs only a sealed release. Before they unpack it, they
 check the seal against the maintainer's public key in their root-owned
-`/etc/tlogger/allowed_signers`, with `git verify-tag seal/vX.Y.Z`, and check that the seal, the
-release tag and the archive's manifest name the same commit; the README's Install section gives
-the commands. The hold for a sealed release that must not be installed is the pre-release tick:
+`/etc/tlogger/allowed_signers`, with `git verify-tag seal/vX.Y.Z`, in a tree-less clone they keep,
+which refuses a tag that has moved since it last saw it, and check that the seal, the release tag
+and the archive's manifest name the same commit, which is on `main`; the README's Install section
+gives the commands. The hold for a sealed release that must not be installed is the pre-release tick:
 the maintainer ticks **Set as a pre-release** on it and ships X.Y.Z+1, and users install only a
 release that the releases page does not mark as a pre-release. A seal is never moved or deleted.
 

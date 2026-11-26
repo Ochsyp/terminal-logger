@@ -47,11 +47,14 @@ login is needed.
 
 Once, before the first install, put the maintainer's public SSH key, the one that signs the seals,
 into a list that only root can change. Get the key from the maintainer over a channel you trust,
-never from this repository, and keep it: a key that changes later is a reason to stop.
+never from this repository, and keep it: a key that changes later is a reason to stop. Then make
+a small clone that keeps the tags you have seen, with commits only and no files; keep it, since
+it is what notices a tag that moves:
 
 ```bash
 sudo install -d -m 0755 /etc/tlogger
 printf 'maintainer %s\n' "$(cat maintainer-seal.pub)" | sudo tee /etc/tlogger/allowed_signers
+git clone -q --bare --filter=tree:0 https://github.com/Ochsyp/terminal-logger.git ~/tlogger-seals
 ```
 
 For each install, download the two assets into an empty folder, with the version in place of
@@ -62,11 +65,11 @@ the extra check further below before the `tar -xzf` line):
 curl -fLO https://github.com/Ochsyp/terminal-logger/releases/download/vX.Y.Z/terminal-logger-X.Y.Z.tar.gz
 curl -fLO https://github.com/Ochsyp/terminal-logger/releases/download/vX.Y.Z/SHA256SUMS
 sha256sum -c SHA256SUMS
-git init -q seal-check
-git -C seal-check fetch -q --depth 1 https://github.com/Ochsyp/terminal-logger.git refs/tags/vX.Y.Z:refs/tags/vX.Y.Z refs/tags/seal/vX.Y.Z:refs/tags/seal/vX.Y.Z
-git -C seal-check -c gpg.ssh.allowedSignersFile=/etc/tlogger/allowed_signers verify-tag seal/vX.Y.Z
-git -C seal-check tag -l --format='%(contents:subject)' seal/vX.Y.Z
-git -C seal-check rev-parse 'seal/vX.Y.Z^{commit}' 'vX.Y.Z^{commit}'
+git -C ~/tlogger-seals fetch origin '+refs/heads/main:refs/heads/main' 'refs/tags/*:refs/tags/*'
+git -C ~/tlogger-seals -c gpg.ssh.allowedSignersFile=/etc/tlogger/allowed_signers verify-tag seal/vX.Y.Z
+git -C ~/tlogger-seals tag -l --format='%(contents:subject)' seal/vX.Y.Z
+git -C ~/tlogger-seals rev-parse 'seal/vX.Y.Z^{commit}' 'vX.Y.Z^{commit}'
+git -C ~/tlogger-seals merge-base --is-ancestor 'seal/vX.Y.Z^{commit}' main && echo 'on main'
 tar -xzOf terminal-logger-X.Y.Z.tar.gz terminal-logger-X.Y.Z/terminal-logger-release.json | grep '"commit"'
 tar -xzf terminal-logger-X.Y.Z.tar.gz
 cd terminal-logger-X.Y.Z
@@ -77,11 +80,13 @@ Unpack nothing unless every check holds:
 
 - `sha256sum -c` prints `terminal-logger-X.Y.Z.tar.gz: OK`, which proves that the archive is the
   one the release lists;
+- `fetch` ends without an error: it never moves a tag the clone has seen, and refuses with
+  `would clobber existing tag` when one has moved on GitHub, which is a reason to stop;
 - `verify-tag` prints `Good "git" signature for maintainer`, which proves that the maintainer
   sealed it with the key you keep;
 - the seal's message is `terminal-logger vX.Y.Z`;
-- `rev-parse` prints the same commit twice, and the archive's manifest names that commit too, so
-  the seal, the release and the archive are the same code.
+- `rev-parse` prints the same commit twice, `merge-base` prints `on main`, and the archive's
+  manifest names that commit too, so the seal, the release, `main` and the archive agree.
 
 A missing seal means that the maintainer has not sealed that release yet, or held it: wait, or
 take the release before it. Releases before 0.2.0 have no seal.
