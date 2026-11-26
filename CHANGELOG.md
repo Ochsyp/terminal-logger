@@ -18,7 +18,8 @@ Sealed sessions, the older logger's prompt, and the first sealed release.
   the time and the sum of `SHA256SUMS`, and `MANIFEST` in the log folder gets the session's line.
   The terminal prints the sum; keep it, or a copy of `MANIFEST`, apart from the logs.
 - `tlogger seal [SESSION | --all]` seals by hand, for example a recording that ended
-  unexpectedly; it never seals a session that is still recorded.
+  unexpectedly; it never seals a session that is still recorded. After the upgrade,
+  `tlogger seal --all` seals the sessions recorded with 0.1.0.
 - `tlogger verify [SESSION | --all]` says for each session ok, changed, unsealed or recording,
   and names each change. `tlogger list` shows every session with its state, start, duration,
   number of commands and transcript.
