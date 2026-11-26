@@ -87,6 +87,22 @@ shellcheck_repo() {
     done
 }
 
+@test "docs/guide.md names only commands and options that tlogger help lists" {
+    local help word
+    local -a words
+    help=$(bash "$TLOGGER" help)
+    [[ -f "$REPO_ROOT/docs/guide.md" ]]
+    mapfile -t words < <(grep -oE 'tlogger [a-z]+|--[a-z][a-z-]*' "$REPO_ROOT/docs/guide.md" |
+        sed 's/^tlogger //' | sort -u)
+    (( ${#words[@]} > 0 ))
+    for word in "${words[@]}"; do
+        if [[ ! $help =~ (^|[^a-z-])"$word"($|[^a-z-]) ]]; then
+            printf 'docs/guide.md names %s, which tlogger help does not list\n' "$word" >&2
+            return 1
+        fi
+    done
+}
+
 @test "every e2e file runs its drivers through drive in tests/helpers.bash and defines none" {
     local file
     local -a files=("$REPO_ROOT"/tests/e2e-*.bats)
