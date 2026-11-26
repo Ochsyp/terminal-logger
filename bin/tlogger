@@ -3219,10 +3219,17 @@ seal_session() {
         # A seal whose MANIFEST line never got written, as when the MANIFEST was read-only or the
         # run was cut short, gets it now, as long as SHA256SUMS still has the sum SEAL names.
         # Nothing else is written: no SEAL, no SHA256SUMS and no log. A line there already ends it
-        # without a write, so that a read-only MANIFEST stays fine; manifest_add checks again
-        # under its lock.
-        if manifest_has "$manifest" "$id"; then
-            return 0
+        # without a write, so that a read-only MANIFEST stays fine, as long as it has the sum
+        # SEAL names; manifest_add checks again under its lock.
+        line=$(manifest_line "$manifest" "$id")
+        if [[ -n $line ]]; then
+            if [[ ${line%% *} == "$(seal_sum "$dir" 2> /dev/null)" ]]; then
+                return 0
+            fi
+            SEAL_RESULT=mismatch
+            WHY="session $id is sealed, but its line in the MANIFEST holds another sum than its"
+            WHY+=" SEAL; tlogger verify $id names what changed"
+            return 1
         fi
         if [[ -L $dir/SEAL || ! -f $dir/SEAL || -L $dir/SHA256SUMS || ! -f $dir/SHA256SUMS ]]
         then
@@ -3331,11 +3338,6 @@ seal_sum() {
         fi
     done < "$1/SEAL"
     printf '%s\n' "$sealed"
-}
-
-# Succeed when the file MANIFEST has a line for the session ID, '<sum>  ID/SHA256SUMS'.
-manifest_has() {
-    [[ -n $(manifest_line "$1" "$2") ]]
 }
 
 # Print the last line of the file MANIFEST for the session ID, '<sum>  ID/SHA256SUMS', or

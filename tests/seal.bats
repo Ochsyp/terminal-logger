@@ -278,6 +278,10 @@ assert_usage_error() {
     [ "$(wc -l < "$LOGS/MANIFEST")" -eq 1 ]
     run_tlogger verify "$id"
     [ "$status" -eq 1 ]
+    # Sealing it again says so too, instead of 'sealed already'.
+    run_tlogger seal "$id"
+    want="tlogger: session $id is sealed, but its line in the MANIFEST holds another sum than"
+    assert_refused 1 "$want its SEAL; tlogger verify $id names what changed"
 }
 
 @test "a MANIFEST that ends without a newline gets one before the next line" {
