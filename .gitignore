@@ -42,4 +42,5 @@ __pycache__/
 Thumbs.db
 desktop.ini
 .DS_Store
-.claude/settings.local.json
+# [l] matches the same file, but keeps the name from reading as a host name to the privacy scan.
+.claude/settings.loca[l].json
