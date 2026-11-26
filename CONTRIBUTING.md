@@ -108,11 +108,12 @@ bats tests/
   not count. Where zsh is missing, `tests/stub-bin/zsh` answers the questions `bin/tlogger` asks
   zsh; the stub refuses to run under `TLOGGER_CI=1`. On Git for Windows,
   `MSYS=winsymlinks:sys bats tests/` lets the symlink tests run.
-- `tests/config.bats` runs `lib/config.zsh` in `zsh -f`, checks every key, `prompt`, `stamp`,
-  `stamp_vpn`, `vpn_ifaces` and `history_timestamps` included, and checks that it reads the same
-  mode and logdir as the `read_config` of `bin/tlogger`. `tests/guard.bats` checks how the plugin
-  sees its terminal over a fake process tree: `tests/helpers/fakeproc.zsh` writes made-up `stat`
-  and `cmdline` files and a boot id into the folder that `TLOGGER_PROC` names. `TLOGGER_PROC`,
+- `tests/config.bats` runs `lib/config.zsh` in `zsh -f`, checks every key, `prompt`,
+  `prompt_time`, `stamp`, `stamp_vpn`, `vpn_ifaces` and `history_timestamps` included, and
+  checks that it reads the same mode and logdir as the `read_config` of `bin/tlogger`.
+  `tests/guard.bats` checks how the plugin sees its terminal over a fake process tree:
+  `tests/helpers/fakeproc.zsh` writes made-up `stat` and `cmdline` files and a boot id into the
+  folder that `TLOGGER_PROC` names. `TLOGGER_PROC`,
   default `/proc`, exists for the tests only, as do the config key `recorder` and
   `TLOGGER_RECORDER`, which name the `script` binary.
 - `tests/autostart.bats` checks the autostart guard, `_tlogger_autostart_why`, in a real zsh
@@ -155,12 +156,18 @@ bats tests/
   states. Its helper `run_hooks` runs zsh under `timeout`, so that a hook that hangs, as on a
   FIFO in place of the journal, fails its test instead of holding up the suite.
 - `tests/e2e-prompt.bats` drives recorded and unrecorded terminals as `tests/e2e-manual.bats`
-  does and checks the S and E lines in `commands.tsv`, the dim stamp in `output.raw`, the
-  journal of a nested zsh, the REC, NOREC and EXT segments, `prompt=off`, `stamp=off`,
-  `NO_COLOR`, and the segment after Ctrl+P twice under the rc built from `/etc/skel/.zshrc`, with
-  the line editor on. It matches only whole notices, the segment and the line end after it, so
-  that the redraws of the line editor do not matter. CI has no iproute2, and its container may
-  have tunnel devices of its own, so each test names a fake sysfs.
+  does and checks the S and E lines in `commands.tsv`, the hidden stamp in `output.raw`, the
+  green banner, the journal of a nested zsh, the REC, NOREC and EXT segments, `prompt=off`,
+  `stamp=on` and `stamp=off`, `NO_COLOR`, and the segment after Ctrl+P twice under the rc built
+  from `/etc/skel/.zshrc`, with the line editor on. It matches only whole notices, the segment and
+  the line end after it, with or without their colour codes, so that the redraws of the line
+  editor do not matter. CI has no iproute2, and its container may have tunnel devices of its own,
+  so each test names a fake sysfs.
+- `tests/stamp-terminals.bats` runs tmux and GNU screen on a script that prints a hidden stamp
+  between two letters, and checks that neither shows any of it, on the screen, in a title or in
+  tmux's status line. QTerminal, xterm and VTE terminals need a display, so check them by hand
+  before a change to the stamp's form: in each, `printf 'A\033]7711;tlogger-stamp
+  2026-11-26T13:20:52Z tun0 192.0.2.10\033\\B\n'` must show `AB` and leave the title as it was.
 - `tests/e2e-auto.bats` does the same for auto mode, on `tests/fixtures/e2e-auto-zshrc`, which
   sets `E2E_RC_DONE` after the tlogger block, so that a test can tell which shell loaded the rest
   of the rc. In auto mode `script` passes on what was typed before it started, so a line typed

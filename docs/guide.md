@@ -32,23 +32,26 @@ where the archive was built; the README's Install section says more.
 terminal is forgotten. `--mode manual` records only after `tlogger start`. Add `--dry-run` to see
 the plan and the change to your `.zshrc` without writing anything.
 
-**Check it.** Open a new terminal. It prints `tlogger: recording session <id>`, and the prompt
-shows `REC`. `tlogger status` names the state, the session, the mode and the log folder.
+**Check it.** Open a new terminal. It prints `tlogger: recording session <id>` in green, and the
+prompt shows `[REC]` in green. `tlogger status` names the state, the session, the mode and the log
+folder.
 
 ## During the engagement
 
 **Work as usual.** Each new terminal is its own session, a folder named after the UTC time it
 started. Everything inside it is recorded: `sudo`, `ssh`, nested shells, reverse shells and
 programs that take over the screen. The journal `commands.tsv` notes each command with its start
-time in UTC, its folder and its exit status, and the prompt shows the UTC time.
+time in UTC, its folder and its exit status, and the prompt shows the UTC time and the VPN
+address. Each command's start time also goes into the recording itself, without showing on the
+screen, and appears as a stamp line in the transcript.
 
 **Pause for anything private.** `tlogger stop` ends the recording, and the prompt shows `NOREC`.
 `tlogger start` records again, in a new session. Nothing typed while the terminal is paused
 reaches the logs.
 
-**Watch the prompt.** `REC` means this terminal is recorded, `NOREC` that it is not, and `EXT`
-that another recorder records it. When a recording cannot start, the terminal says why in red
-and stays usable. Fix the cause, or record by hand with `tlogger start`.
+**Watch the prompt.** `REC` in green means this terminal is recorded, `NOREC` in red that it is
+not, and `EXT` in cyan that another recorder records it. When a recording cannot start, the
+terminal says why in red and stays usable. Fix the cause, or record by hand with `tlogger start`.
 
 ## After the engagement
 
