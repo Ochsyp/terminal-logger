@@ -90,7 +90,8 @@ documentation ranges `192.0.2.0/24`, `198.51.100.0/24` and `203.0.113.0/24`, suc
 
 ## Checks
 
-Run the suite from the repository root:
+Run the suite from the repository root, with bats 1.13.0 or newer, which the standard's
+`.github/standard/tests/lib.bash` needs; `tests/helpers.bash` sources it first:
 
 ```bash
 bats tests/
@@ -200,9 +201,10 @@ bats tests/
   sessions: the pager and its secure mode, the replay keys, Ctrl+C, Ctrl+Z with `fg` and `bg`, and
   the terminal settings they leave. It needs `less`, which only the test container installs; the
   tool itself does not require it.
-- git stores the hooks, `bin/tlogger`, the stubs in `tests/stub-bin` and every `.bats` file as
-  executable files, and the sourced files as plain ones, `libexec/tlogger_view.py` among them; a
-  lint test checks the modes in the index. Where `core.filemode` is false, as on Git for Windows,
+- git stores `bin/tlogger`, the stubs in `tests/stub-bin` and every `.bats` file as executable
+  files, and the sourced files as plain ones, `libexec/tlogger_view.py` among them; a lint test
+  checks the modes in the index, and the standard checks those of the hooks and of `ci/`. Where
+  `core.filemode` is false, as on Git for Windows,
   stage a new executable file with `git add --chmod=+x`, and check the modes with
   `git ls-files -s`.
 - Tests tagged `root` (`# bats test_tags=root`) run only as root and skip otherwise. The other
