@@ -27,9 +27,10 @@ setup() {
     [ "$status" -eq 0 ]
 }
 
-# Print the names in the sessions folder, one per line, sorted.
+# Print the names in the sessions folder but the MANIFEST that sealing writes, one per line,
+# sorted.
 session_names() {
-    find "$SESSIONS" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort
+    find "$SESSIONS" -mindepth 1 -maxdepth 1 ! -name MANIFEST -printf '%f\n' | LC_ALL=C sort
 }
 
 # Set DIR to the only session folder. Fails unless there is exactly one, named as tlogger names
@@ -99,7 +100,7 @@ EOF
     [ "$boot" = "$(cat /proc/sys/kernel/random/boot_id)" ]
 }
 
-@test "the session folder is 0700, every file in it 0600, and timing has H COLUMNS, I and O lines" {
+@test "an ended session is sealed: 0700, every file 0400, its sums in the MANIFEST, and verify ok" {
     drive << 'EOF'
 pty_shell
 pty_begin 'tlogger start'
@@ -110,13 +111,29 @@ pty_out_is shown-in-the-recording || pty_fail "echo printed $PTY_OUT"
 pty_send exit
 pty_end $start
 (( PTY_STATUS == 0 )) || pty_fail "tlogger start returned $PTY_STATUS"
+pty_out_has "tlogger: sealed session $PTY_ID; SHA-256 of its SHA256SUMS: " ||
+    pty_fail 'no notice that the session was sealed'
+pty_run 'tlogger verify'
+pty_out_is "$PTY_ID  ok" || pty_fail "tlogger verify printed $PTY_OUT"
 EOF
+    local sum
     one_session
     [ "$(stat -c %a "$DIR")" = 700 ]
-    # output.raw, input.raw, timing, commands.tsv, recorder, started and exited, each a plain
-    # 0600 file.
-    [ "$(find "$DIR" -mindepth 1 | wc -l)" -eq 7 ]
-    [ -z "$(find "$DIR" -mindepth 1 \( ! -type f -o ! -perm 600 \))" ]
+    # output.raw, input.raw, timing, commands.tsv, recorder, started and exited, and the
+    # SHA256SUMS and SEAL that sealing adds, each a plain 0400 file.
+    [ "$(find "$DIR" -mindepth 1 | wc -l)" -eq 9 ]
+    [ -z "$(find "$DIR" -mindepth 1 \( ! -type f -o ! -perm 400 \))" ]
+    (cd "$DIR" && sha256sum --quiet -c SHA256SUMS)
+    sum=$(sha_of "$DIR/SHA256SUMS")
+    [ "$(cat "$SESSIONS/MANIFEST")" = "$sum  ${DIR##*/}/SHA256SUMS" ]
+    # A byte changed later shows.
+    chmod 600 "$DIR/output.raw"
+    printf 'x' >> "$DIR/output.raw"
+    chmod 400 "$DIR/output.raw"
+    run_tlogger verify "${DIR##*/}"
+    [ "$status" -eq 1 ]
+    [ "$output" = "${DIR##*/}  changed" ]
+    [ "$stderr" = "tlogger: ${DIR##*/}: output.raw changed" ]
     grep -Eq '^H [0-9]+\.[0-9]+ COLUMNS 80$' "$DIR/timing"
     grep -Eq '^H [0-9]+\.[0-9]+ LINES 24$' "$DIR/timing"
     grep -Eq '^I [0-9]+\.[0-9]+ [0-9]+$' "$DIR/timing"
@@ -371,8 +388,11 @@ pty_session
 pty_send 'kill -KILL $$'
 pty_end $start
 (( PTY_STATUS == 1 )) || pty_fail "tlogger start returned $PTY_STATUS, not 1"
-[[ $PTY_OUT == *$'\e[33m'"tlogger: recording ended unexpectedly; session $PTY_ID kept"$'\e[0m\n' ]] ||
+want="tlogger: recording ended unexpectedly; session $PTY_ID kept, not sealed;"
+want+=" tlogger seal $PTY_ID seals it"
+[[ $PTY_OUT == *$'\e[33m'"$want"$'\e[0m\n' ]] ||
     pty_fail 'no yellow notice that the recording ended unexpectedly'
+[[ $PTY_OUT != *'tlogger: sealed session'* ]] || pty_fail 'an unexpected end sealed the session'
 pty_run 'tlogger status'
 pty_out_has 'state: NOREC, this terminal is NOT recorded' || pty_fail 'the outer shell is not NOREC'
 EOF
@@ -393,8 +413,11 @@ pty_session
 pty_send 'kill -KILL $PPID'
 pty_end $start
 (( PTY_STATUS == 1 )) || pty_fail "tlogger start returned $PTY_STATUS, not 1"
-[[ $PTY_OUT == *$'\e[33m'"tlogger: recording ended unexpectedly; session $PTY_ID kept"$'\e[0m'* ]] ||
+want="tlogger: recording ended unexpectedly; session $PTY_ID kept, not sealed;"
+want+=" tlogger seal $PTY_ID seals it"
+[[ $PTY_OUT == *$'\e[33m'"$want"$'\e[0m'* ]] ||
     pty_fail 'no yellow notice that the recording ended unexpectedly'
+[[ $PTY_OUT != *'tlogger: sealed session'* ]] || pty_fail 'a killed recorder sealed the session'
 pty_run 'tlogger status'
 pty_out_has 'state: NOREC, this terminal is NOT recorded' || pty_fail 'the outer shell is not NOREC'
 # Time for the hung-up shell to run its zshexit hook, which must write no exited.

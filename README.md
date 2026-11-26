@@ -3,16 +3,10 @@
 A recorder for zsh terminal sessions on Kali Linux, keystrokes included, as evidence for
 penetration tests.
 
-> **Status:** 0.1.0, the first release. In auto mode every new zsh terminal records itself as its
-> shell starts; in manual mode `tlogger start` records a terminal on request. `tlogger stop`
-> pauses the recording, and `tlogger mode` switches between the modes. A recorded shell journals
-> each command with its start time in UTC, and the prompt shows whether the terminal is recorded.
-> `tlogger render`, `show` and `replay` turn a session into a plain-text transcript, page it and
-> replay it. `tlogger install`, `uninstall` and `status` put the plugin in place and take it out
-> again, and `install` can [replace an older logger](#moving-from-an-older-logger).
-> [CONTRIBUTING.md](CONTRIBUTING.md) describes the workflow, and [CHANGELOG.md](CHANGELOG.md)
-> lists what changed. [docs/guide.md](docs/guide.md) walks through an engagement from start to
-> end.
+The [releases](https://github.com/Ochsyp/terminal-logger/releases) name the current version, and
+[CHANGELOG.md](CHANGELOG.md) lists what each one changed. [docs/guide.md](docs/guide.md) walks
+through an engagement from start to end, and [CONTRIBUTING.md](CONTRIBUTING.md) describes the
+workflow.
 
 ## What it will do
 
@@ -32,9 +26,10 @@ The finished `tlogger` command:
   with no tmux anywhere; this version does both, as [Viewing a session](#viewing-a-session)
   describes;
 - seals a finished session with SHA-256 sums, which expose a later change only while a copy of
-  the sums is kept apart from the logs;
+  the sums is kept apart from the logs; this version does so as each recording ends, as
+  [Sealing and verifying](#sealing-and-verifying) describes;
 - keeps its logs under `~/.local/state/tlogger`, with mode 0700 for directories and 0600 for
-  files.
+  files, 0400 once sealed.
 
 ## Install
 
@@ -186,9 +181,10 @@ the rc backups, always stays: delete it by hand when the rules of the engagement
 | Status | Meaning |
 |---|---|
 | 0 | Done, or nothing to change |
-| 1 | An error or a refusal; a refusal changes nothing. For `status`: installed only in part |
+| 1 | An error or a refusal; a refusal changes nothing. For `status`: installed only in part. For `verify`: a sealed session changed |
 | 2 | A usage error, or `--mode` or `--yes` missing outside a terminal |
 | 3 | Not installed, nothing to remove, or no session to view |
+| 4 | For `verify`: nothing changed, but a finished session is not sealed |
 
 ## Recording
 
@@ -325,10 +321,11 @@ transcript, and `tlogger replay` drops it:
 non-empty value; `stamp=off` writes no stamp. Either way, `commands.tsv` keeps the start of every
 command. A config that sets `stamp=off` to hide the visible line of 0.1.0 keeps it; change it to
 `stamp=hidden`, or remove the line, to keep the stamps in the recording. tmux and GNU screen show
-nothing of a hidden stamp, neither in the pane nor in a title or status line, as the tests check;
-xterm and VTE terminals, such as GNOME Terminal, are documented to ignore OSC strings they do not
-know, and CONTRIBUTING.md has the hand check for them and QTerminal. A terminal that shows
-`]7711;` or `tlogger-stamp` text after each command needs `stamp=off`.
+nothing of a hidden stamp, neither in the pane nor in a title or status line, as the tests check.
+QTerminal, Kali's default terminal, hides it too; checked by hand on 2026-11-26. xterm and VTE
+terminals, such as GNOME Terminal, are documented to ignore OSC strings they do not know, and
+CONTRIBUTING.md has the hand check for them. A terminal that shows `]7711;` or `tlogger-stamp`
+text after each command needs `stamp=off`.
 
 Every shell where the plugin loaded shows a segment in its prompt, which it builds again before
 each prompt: the UTC time, the VPN list and the state, each in brackets of its own and in its
@@ -463,7 +460,7 @@ notice too. In auto mode the terminal then stays open, and the rest of the rc lo
 ## Viewing a session
 
 `output.raw` with `timing` is the evidence: what the terminal showed, and when. tlogger never
-writes, moves or renames them. Three commands read them:
+writes, moves or renames them; sealing only makes them read-only. Three commands read them:
 
 | Command | What it does |
 |---|---|
@@ -581,6 +578,42 @@ with more than six fraction digits, are left out too, with a warning.
 > **Warning:** never replay these logs with `scriptlive`: it runs the recorded input again, every
 > command of the session, in a new shell. Do not `cat` `output.raw` to a terminal either, which
 > sends the target's escape sequences to it unfiltered; use `tlogger replay` or `tlogger show`.
+
+## Sealing and verifying
+
+A recording that ends normally, with `exit`, Ctrl+D or `tlogger stop`, is sealed at once, and the
+terminal names its sum:
+
+```text
+tlogger: sealed session 20261104T101500Z-a1B2c3; SHA-256 of its SHA256SUMS: 9f86d0…
+```
+
+Sealing writes `SHA256SUMS` in the session folder, with the SHA-256 of each log and marker, makes
+those files and `SHA256SUMS` read-only (0400), writes `SEAL`, 0400, with the tlogger version, the
+UTC time and the SHA-256 of `SHA256SUMS`, and flushes them to the disk. It then adds the line
+`<SHA-256 of SHA256SUMS>  <session>/SHA256SUMS` to `MANIFEST` in the folder that holds the
+session, the log folder for a session id, so that `sha256sum -c MANIFEST` there and
+`sha256sum -c SHA256SUMS` in a session folder check them with standard tools. When that line
+cannot be written, as with a read-only `MANIFEST`, the session is sealed without it, and
+`tlogger seal` on it adds the line later. The folder itself stays 0700, so that `render` can
+still write `transcript.txt`, which is derived and not sealed.
+
+| Command | What it does |
+|---|---|
+| `tlogger seal [SESSION \| --all]` | Seals a session whose recording has ended, by default the newest; `--all` seals every ended session of the log folder and names the ones still recorded |
+| `tlogger verify [SESSION \| --all]` | Prints `<session>  ok`, `changed`, `unsealed` or `recording` for the session, or for every session with `--all`, and names each change on stderr: a log changed, missing or no longer 0400, a file the seal does not cover, or `SHA256SUMS` that matches neither its `SEAL` nor its `MANIFEST` line |
+| `tlogger list` | Lists the sessions of the log folder, oldest first: state (`recording`, `ended`, `sealed`, `changed`, or `unknown` without a recorder file), start in UTC, recorded time, number of commands, and whether a transcript exists |
+
+`seal` refuses a session whose recorder still runs, which it tells from the `recorder` file: the
+process, its start time and the boot it ran in. It refuses one without that file, and a folder
+that holds a symlink, another user's file or an entry that no session holds. A recording that
+ended unexpectedly is not sealed by itself; its notice says to run `tlogger seal`. `verify` exits
+0 when nothing changed and every finished session is sealed, 1 when a sealed session changed, and
+4 when a finished session is not sealed yet; a session still recorded does not count.
+
+> **Note:** the sums show a later change only against a copy kept apart from the logs. Anyone who
+> can write the log folder can also rewrite `SHA256SUMS`, `SEAL` and `MANIFEST` together. Note the
+> sum that the terminal prints, or keep a copy of `MANIFEST`, in the engagement's records.
 
 ## Security
 

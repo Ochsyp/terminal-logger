@@ -64,7 +64,7 @@ pty_end $start
 EOF
     local id dir transcript f before after
     local -A sums=()
-    id=$(find "$SESSIONS" -mindepth 1 -maxdepth 1 -printf '%f\n')
+    id=$(find "$SESSIONS" -mindepth 1 -maxdepth 1 ! -name MANIFEST -printf '%f\n')
     [[ $id =~ ^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9]{6}$ ]]
     dir="$SESSIONS/$id"
     transcript="$dir/transcript.txt"

@@ -30,9 +30,10 @@ setup() {
     [ -z "$(session_names)" ]
 }
 
-# Print the names in the sessions folder, one per line, sorted.
+# Print the names in the sessions folder but the MANIFEST that sealing writes, one per line,
+# sorted.
 session_names() {
-    find "$SESSIONS" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort
+    find "$SESSIONS" -mindepth 1 -maxdepth 1 ! -name MANIFEST -printf '%f\n' | LC_ALL=C sort
 }
 
 # Set DIR to the only session folder. Fails unless there is exactly one, named as tlogger names
@@ -112,7 +113,7 @@ EOF
     # The line as typed; only input.raw holds it in this form.
     # shellcheck disable=SC2016
     grep -qF 'echo e2e-typed-in-auto-$((6*7))' "$DIR/input.raw"
-    # The shell that recorded closes without a notice.
+    # The shell that recorded closes without the notice that the recording ended.
     run ! grep -qF 'tlogger: recording ended' "$SCREEN"
     run ! grep -qF 'handshake failed' "$SCREEN"
 }

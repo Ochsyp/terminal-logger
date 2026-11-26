@@ -65,10 +65,17 @@ use the newest session.
   change the speed, Ctrl+C stops and Ctrl+Z suspends it until `fg`. `--speed 2` plays it twice
   as fast, and `--maxdelay 1` shortens every pause to at most a second.
 
+**Check the seals.** Each session was sealed as its recording ended, and the terminal printed
+its sum. `tlogger list` shows every session and its state. `tlogger seal --all` seals the ones
+that ended unexpectedly, and `tlogger verify --all` checks every sealed session; it must print
+`ok` for each. Keep a copy of `MANIFEST` from the log folder, or the sums the terminal printed,
+with the engagement's records, apart from the logs: only that copy shows a later change.
+
 **Keep the evidence.** `output.raw` with `timing` and `input.raw`, and `commands.tsv`, are the
 evidence. The transcript is derived from them, and its first line says so. Do not edit the
-logs. Copy the session folders to the engagement's encrypted archive. Never put a log into a
-repository, a ticket or an unencrypted report: it holds every password typed.
+logs; once sealed, they are read-only. Copy the session folders, with `MANIFEST`, to the
+engagement's encrypted archive. Never put a log into a repository, a ticket or an unencrypted
+report: it holds every password typed.
 
 **Remove the recorder when you are done.** `tlogger uninstall` takes the block out of your
 `.zshrc` and removes the plugin. Your logs and the backups of your `.zshrc` stay.
