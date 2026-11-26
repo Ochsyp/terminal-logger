@@ -25,8 +25,8 @@ for penetration tests.
   and the `disable` file, a missing or old `script`, a log folder that is unusable or that other
   users may write in, and too little free space.
 - A command journal, `commands.tsv`, with each command's start time in UTC, folder, VPN addresses
-  and exit status; a dim stamp before each command; and a `[<UTC> <VPN list> REC]` segment in the
-  prompt (`REC`, `NOREC` or `EXT`). Kali's own prompt stays as it is.
+  and exit status; a dim stamp before each command; and a `[<UTC> <VPN list> <state>]` segment in
+  the prompt, with the state `REC`, `NOREC` or `EXT`. Kali's own prompt stays as it is.
 - A config under `~/.config/tlogger`, read as data, with `TLOGGER_<KEY>` variables that win over
   it: `record_input`, `min_free_mb`, `prompt`, `stamp`, `stamp_vpn`, `vpn_ifaces`,
   `history_timestamps` and the mode keys.

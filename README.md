@@ -58,8 +58,9 @@ cd terminal-logger-X.Y.Z
 
 `sha256sum -c` must print `OK` for the archive. `gh attestation verify` proves that this
 repository's `release` workflow built the archive from `main`; it needs `gh`, signed in once with
-`gh auth login`. Without `gh`, download the two assets from the release page and check the
-attestation there.
+`gh auth login`. Without `gh`, download the two assets from the release page; `sha256sum -c`
+then still proves that the download matches the release, but nothing proves where the archive
+was built.
 
 `install` copies the release to `~/.local/share/tlogger/releases/X.Y.Z` and points
 `~/.local/share/tlogger/current` at it, so the unpacked folder can go afterwards. It keeps the
@@ -75,8 +76,9 @@ For development, install from a checkout of this repository in the same way:
 bin/tlogger install --mode auto
 ```
 
-A checkout installs under the version in `VERSION`, which ends in `-dev` between releases, so it
-never passes for a released version.
+A checkout installs under the version in `VERSION`. On `main` it ends in `-dev`, except from the
+merge of a release until the next pull request raises it, so a checkout rarely names a released
+version, and never holds a release's manifest.
 
 ### What install does
 
