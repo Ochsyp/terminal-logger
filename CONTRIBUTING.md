@@ -370,3 +370,36 @@ GitHub Actions builds each release, and the maintainer publishes it in the brows
 Sessions prepare release pull requests. They never create a tag, and never publish, edit or
 delete a release.
 <!-- standard:end releasing -->
+
+## Release contract
+
+A release of terminal-logger is a GitHub release `vX.Y.Z` with two assets:
+
+- `terminal-logger-X.Y.Z.tar.gz`, the standard's generic archive of the release commit;
+- `SHA256SUMS`, the SHA-256 of the archive.
+
+The archive holds one folder, `terminal-logger-X.Y.Z/`, with exactly these entries:
+
+- `bin/tlogger`, executable, and `lib/` and `libexec/`, the files that `tlogger install` copies;
+- `VERSION`, which holds `X.Y.Z`;
+- `docs/guide.md`, `README.md`, `CHANGELOG.md`, `SECURITY.md` and `LICENSE`;
+- `terminal-logger-release.json`, the manifest the build adds: schema 1, with the name, the
+  version, the tag and the commit.
+
+`ci/release-check` stops a build unless the archive holds exactly that, `bin/tlogger` is
+executable, and `VERSION` and the manifest both name the version being built. The `release`
+workflow builds the archive twice as a dry run on each pull request that touches `VERSION`, the
+config, `.gitattributes` or the release files, and `tests/release-check.bats` checks the archive
+of HEAD in every test run. Tests, CI files and tooling stay out through the `export-ignore` lines
+of `.gitattributes`.
+
+A user installs a release on their own machine, never a host for others. They check the
+download first: `sha256sum -c SHA256SUMS`, and `gh attestation verify` on the archive, which
+proves that this repository's `release.yml` built it from `main`. Then they unpack it anywhere
+and run `./bin/tlogger install` in the folder. That copies the release files to
+`~/.local/share/tlogger/releases/X.Y.Z`, points `~/.local/share/tlogger/current` at it, and
+keeps the release before it. It refuses an unpacked release whose manifest names another version
+than its `VERSION`, and it refuses to replace a newer release.
+
+After each release, the first pull request sets `VERSION` to `X.Y.(Z+1)-dev`. An install from a
+checkout is named after `VERSION`, so a checkout never passes for a released version.

@@ -11,7 +11,8 @@ penetration tests.
 > `tlogger install`, `uninstall` and `status` put the plugin in place and take it out again, and
 > `install` can [replace an older logger](#moving-from-an-older-logger).
 > [CONTRIBUTING.md](CONTRIBUTING.md) describes the workflow, and [CHANGELOG.md](CHANGELOG.md)
-> lists what changed.
+> lists what changed. [docs/guide.md](docs/guide.md) walks through an engagement from start to
+> end.
 
 ## What it will do
 

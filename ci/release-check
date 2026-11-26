@@ -1,0 +1,90 @@
+#!/bin/bash
+# ci/release-check of terminal-logger (the standard's ci/ interface): the standard's release-build
+# runs it on every archive it builds, dry runs included, before anything is drafted. It unpacks
+# ARCHIVE and checks the release contract in CONTRIBUTING.md: one folder terminal-logger-VERSION/,
+# holding every file tlogger install copies and the documents, and no other entry; bin/tlogger
+# executable; VERSION and the release manifest naming VERSION. It runs on a runner without zsh, so
+# tests/release-check.bats installs from an unpacked archive on Kali instead.
+#   ci/release-check --archive FILE --version X.Y.Z
+# Exit 0 when the archive keeps the contract, 1 when it does not, 64 usage.
+set -euo pipefail
+
+name=terminal-logger
+manifest=$name-release.json
+# The entries of the release folder, beside the files of bin/tlogger's RELEASE_FILES.
+allowed=(bin lib libexec docs VERSION README.md CHANGELOG.md SECURITY.md LICENSE "$manifest")
+documents=(docs/guide.md README.md CHANGELOG.md SECURITY.md LICENSE "$manifest")
+
+usage() {
+    echo "usage: ci/release-check --archive FILE --version X.Y.Z" >&2
+    exit 64
+}
+
+fail() {
+    printf 'ci/release-check: %s\n' "$*" >&2
+    status=1
+}
+
+archive='' version=''
+while (( $# )); do
+    case $1 in
+        --archive) [[ -n ${2:-} ]] || usage; archive=$2; shift ;;
+        --version) [[ -n ${2:-} ]] || usage; version=$2; shift ;;
+        *) usage ;;
+    esac
+    shift
+done
+[[ -n $archive && -n $version ]] || usage
+[[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+(-dev)?$ ]] || usage
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+# --force-local reads a path with a drive letter, as Git Bash passes it, as a file name.
+if ! tar --force-local -xzf "$archive" -C "$tmp" 2> /dev/null; then
+    printf 'ci/release-check: cannot unpack %s\n' "$archive" >&2
+    exit 1
+fi
+
+status=0
+shopt -s dotglob nullglob
+top=("$tmp"/*)
+top=("${top[@]##*/}")
+if [[ ${#top[@]} -ne 1 || ${top[0]} != "$name-$version" ]]; then
+    printf 'ci/release-check: the archive holds %s, not the one folder %s/\n' "${top[*]}" \
+        "$name-$version" >&2
+    exit 1
+fi
+tree=$tmp/$name-$version
+
+# Every entry of the folder must be allowed: tests, CI files and tooling stay out.
+for entry in "$tree"/*; do
+    entry=${entry##*/}
+    if [[ " ${allowed[*]} " != *" $entry "* ]]; then
+        fail "the archive holds $entry, which no release holds"
+    fi
+done
+# docs/ holds the guide and nothing else.
+for entry in "$tree"/docs/*; do
+    [[ ${entry##*/} == guide.md ]] ||
+        fail "the archive holds docs/${entry##*/}, which no release holds"
+done
+shopt -u dotglob
+
+# The files that install copies, as bin/tlogger lists them, and the documents.
+mapfile -t files < <(bash -c '. "$1" && printf "%s\n" "${RELEASE_FILES[@]}"' _ "$tree/bin/tlogger" \
+    2> /dev/null) || files=()
+(( ${#files[@]} > 0 )) || fail "cannot read RELEASE_FILES from bin/tlogger"
+for file in "${files[@]}" "${documents[@]}"; do
+    [[ -f $tree/$file ]] || fail "the archive lacks $file"
+done
+[[ -x $tree/bin/tlogger ]] || fail "bin/tlogger is not executable"
+
+if [[ -f $tree/VERSION && $(< "$tree/VERSION") != "$version" ]]; then
+    fail "VERSION holds $(head -c 40 "$tree/VERSION"), not $version"
+fi
+if [[ -f $tree/$manifest ]]; then
+    for field in "\"name\": \"$name\"" "\"version\": \"$version\"" "\"tag\": \"v$version\""; do
+        grep -qF -- "$field" "$tree/$manifest" || fail "the manifest $manifest lacks $field"
+    done
+fi
+exit "$status"

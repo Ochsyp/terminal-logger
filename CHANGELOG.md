@@ -104,6 +104,12 @@ All notable changes to this project are listed here. The format follows
 - `tests/e2e-view-tty.bats` runs `tlogger show` and `replay` in a real pseudo-terminal: the pager
   and its secure mode, the replay keys, Ctrl+C and the terminal they leave. The CI test job
   installs `less` for it; what the tool needs on a user's machine does not change.
+- `ci/release-check`, which the standard's release build runs on every archive, dry runs
+  included: it stops any build whose archive breaks the new Release contract in CONTRIBUTING.md
+  (phase 7)
+- `tlogger install` refuses an unpacked release whose manifest names another version than its
+  `VERSION` (phase 7)
+- `docs/guide.md`: an engagement from start to end, with the README as the reference (phase 7)
 
 ### Changed
 
