@@ -7,6 +7,11 @@ Each version is the GitHub release `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Changed
+
+- `VERSION` is `0.2.1-dev` after the release of 0.2.0, so an install from a checkout of `main`
+  names a development version again.
+
 ## [0.2.0] - 2026-11-26
 
 Sealed sessions, the older logger's prompt, and the first sealed release.
