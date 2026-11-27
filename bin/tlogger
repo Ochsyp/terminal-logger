@@ -2918,16 +2918,12 @@ network_type() {
     return 1
 }
 
-# Run COMMAND with its arguments, under timeout 5 when NET is 1: on a network file system that
-# no longer answers, a command that touches a path would hang.
+# Run COMMAND with its arguments under timeout: 5 seconds, then SIGKILL 2 seconds later. Every
+# command of doctor that touches the log folder's path runs through it, whatever the file system:
+# a network share, a FUSE remote or a failing disk that stops answering would hang it otherwise.
+# Exits as COMMAND does, or 124 or 137 when the time ran out.
 doctor_tool() {
-    local net=$1
-    shift
-    if (( net )); then
-        timeout 5 "$@"
-    else
-        "$@"
-    fi
+    timeout -k 2 5 "$@"
 }
 
 # Set PLACE_REAL, PLACE_ROW, PLACE_AUTOFS and PLACE_NET for the folder PATH: its real path, with
@@ -2936,11 +2932,11 @@ doctor_tool() {
 # The path is resolved one part at a time, by readlink on each symlink, up to 40 of them, and
 # readlink -m on the result. A part that lies on an automount point not mounted yet, as written
 # or reached through a symlink, ends it, with the rest kept as written: looking into that point
-# would mount it, and for LUKS could ask for a passphrase. On a network file system, a part is
-# only looked at under timeout.
+# would mount it, and for LUKS could ask for a passphrase. A part is only looked at through
+# doctor_tool, under timeout.
 doctor_place() {
     local rest=$1 cur=/ next part target real tail=''
-    local -i links=0 net link
+    local -i links=0 link
     PLACE_AUTOFS=0 PLACE_NET=0 PLACE_ROW=-1
     while [[ -n $rest ]]; do
         part=${rest%%/*}
@@ -2966,14 +2962,8 @@ doctor_place() {
             tail=$part${rest:+/$rest}
             break
         fi
-        mount_row_of "$next"
-        net=0 link=0
-        if (( ROW >= 0 )) && network_type "${MI_TYPE[ROW]}"; then
-            net=1
-            if doctor_tool 1 test -L "$next" 2> /dev/null; then
-                link=1
-            fi
-        elif [[ -L $next ]]; then
+        link=0
+        if doctor_tool test -L "$next" 2> /dev/null; then
             link=1
         fi
         if (( link )); then
@@ -2981,7 +2971,7 @@ doctor_place() {
                 tail=$part${rest:+/$rest}
                 break
             fi
-            target=$(doctor_tool "$net" readlink -- "$next" 2> /dev/null) || target=
+            target=$(doctor_tool readlink -- "$next" 2> /dev/null) || target=
             if [[ -n $target ]]; then
                 links+=1
                 if [[ $target == /* ]]; then
@@ -2993,12 +2983,7 @@ doctor_place() {
         fi
         cur=$next
     done
-    mount_row_of "$cur"
-    net=0
-    if (( ROW >= 0 )) && network_type "${MI_TYPE[ROW]}"; then
-        net=1
-    fi
-    real=$(doctor_tool "$net" readlink -m -- "$cur" 2> /dev/null) || real=
+    real=$(doctor_tool readlink -m -- "$cur" 2> /dev/null) || real=
     cur=${real:-$cur}
     if [[ -n $tail ]]; then
         PLACE_REAL=${cur%/}/$tail
@@ -3069,22 +3054,20 @@ fstab_unmounted() {
 
 # Set REPLY, for the log folder DIR on a volume that is not mounted, to a note on what already
 # lies there on the disk beneath: its number of entries, or nothing when it is no folder. Lists
-# the folder and reads none of its files. Nothing when doctor_place found the folder on an
-# automount point not mounted yet, which the listing would mount, or on a network file system,
-# where it could hang.
+# the folder, under timeout, and reads none of its files. Nothing when doctor_place found the
+# folder on an automount point not mounted yet, which the listing would mount, or on a network
+# file system.
 shadow_note() {
-    local e
+    local dots
     local -i n=0
     REPLY=
     if (( PLACE_AUTOFS || PLACE_NET )); then
         return 0
     fi
-    if [[ -d $1 && ! -L $1 ]]; then
-        for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
-            if [[ -e $e || -L $e ]]; then
-                n+=1
-            fi
-        done
+    if doctor_tool test -d "$1" && ! doctor_tool test -L "$1"; then
+        # One dot per entry: a name may hold any byte but a / and a NUL.
+        dots=$(doctor_tool find "$1/" -mindepth 1 -maxdepth 1 -printf . 2> /dev/null) || return 0
+        n=${#dots}
         REPLY="; the log folder already exists on the disk beneath it, with $n"
         if (( n == 1 )); then
             REPLY+=" entry"
@@ -3203,8 +3186,8 @@ doctor_not_yet() {
 
 # Print the folder check of DIR, placed by doctor_place: it must be a real folder of this user's,
 # not a symlink, with no group or other bits in its mode. A missing DIR is ok when CREATE is 1,
-# as the first recording creates it, else a warning. One stat names DIR, under timeout on a
-# network file system; it changes nothing.
+# as the first recording creates it, else a warning. One stat names DIR, under timeout; it
+# changes nothing.
 doctor_folder() {
     local dir=$1 info hex uid mode
     local -i create=$2 rc=0 kind
@@ -3212,14 +3195,14 @@ doctor_folder() {
         doctor_not_yet folder
         return 0
     fi
-    info=$(doctor_tool "$PLACE_NET" stat -c '%f %u %a' -- "$dir" 2> /dev/null) || rc=$?
-    if (( rc == 124 )); then
-        doctor_line unknown folder "its network file system did not answer within 5 seconds"
+    info=$(doctor_tool stat -c '%f %u %a' -- "$dir" 2> /dev/null) || rc=$?
+    if (( rc == 124 || rc == 137 )); then
+        doctor_line unknown folder "its file system did not answer within 5 seconds; check that" \
+            "its volume works"
         return 0
     fi
     if (( rc != 0 )); then
-        if doctor_tool "$PLACE_NET" test -e "$dir" || doctor_tool "$PLACE_NET" test -L "$dir"
-        then
+        if doctor_tool test -e "$dir" || doctor_tool test -L "$dir"; then
             doctor_line unknown folder "doctor cannot look at it; check its owner and mode by hand"
         elif (( create )); then
             doctor_line ok folder "does not exist yet; the first recording creates it, mode 700"
@@ -3437,9 +3420,9 @@ doctor_encryption() {
 # folder is a private real folder of this user's, whether its file system keeps Unix permissions
 # and whether its storage is encrypted. Prints one line per check, ok, warn or unknown, and a
 # last line. Reads TLOGGER_PROC/self/mountinfo, TLOGGER_SYSFS, TLOGGER_FSTAB and folder modes,
-# and runs only readlink, stat and timeout, found through PATH, and no root tool. It touches
-# nothing on an automount point that is not mounted yet, and runs every command that touches a
-# path on a network file system under timeout 5. A config error is a warning, and the default
+# and runs only readlink, stat, test, find and timeout, found through PATH, and no root tool. It
+# touches nothing on an automount point that is not mounted yet, and runs every command that
+# touches the folder's path under timeout, 5 seconds. A config error is a warning, and the default
 # log folder is checked instead. Exits 0 when every check is ok, 1 on any warn or unknown, 2 on
 # a usage error.
 cmd_doctor() {
@@ -3482,7 +3465,7 @@ cmd_doctor() {
     # already, without logdir_mount, or that it creates itself.
     eng_create=$create
     if [[ -z $mount ]] && (( ! create && ! PLACE_AUTOFS )) &&
-        doctor_tool "$PLACE_NET" test -d "$logdir" && ! doctor_tool "$PLACE_NET" test -L "$logdir"
+        doctor_tool test -d "$logdir" && ! doctor_tool test -L "$logdir"
     then
         eng_create=1
     fi

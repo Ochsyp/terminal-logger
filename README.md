@@ -583,7 +583,9 @@ encryption found" is a warning that you check by hand.
 Doctor only reads: `/proc/self/mountinfo`, `/sys`, `/etc/fstab` and the folder modes. It creates
 no folder, writes no file and runs no root tool, such as `cryptsetup` or `blkid`. It does not
 touch a path behind an automount point that is not mounted yet, since that could mount it and ask
-for a passphrase, and it reads a network file system only under `timeout 5`.
+for a passphrase. Every look it takes at the folder's path runs under `timeout`, so a network
+share, a FUSE remote or a disk that stops answering gives `unknown` after 5 seconds instead of a
+hang.
 
 ## Viewing a session
 

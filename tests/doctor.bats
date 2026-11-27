@@ -545,8 +545,9 @@ assert_doctor() {
     assert_check log folder unknown 'not mounted yet'
     assert_check log permissions unknown 'not mounted yet'
     assert_check log encryption unknown 'not mounted yet'
-    # Touching the path would mount it, and for LUKS could ask for a passphrase.
-    grep -q '^readlink'$'\t' "$CALLS"
+    # Touching the path would mount it, and for LUKS could ask for a passphrase. The stand-ins
+    # ran: doctor resolved the folders above the automount point, under timeout.
+    grep -qE '^readlink( under timeout)?'$'\t' "$CALLS"
     [ -z "$(calls_on "$V/evidence")" ]
 }
 

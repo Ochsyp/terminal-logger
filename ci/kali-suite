@@ -47,12 +47,16 @@ git clone --quiet /src /work-root
 useradd -m "$TEST_USER"
 chown -R "$TEST_USER:" /work-user
 
+# A test that hangs fails after this many seconds, under its own name, instead of running the
+# job into its time limit; the whole suite takes about five minutes.
+limit=180
 status=0
 (cd /work-user &&
-    runuser -u "$TEST_USER" -- env TLOGGER_CI=1 bats --tap --filter-tags '!root' tests/) |
+    runuser -u "$TEST_USER" -- env TLOGGER_CI=1 BATS_TEST_TIMEOUT=$limit \
+        bats --tap --filter-tags '!root' tests/) |
     tee /tap/user.tap || status=1
-(cd /work-root && TLOGGER_CI=1 bats --tap --filter-tags root tests/) | tee /tap/root.tap ||
-    status=1
+(cd /work-root && TLOGGER_CI=1 BATS_TEST_TIMEOUT=$limit bats --tap --filter-tags root tests/) |
+    tee /tap/root.tap || status=1
 
 # A filter that selects too little passes with fewer tests, so the two runs together must cover
 # the whole suite, and the root run at least one test.
