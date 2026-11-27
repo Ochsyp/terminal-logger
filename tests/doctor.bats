@@ -583,6 +583,16 @@ assert_doctor() {
     assert_check engagement folder ok 'exists, yours, mode 700'
 }
 
+@test "a missing engagement folder warns when no recording would create its log folder either" {
+    root_on_lvm
+    write_config "logdir=$V/work/tlogger"$'\n'$'engagement=acme\n'
+    run_tlogger doctor
+    assert_doctor 1
+    assert_check log folder warn 'does not exist yet; a recording refuses'
+    assert_check engagement folder warn 'does not exist yet; a recording refuses'
+    [ ! -e "$V/work" ]
+}
+
 @test "an engagement folder on another mount gets the volume, permissions and encryption checks" {
     volume_at ext4 254:0 "$LUKS_SOURCE"
     printf 'engagement=acme\n' >> "$CONF/config"

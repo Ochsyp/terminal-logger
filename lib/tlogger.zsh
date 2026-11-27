@@ -939,7 +939,7 @@ _tlogger_preexec() {
 _tlogger_precmd() {
     local -i st=$?
     emulate -L zsh
-    local REPLY utc shown vpn= field= min
+    local REPLY utc shown vpn= field= min where
     local -a reply f
     local -i now=$EPOCHSECONDS
     if [[ -n ${_tlogger_cmd-} ]]; then
@@ -957,7 +957,12 @@ _tlogger_precmd() {
         fi
         # _tlogger_df forks df, which the 300 seconds keep rare.
         if _tlogger_df k $TLOGGER_SESSION && (( reply[2] < min * 1024 )); then
-            _tlogger_shown ${_tlogger_cfg[logdir]-}
+            # The folder that holds the session: the log folder, or an engagement folder in it.
+            where=${_tlogger_cfg[logdir]-}
+            if [[ -n $where && ${TLOGGER_SESSION:h:h} == "$where" ]]; then
+                where=${TLOGGER_SESSION:h}
+            fi
+            _tlogger_shown $where
             _tlogger_say yellow "warning: less than $min MB free in $REPLY; the recording goes on"
         fi
     fi

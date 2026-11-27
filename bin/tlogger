@@ -3444,7 +3444,7 @@ doctor_encryption() {
 # a usage error.
 cmd_doctor() {
     local logdir mount='' engagement='' dir summary
-    local -i log_row create=0
+    local -i log_row create=0 eng_create=0
     case ${1-} in
         -h | --help) usage; exit 0 ;;
     esac
@@ -3478,6 +3478,14 @@ cmd_doctor() {
         create=1
     fi
     doctor_folder "$logdir" "$create"
+    # The first recording creates a missing engagement folder only in a log folder that is there
+    # already, without logdir_mount, or that it creates itself.
+    eng_create=$create
+    if [[ -z $mount ]] && (( ! create && ! PLACE_AUTOFS )) &&
+        doctor_tool "$PLACE_NET" test -d "$logdir" && ! doctor_tool "$PLACE_NET" test -L "$logdir"
+    then
+        eng_create=1
+    fi
     doctor_permissions
     doctor_encryption "$logdir"
     if [[ -n $CONFIG_ERROR ]]; then
@@ -3488,7 +3496,7 @@ cmd_doctor() {
         dir=${logdir%/}/$engagement
         printf '  %-21s %s\n' engagement "$engagement; new sessions go into $(shown "$dir")"
         doctor_place "$dir"
-        doctor_folder "$dir" 1
+        doctor_folder "$dir" "$eng_create"
         if (( PLACE_ROW != log_row )); then
             doctor_engagement_volume
             doctor_permissions
