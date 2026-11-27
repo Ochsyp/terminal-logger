@@ -28,13 +28,32 @@ setup() {
 }
 
 # Print the names in the sessions folder but the MANIFEST that sealing writes, one per line,
-# sorted.
+# sorted. A real folder in it that is not named as a session is an engagement folder: its own
+# entries, but its MANIFEST, take its place, each as ENGAGEMENT/NAME, and an empty one prints
+# nothing.
 session_names() {
-    find "$SESSIONS" -mindepth 1 -maxdepth 1 ! -name MANIFEST -printf '%f\n' | LC_ALL=C sort
+    local entry name sub
+    local id_re='^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9]{6}$' skip_re='^(MANIFEST|\.|\.\.)$'
+    for entry in "$SESSIONS"/* "$SESSIONS"/.*; do
+        name=${entry##*/}
+        if [[ $name =~ $skip_re || ! ( -e $entry || -L $entry ) ]]; then
+            continue
+        fi
+        if [[ -d $entry && ! -L $entry && ! $name =~ $id_re ]]; then
+            for sub in "$entry"/* "$entry"/.*; do
+                if [[ ! ${sub##*/} =~ $skip_re && ( -e $sub || -L $sub ) ]]; then
+                    printf '%s/%s\n' "$name" "${sub##*/}"
+                fi
+            done
+        else
+            printf '%s\n' "$name"
+        fi
+    done | LC_ALL=C sort
 }
 
-# Set DIR to the only session folder. Fails unless there is exactly one, named as tlogger names
-# sessions: the UTC time, then 6 random characters.
+# Set DIR to the only session folder, in the sessions folder or in an engagement folder in it.
+# Fails unless there is exactly one, named as tlogger names sessions: the UTC time, then 6 random
+# characters.
 one_session() {
     local -a names
     mapfile -t names < <(session_names)
@@ -42,8 +61,28 @@ one_session() {
         printf 'expected one session folder, found %s: %s\n' "${#names[@]}" "${names[*]}" >&2
         return 1
     fi
-    [[ ${names[0]} =~ ^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9]{6}$ ]]
+    [[ ${names[0]##*/} =~ ^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9]{6}$ ]]
     DIR="$SESSIONS/${names[0]}"
+}
+
+# Start the shell, run tlogger start, wait for the recording, type exit, and fail unless tlogger
+# start returned 0 after the recording ended.
+start_and_exit() {
+    drive << 'EOF'
+pty_shell
+pty_begin 'tlogger start'
+start=$REPLY
+pty_session
+pty_send exit
+pty_end $start
+(( PTY_STATUS == 0 )) || pty_fail "tlogger start returned $PTY_STATUS after exit"
+EOF
+}
+
+# Set the config line KEY=VALUE in place of every KEY= line the config has.
+config_set() {
+    sed -i "/^$1=/d" "$CONFIG"
+    printf '%s=%s\n' "$1" "$2" >> "$CONFIG"
 }
 
 # Start the shell with the NAME=VALUE arguments in its environment and run tlogger start, which
@@ -490,4 +529,128 @@ EOF
     [ -f "$DIR/started" ]
     [ -f "$DIR/stop-requested" ]
     [ -f "$DIR/exited" ]
+}
+
+@test "with an engagement, the session lies in its folder, sealed into its MANIFEST, and is named" {
+    config_set engagement acme
+    drive << 'EOF'
+pty_shell
+# The engagement folder is private whatever the umask.
+pty_run 'umask 022'
+pty_run 'tlogger status'
+pty_out_has 'engagement: acme' ||
+    pty_fail 'tlogger status in the outer shell does not show the engagement'
+pty_begin 'tlogger start'
+start=$REPLY
+pty_session
+want="tlogger: recording session $PTY_ID; everything typed and shown is saved, passwords included;"
+want+=" tlogger stop pauses; engagement acme"
+[[ $PTY_BANNER == "$want" ]] || pty_fail "the banner is: $PTY_BANNER"
+pty_run 'tlogger status'
+pty_out_has "state: REC $PTY_ID" || pty_fail 'tlogger status in the recorded shell does not say REC'
+pty_out_has 'engagement: acme' ||
+    pty_fail 'tlogger status in the recorded shell does not show the engagement'
+pty_run 'print -r -- ${TLOGGER_SESSION#$HOME/}'
+pty_out_is ".local/state/tlogger/sessions/acme/$PTY_ID" ||
+    pty_fail "the session does not lie in the engagement folder: $PTY_OUT"
+pty_send exit
+pty_end $start
+(( PTY_STATUS == 0 )) || pty_fail "tlogger start returned $PTY_STATUS"
+pty_out_has "tlogger: sealed session $PTY_ID; SHA-256 of its SHA256SUMS: " ||
+    pty_fail 'no notice that the session was sealed'
+pty_run 'tlogger verify'
+pty_out_is "$PTY_ID  ok" || pty_fail "tlogger verify printed $PTY_OUT"
+EOF
+    local sum
+    one_session
+    [ "${DIR%/*}" = "$SESSIONS/acme" ]
+    [ "$(stat -c %a "$SESSIONS/acme")" = 700 ]
+    [ "$(stat -c %a "$DIR")" = 700 ]
+    [ -z "$(find "$DIR" -mindepth 1 \( ! -type f -o ! -perm 400 \))" ]
+    [ -f "$DIR/SEAL" ]
+    sum=$(sha_of "$DIR/SHA256SUMS")
+    [ "$(cat "$SESSIONS/acme/MANIFEST")" = "$sum  ${DIR##*/}/SHA256SUMS" ]
+    # The log folder's own MANIFEST is for sessions without an engagement.
+    [ ! -e "$SESSIONS/MANIFEST" ]
+    run_tlogger verify "${DIR##*/}"
+    [ "$status" -eq 0 ]
+    [ "$output" = "${DIR##*/}  ok" ]
+}
+
+@test "an existing engagement folder is used as it is" {
+    mkdir -p "$SESSIONS/acme"
+    chmod 750 "$SESSIONS/acme"
+    config_set engagement acme
+    start_and_exit
+    one_session
+    [ "${DIR%/*}" = "$SESSIONS/acme" ]
+    [ "$(stat -c %a "$SESSIONS/acme")" = 750 ]
+}
+
+@test "an engagement folder that others may write in leaves a usable shell and a red notice" {
+    mkdir -p "$SESSIONS/acme"
+    chmod 770 "$SESSIONS/acme"
+    local why='the engagement folder ~/.local/state/tlogger/sessions/acme is writable'
+    why+=' by its group or by others'
+    config_set engagement acme
+    assert_start_refused "$why"
+    [ -z "$(ls -A "$SESSIONS/acme")" ]
+}
+
+@test "an invalid engagement in the config or a preset refuses with a red notice, and no folder" {
+    config_set engagement ../acme
+    assert_start_refused 'engagement in the config is not a valid name'
+    [ ! -e "$HOME/.local/state/tlogger/acme" ]
+    sed -i '/^engagement=/d' "$CONFIG"
+    assert_start_refused 'engagement in the config is not a valid name' TLOGGER_ENGAGEMENT=MANIFEST
+    [ ! -e "$SESSIONS/MANIFEST" ]
+}
+
+@test "a logdir_mount that is a plain folder, not a mount point, refuses and creates nothing" {
+    mkdir -p "$HOME/evidence"
+    config_set logdir "$HOME/evidence/tlogger"
+    config_set logdir_mount "$HOME/evidence"
+    assert_start_refused 'the volume ~/evidence of the log folder is not mounted'
+    [ -z "$(ls -A "$HOME/evidence")" ]
+}
+
+@test "with logdir_mount not mounted, even the missing default log folder is not created" {
+    rm -rf "$SESSIONS"
+    config_set logdir_mount "$HOME/.local/state"
+    assert_start_refused 'the volume ~/.local/state of the log folder is not mounted'
+    [ ! -e "$SESSIONS" ]
+}
+
+@test "logdir_mount=/ passes, and a missing log folder on the mounted volume is created, private" {
+    config_set logdir "$HOME/evidence/tlogger"
+    # Without logdir_mount, this log folder is not created.
+    assert_start_refused \
+        'the log folder ~/evidence/tlogger does not exist; mount its volume or create the folder'
+    [ ! -e "$HOME/evidence" ]
+    config_set logdir_mount /
+    start_and_exit
+    [ "$(stat -c %a "$HOME/evidence/tlogger")" = 700 ]
+    run find "$HOME/evidence/tlogger" -mindepth 2 -maxdepth 2 -name exited
+    [ "${#lines[@]}" -eq 1 ]
+    [[ ${lines[0]} =~ /evidence/tlogger/[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9]{6}/exited$ ]]
+}
+
+@test "a missing log folder other than the default is refused, and the missing default is created" {
+    mkdir -p "$HOME/evidence"
+    config_set logdir "$HOME/evidence/tlogger"
+    assert_start_refused \
+        'the log folder ~/evidence/tlogger does not exist; mount its volume or create the folder'
+    [ ! -e "$HOME/evidence/tlogger" ]
+    # The default, as install's config line names it.
+    config_set logdir "$SESSIONS"
+    rm -rf "$SESSIONS"
+    start_and_exit
+    [ "$(stat -c %a "$SESSIONS")" = 700 ]
+    one_session
+    # The default, with no logdir line at all.
+    sed -i '/^logdir=/d' "$CONFIG"
+    rm -rf "$SESSIONS"
+    start_and_exit
+    [ "$(stat -c %a "$SESSIONS")" = 700 ]
+    one_session
 }

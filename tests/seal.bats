@@ -35,7 +35,8 @@ setup() {
 
 # Create the ended session ID in the log folder, as a recording that ended with exit leaves it:
 # the logs with some output, a journal of COMMANDS S and E lines (default 2), and the recorder,
-# started and exited markers, each 0600.
+# started and exited markers, each 0600. An ID of the form ENGAGEMENT/ID puts the session into
+# that engagement folder of the log folder.
 make_session() {
     local id=$1 count=${2:-2} i
     session_new "$LOGS/$id"
@@ -63,6 +64,25 @@ fake_process() {
 # Print the files of the session folder DIR with their modes, 'NAME MODE' per line, sorted.
 modes_of() {
     find "$1" -mindepth 1 -printf '%f %m\n' | LC_ALL=C sort
+}
+
+# Print the notice that seal prints for the session SESSION, an id or ENGAGEMENT/ID in the log
+# folder: its id and the SHA-256 of its SHA256SUMS.
+sealed_notice() {
+    printf 'tlogger: sealed session %s; SHA-256 of its SHA256SUMS: %s\n' "${1##*/}" \
+        "$(sha_of "$LOGS/$1/SHA256SUMS")"
+}
+
+# Print the MANIFEST line of the session SESSION, an id or ENGAGEMENT/ID in the log folder, as
+# seal writes it into the MANIFEST of the folder that holds it: '<sum>  <id>/SHA256SUMS'.
+manifest_entry() {
+    printf '%s  %s/SHA256SUMS\n' "$(sha_of "$LOGS/$1/SHA256SUMS")" "${1##*/}"
+}
+
+# Print every entry of the folder DIR with its mode, size and modification time, and the SHA-256
+# of each file in it, so that two calls compare the folder byte for byte.
+tree_of() {
+    (cd "$1" && find . -printf '%p %m %s %T@\n' | LC_ALL=C sort && sha256sum -- *)
 }
 
 # Fail unless the last run exited STATUS, printed nothing on stdout and printed MESSAGE alone on
@@ -383,34 +403,144 @@ assert_usage_error() {
     [ "$status" -eq 0 ]
 }
 
-@test "list shows each session's state, start, duration, commands and transcript" {
+@test "list shows each session's state, start, duration, commands, transcript and engagement" {
     local a=20261112T100000Z-aaaaaa b=20261112T110000Z-bbbbbb c=20261112T120000Z-cccccc
-    local d=20261112T130000Z-dddddd e=20261112T140000Z-eeeeee row='%-23s  %-9s  %-20s  %8s  %8s  %s'
-    # a: sealed, with a transcript. b: ended. c: still recorded by the live recorder 4242.
-    # d: sealed, then a log made writable. e: no recorder file.
+    local d=20261112T130000Z-dddddd e=20261112T140000Z-eeeeee
+    local row='%-23s  %-9s  %-20s  %8s  %8s  %-10s  %s'
+    # a: sealed, with a transcript. b, in the engagement acme: ended. c: still recorded by the
+    # live recorder 4242. d, in the engagement demo: sealed, then a log made writable. e: no
+    # recorder file. The rows go by id, whichever folder holds the session.
+    mkdir -m 700 "$LOGS/acme" "$LOGS/demo"
     make_session "$a" 3
     run_tlogger seal "$a"
     printf 'derived\n' > "$LOGS/$a/transcript.txt"
-    make_session "$b" 1
+    make_session "acme/$b" 1
     make_session "$c" 0
-    make_session "$d"
+    make_session "demo/$d"
     run_tlogger seal "$d"
-    chmod 600 "$LOGS/$d/timing"
+    [ "$status" -eq 0 ]
+    chmod 600 "$LOGS/demo/$d/timing"
     make_session "$e"
     rm "$LOGS/$e/recorder"
     fake_process "$REC_PID" "$REC_START"
-    printf '4343 2000 %s 34818\n' "$BOOT" > "$LOGS/$b/recorder"
+    printf '4343 2000 %s 34818\n' "$BOOT" > "$LOGS/acme/$b/recorder"
     printf 'not a session\n' > "$LOGS/notes.txt"
     run_tlogger list
     [ "$status" -eq 0 ]
     [ -z "$stderr" ]
     # shellcheck disable=SC2059 # The row format is the test's own.
     [ "$output" = "$(printf "$row\n" SESSION STATE 'START (UTC)' DURATION COMMANDS TRANSCRIPT \
-        "$a" sealed 2026-11-12T10:00:00Z 00:01:00 3 yes \
-        "$b" ended 2026-11-12T11:00:00Z 00:01:00 1 no \
-        "$c" recording 2026-11-12T12:00:00Z 00:01:00 0 no \
-        "$d" changed 2026-11-12T13:00:00Z 00:01:00 2 no \
-        "$e" unknown 2026-11-12T14:00:00Z 00:01:00 2 no)" ]
+        ENGAGEMENT \
+        "$a" sealed 2026-11-12T10:00:00Z 00:01:00 3 yes - \
+        "$b" ended 2026-11-12T11:00:00Z 00:01:00 1 no acme \
+        "$c" recording 2026-11-12T12:00:00Z 00:01:00 0 no - \
+        "$d" changed 2026-11-12T13:00:00Z 00:01:00 2 no demo \
+        "$e" unknown 2026-11-12T14:00:00Z 00:01:00 2 no -)" ]
+}
+
+@test "seal and verify cover flat and engagement sessions by id, with one MANIFEST per folder" {
+    local a=20261112T100000Z-aaaaaa b=20261112T110000Z-bbbbbb c=20261112T120000Z-cccccc
+    local d=20261112T130000Z-dddddd e=20261112T140000Z-eeeeee dir f
+    mkdir -m 700 "$LOGS/acme" "$LOGS/demo"
+    make_session "$a"
+    make_session "acme/$b"
+    make_session "$c"
+    make_session "demo/$d"
+    make_session "acme/$e"
+    # Without a SESSION, seal takes the newest id, which lies in acme.
+    run_tlogger seal
+    [ "$status" -eq 0 ]
+    [ "$stderr" = "$(sealed_notice "acme/$e")" ]
+    [ ! -e "$LOGS/MANIFEST" ]
+    # --all seals the others in id order, whichever folder holds them.
+    run_tlogger seal --all
+    [ "$status" -eq 0 ]
+    [ "${#stderr_lines[@]}" -eq 4 ]
+    [ "${stderr_lines[0]}" = "$(sealed_notice "$a")" ]
+    [ "${stderr_lines[1]}" = "$(sealed_notice "acme/$b")" ]
+    [ "${stderr_lines[2]}" = "$(sealed_notice "$c")" ]
+    [ "${stderr_lines[3]}" = "$(sealed_notice "demo/$d")" ]
+    for f in output.raw timing input.raw commands.tsv SHA256SUMS SEAL; do
+        [ "$(stat -c %a "$LOGS/acme/$b/$f")" = 400 ]
+        [ "$(stat -c %a "$LOGS/demo/$d/$f")" = 400 ]
+    done
+    # Each folder's MANIFEST names its own sessions, relative to itself.
+    [ "$(cat "$LOGS/MANIFEST")" = "$(manifest_entry "$a")"$'\n'"$(manifest_entry "$c")" ]
+    [ "$(cat "$LOGS/acme/MANIFEST")" = \
+        "$(manifest_entry "acme/$e")"$'\n'"$(manifest_entry "acme/$b")" ]
+    [ "$(cat "$LOGS/demo/MANIFEST")" = "$(manifest_entry "demo/$d")" ]
+    for dir in "$LOGS" "$LOGS/acme" "$LOGS/demo"; do
+        [ "$(stat -c %a "$dir/MANIFEST")" = 600 ]
+        (cd "$dir" && sha256sum --quiet -c MANIFEST)
+    done
+    run_tlogger verify "$d"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$d  ok" ]
+    run_tlogger verify
+    [ "$status" -eq 0 ]
+    [ "$output" = "$e  ok" ]
+    run_tlogger verify --all
+    [ "$status" -eq 0 ]
+    [ "$output" = "$a  ok"$'\n'"$b  ok"$'\n'"$c  ok"$'\n'"$d  ok"$'\n'"$e  ok" ]
+    [ -z "$stderr" ]
+}
+
+@test "a flat session of 0.2.0 and its MANIFEST stay byte for byte as they are, and verify ok" {
+    local old=20261101T090000Z-o1d0a2 x=20261120T100000Z-acme01 y=20261121T100000Z-acme02
+    local before
+    # A session sealed before engagements existed, as 0.2.0 left it.
+    make_session "$old"
+    run_tlogger seal "$old"
+    [ "$status" -eq 0 ]
+    cp "$LOGS/MANIFEST" "$BATS_TEST_TMPDIR/manifest-before"
+    before=$(tree_of "$LOGS/$old")
+    mkdir -m 700 "$LOGS/acme"
+    make_session "acme/$x"
+    make_session "acme/$y"
+    run_tlogger seal --all
+    [ "$status" -eq 0 ]
+    [ "${#stderr_lines[@]}" -eq 2 ]
+    cmp "$LOGS/MANIFEST" "$BATS_TEST_TMPDIR/manifest-before"
+    [ "$(tree_of "$LOGS/$old")" = "$before" ]
+    [ "$(wc -l < "$LOGS/acme/MANIFEST")" -eq 2 ]
+    run_tlogger verify "$old"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$old  ok" ]
+    run_tlogger verify --all
+    [ "$status" -eq 0 ]
+    [ "$output" = "$old  ok"$'\n'"$x  ok"$'\n'"$y  ok" ]
+}
+
+@test "seal --all reaches a hand-made folder named like an engagement, and no other subfolder" {
+    need symlinks
+    local f=20261112T100000Z-ffffff name dir
+    # Made by hand, with the default mode, and named like an engagement.
+    mkdir "$LOGS/Case_2026.x"
+    make_session "Case_2026.x/$f"
+    # Not engagement folders: a hidden name, a name with a space, the name MANIFEST, a second
+    # level, and a symlink to a folder outside the log folder.
+    for name in .old/20261112T110000Z-gggggg 'bad name/20261112T120000Z-hhhhhh' \
+        MANIFEST/20261112T130000Z-iiiiii Case_2026.x/sub/20261112T140000Z-jjjjjj; do
+        make_session "$name"
+    done
+    mkdir -p "$BATS_TEST_TMPDIR/outside"
+    session_new "$BATS_TEST_TMPDIR/outside/20261112T150000Z-kkkkkk"
+    ln -s "$BATS_TEST_TMPDIR/outside" "$LOGS/linked"
+    run_tlogger seal --all
+    [ "$status" -eq 0 ]
+    [ "$stderr" = "$(sealed_notice "Case_2026.x/$f")" ]
+    [ "$(stat -c %a "$LOGS/Case_2026.x/$f/output.raw")" = 400 ]
+    [ "$(cat "$LOGS/Case_2026.x/MANIFEST")" = "$(manifest_entry "Case_2026.x/$f")" ]
+    for dir in "$LOGS/.old/20261112T110000Z-gggggg" "$LOGS/bad name/20261112T120000Z-hhhhhh" \
+        "$LOGS/MANIFEST/20261112T130000Z-iiiiii" "$LOGS/Case_2026.x/sub/20261112T140000Z-jjjjjj" \
+        "$BATS_TEST_TMPDIR/outside/20261112T150000Z-kkkkkk"; do
+        [ ! -e "$dir/SEAL" ]
+        [ "$(stat -c %a "$dir/output.raw")" = 600 ]
+        [ ! -e "${dir%/*}/MANIFEST" ]
+    done
+    run_tlogger verify --all
+    [ "$status" -eq 0 ]
+    [ "$output" = "$f  ok" ]
 }
 
 @test "list, verify and seal exit 3 without sessions, and refuse wrong arguments" {

@@ -17,15 +17,17 @@ fi
 # resolved, so that this shell keeps using the release it loaded.
 typeset -g _tlogger_release=${${(%):-%x}:A:h:h}
 
-# A session folder is <logdir>/<UTC time>-<6 random characters>, mode 0700. script writes
-# output.raw, input.raw (unless record_input=no) and timing into it, and the recorded shells
-# append to commands.tsv, all mode 0600. The recorded shells add markers, mode 0600 each:
-# recorder ('<script pid> <starttime> <boot_id> <tty_nr>') and started from the handshake,
-# exited from an exit of the main recorded shell while its recorder and terminal last, and
-# stop-requested from tlogger stop. A marker always holds a line. TLOGGER_SESSION names the
-# folder in every recorded shell. TLOGGER_PROC (default /proc), TLOGGER_SYSFS (default /sys) and
-# TLOGGER_IP exist only so that the tests can point the process walk, the interface list and ip
-# at fakes; production never sets them.
+# A session folder is <logdir>/<UTC time>-<6 random characters>, mode 0700, or, with an
+# engagement in the config, <logdir>/<engagement>/<UTC time>-<6 random characters>, the
+# engagement folder being mode 0700 when tlogger start creates it. script writes output.raw,
+# input.raw (unless record_input=no) and timing into it, and the recorded shells append to
+# commands.tsv, all mode 0600. The recorded shells add markers, mode 0600 each: recorder
+# ('<script pid> <starttime> <boot_id> <tty_nr>') and started from the handshake, exited from an
+# exit of the main recorded shell while its recorder and terminal last, and stop-requested from
+# tlogger stop. A marker always holds a line. TLOGGER_SESSION names the folder in every recorded
+# shell. TLOGGER_PROC (default /proc), TLOGGER_SYSFS (default /sys) and TLOGGER_IP exist only so
+# that the tests can point the process walk, the mount guard, the interface list and ip at fakes;
+# production never sets them.
 
 # commands.tsv, the command journal, holds lines of fields separated by tabs. The preexec hook
 # of a recorded shell appends 'S <epoch> <UTC> <pid> <PWD> <vpn> <typed>' as a command starts,
@@ -186,19 +188,30 @@ _tlogger_tty_state() {
 
 # Join the recording that tlogger start began, in the shell that script starts for it, for the
 # session folder DIR that TLOGGER_HS named; _tlogger_init has already restored TZ and unset
-# TLOGGER_HS*. DIR must be a fresh session folder directly under logdir, and the parent a script
-# whose command line names its output.raw. Then writes recorder and started, exports
-# TLOGGER_SESSION and prints the REC line; on any failure warns, writes no marker that says
-# started, and returns 1. Needs _tlogger_cfg filled.
+# TLOGGER_HS*. DIR must be a fresh session folder directly under logdir, or in an engagement
+# folder directly under logdir: a real folder of this user's, named as an engagement may be named,
+# whatever engagement the config names now, so that a change while a terminal starts cannot break
+# its recording. The parent must be a script whose command line names its output.raw. Then writes
+# recorder and started, exports TLOGGER_SESSION and prints the REC line; on any failure warns,
+# writes no marker that says started, and returns 1. Needs _tlogger_cfg filled.
 _tlogger_handshake() {
     emulate -L zsh
     setopt extendedglob
     local dir=$1
-    local proc=${TLOGGER_PROC:-/proc} logdir=${_tlogger_cfg[logdir]-} why= boot= stamp
+    local proc=${TLOGGER_PROC:-/proc} logdir=${_tlogger_cfg[logdir]-} why= boot= stamp eng=
     local my_tty ppid start
     local -a reply args
-    if [[ -z $logdir || $dir != /* || ${dir:h} != "$logdir" ]]; then
+    # An engagement name, as _tlogger_preflight checks it: letters, digits, . _ and -, at most 64
+    # characters, starting with a letter or a digit; not MANIFEST and not a session name.
+    if [[ -n $logdir && $dir == /* && ${dir:h} != "$logdir" && ${dir:h:h} == "$logdir" &&
+        ${dir:h:t} == [A-Za-z0-9][A-Za-z0-9._-](#c0,63) && ${dir:h:t} != MANIFEST &&
+        ${dir:h:t} != [0-9](#c8)T[0-9](#c6)Z-[A-Za-z0-9](#c6) ]]; then
+        eng=${dir:h}
+    fi
+    if [[ -z $logdir || $dir != /* || ( ${dir:h} != "$logdir" && -z $eng ) ]]; then
         why='its folder does not lie directly under the log folder'
+    elif [[ -n $eng && ( -L $eng || ! -d $eng || ! -O $eng ) ]]; then
+        why="its engagement folder is a symlink, not a folder or another user's"
     elif [[ ${dir:t} != [0-9](#c8)T[0-9](#c6)Z-[A-Za-z0-9](#c6) ]]; then
         why='its folder name is not a session name'
     elif [[ -L $dir || ! -d $dir || ! -O $dir ]]; then
@@ -292,17 +305,117 @@ _tlogger_drop_empty() {
     command rmdir -- $1 2> /dev/null
 }
 
+# The volume guard of logdir_mount=MOUNT for the log folder LOGDIR: MOUNT must be an absolute
+# path, the last row of <TLOGGER_PROC>/self/mountinfo for that mount point, decoded and compared
+# as written, must be there and not an automount point (autofs), and LOGDIR must be MOUNT or lie
+# in it. Returns 0 when the check passes; otherwise sets REPLY to the reason and returns 1. A
+# mountinfo that cannot be read counts as not mounted. Reads mountinfo alone, with $(<file) and
+# without a fork, and touches nothing under MOUNT, so that it never mounts an automount.
+_tlogger_mount_ok() {
+    emulate -L zsh
+    local mount=$1 logdir=$2 content= line point type= found=
+    local -a f
+    if [[ $mount != /* || $mount == *[[:cntrl:]]* ]]; then
+        REPLY='logdir_mount in the config is not an absolute path'
+        return 1
+    fi
+    { content=$(<${TLOGGER_PROC:-/proc}/self/mountinfo); } 2> /dev/null || content=
+    # A row is 'ID PARENT MAJOR:MINOR ROOT MOUNT-POINT OPTIONS [OPTIONAL...] - TYPE SOURCE
+    # SUPER-OPTIONS'. The kernel writes a space, a tab, a newline and a backslash in a path as
+    # \040, \011, \012 and \134, so that no field holds a space; \134 is decoded last, so that the
+    # text it gives is never decoded again.
+    for line in ${(f)content}; do
+        f=(${(s: :)line})
+        if (( $#f < 5 )) || [[ $line != *' - '?* ]]; then
+            continue
+        fi
+        point=$f[5]
+        point=${point//$'\\040'/ }
+        point=${point//$'\\011'/$'\t'}
+        point=${point//$'\\012'/$'\n'}
+        point=${point//$'\\134'/$'\\'}
+        if [[ $point == "$mount" ]]; then
+            found=1
+            type=${${line#* - }%% *}
+        fi
+    done
+    _tlogger_shown $mount
+    if [[ -z $found ]]; then
+        REPLY="the volume $REPLY of the log folder is not mounted"
+        return 1
+    fi
+    if [[ $type == autofs ]]; then
+        REPLY="the volume $REPLY of the log folder is not mounted yet (automount);"\
+" open it, then run tlogger start"
+        return 1
+    fi
+    # The root file system holds every absolute path.
+    if [[ $mount != / && $logdir != "$mount" && $logdir != "$mount"/* ]]; then
+        point=$REPLY
+        _tlogger_shown $logdir
+        REPLY="the log folder $REPLY does not lie on the volume $point that logdir_mount names"
+        return 1
+    fi
+    return 0
+}
+
+# Check the folder DIR that holds session folders, the log folder or an engagement folder in it,
+# as WHAT names it ('log folder' or 'engagement folder'): a real folder, not a symlink, this
+# user's and writable, in which neither its group nor others may write, unless the sticky bit
+# keeps each entry to its owner; they may read it. Returns 0 when it passes; otherwise sets REPLY
+# to the reason and returns 1. Prints and creates nothing. Loads zstat of zsh/stat.
+_tlogger_check_dir() {
+    emulate -L zsh
+    local dir=$1 shown
+    local -a st
+    _tlogger_shown $dir
+    shown="the $2 $REPLY"
+    if [[ -L $dir ]]; then
+        REPLY="$shown is a symlink"
+        return 1
+    fi
+    if [[ ! -d $dir ]]; then
+        REPLY="$shown is not a folder"
+        return 1
+    fi
+    if [[ ! -O $dir ]]; then
+        REPLY="$shown belongs to another user"
+        return 1
+    fi
+    if [[ ! -w $dir || ! -x $dir ]]; then
+        REPLY="$shown is not writable"
+        return 1
+    fi
+    # Another user who may write in DIR could rename a session folder and put a symlink in its
+    # place; the sticky bit keeps each entry to its owner. zstat, loaded alone, reads the mode
+    # without a fork and leaves the stat command as it is.
+    if ! zmodload -F zsh/stat b:zstat 2> /dev/null ||
+        ! zstat -L -A st +mode $dir 2> /dev/null; then
+        REPLY="cannot read the mode of $shown"
+        return 1
+    fi
+    if (( (st[1] & 8#022) && (st[1] & 8#1000) == 0 )); then
+        REPLY="$shown is writable by its group or by others"
+        return 1
+    fi
+    return 0
+}
+
 # Make the checks tlogger start runs before it records, in this order: the kill switches, this
-# terminal's state, a terminal, the recorder, logdir and who else may write in it, its free space
-# and inodes; then create the session folder and its empty log files, and check that their modes
-# keep them private. Sets REPLY to the new folder, or to the reason a check failed and returns 1.
-# Needs _tlogger_cfg filled. Creates nothing but a missing logdir until the session folder, which
-# it removes again when that folder or a file in it is not private. Loads zstat of zsh/stat.
+# terminal's state, a terminal, the recorder, the volume of logdir_mount, the engagement name,
+# logdir (created when missing only if it is the default or logdir_mount is set) and who else
+# may write in it, the engagement folder (created when missing) and who else may write in it,
+# and the free space and inodes where the session goes; then create the session folder and its
+# empty log files, and check that their modes keep them private. Sets REPLY to the new folder, or
+# to the reason a check failed and returns 1. Needs _tlogger_cfg filled. Creates nothing but a
+# missing logdir and engagement folder until the session folder, which it removes again when
+# that folder or a file in it is not private. Loads zstat of zsh/stat.
 _tlogger_preflight() {
     emulate -L zsh
     setopt extendedglob
     local logdir=$_tlogger_cfg[logdir] recorder=$_tlogger_cfg[recorder]
-    local min=$_tlogger_cfg[min_free_mb] shown_dir shown_rec help stamp dir f
+    local mount=${_tlogger_cfg[logdir_mount]-} eng=${_tlogger_cfg[engagement]-}
+    local min=$_tlogger_cfg[min_free_mb] shown_dir shown_rec help stamp dir f parent
     local -a reply st
     _tlogger_shown $logdir
     shown_dir=$REPLY
@@ -339,56 +452,68 @@ _tlogger_preflight() {
         REPLY="the recorder $shown_rec lacks --logging-format, which util-linux 2.35 and newer have"
         return 1
     fi
-    # Created under umask 077, so that every folder mkdir -p makes on the way is private too.
-    if [[ ! -e $logdir && ! -L $logdir ]] &&
-        ! (umask 077 && command mkdir -p -m 700 -- $logdir) 2> /dev/null; then
-        REPLY="the log folder $shown_dir cannot be created"
+    # The volume guard comes before anything touches logdir, so that nothing is created on the
+    # disk beneath a volume that is not mounted. It fails closed on an invalid logdir_mount.
+    if [[ -n $mount ]] && ! _tlogger_mount_ok $mount $logdir; then
         return 1
     fi
-    if [[ -L $logdir ]]; then
-        REPLY="the log folder $shown_dir is a symlink"
+    # Letters, digits, . _ and -, at most 64 characters, starting with a letter or a digit; not
+    # MANIFEST and not a session name. An invalid name refuses, rather than seal the session into
+    # another folder than the one meant.
+    if [[ -n $eng && ( $eng != [A-Za-z0-9][A-Za-z0-9._-](#c0,63) || $eng == MANIFEST ||
+        $eng == [0-9](#c8)T[0-9](#c6)Z-[A-Za-z0-9](#c6) ) ]]; then
+        REPLY='engagement in the config is not a valid name'
         return 1
     fi
-    if [[ ! -d $logdir ]]; then
-        REPLY="the log folder $shown_dir is not a folder"
+    # Only the default logdir, or one on the volume just found mounted, is created: any other
+    # missing logdir may lie under a volume that is not mounted. Created under umask 077, so that
+    # every folder mkdir -p makes on the way is private too.
+    if [[ ! -e $logdir && ! -L $logdir ]]; then
+        if [[ -z $mount && $logdir != "${_tlogger_cfg[default_logdir]-}" ]]; then
+            REPLY="the log folder $shown_dir does not exist; mount its volume or create the folder"
+            return 1
+        fi
+        if ! (umask 077 && command mkdir -p -m 700 -- $logdir) 2> /dev/null; then
+            REPLY="the log folder $shown_dir cannot be created"
+            return 1
+        fi
+    fi
+    if ! _tlogger_check_dir $logdir 'log folder'; then
         return 1
     fi
-    if [[ ! -O $logdir ]]; then
-        REPLY="the log folder $shown_dir belongs to another user"
-        return 1
-    fi
-    if [[ ! -w $logdir || ! -x $logdir ]]; then
-        REPLY="the log folder $shown_dir is not writable"
-        return 1
-    fi
-    # Another user who may write in logdir could rename a session folder and put a symlink in its
-    # place; the sticky bit keeps each entry to its owner. zstat, loaded alone, reads the mode
-    # without a fork and leaves the stat command as it is.
-    if ! zmodload -F zsh/stat b:zstat 2> /dev/null ||
-        ! zstat -L -A st +mode $logdir 2> /dev/null; then
-        REPLY="cannot read the mode of the log folder $shown_dir"
-        return 1
-    fi
-    if (( (st[1] & 8#022) && (st[1] & 8#1000) == 0 )); then
-        REPLY="the log folder $shown_dir is writable by its group or by others"
-        return 1
+    # The session folder goes into the engagement folder, created when it is missing and taken as
+    # it is when it exists, as when two terminals start at once.
+    parent=$logdir
+    if [[ -n $eng ]]; then
+        parent=${logdir%/}/$eng
+        _tlogger_shown $parent
+        shown_dir=$REPLY
+        if [[ ! -e $parent && ! -L $parent ]] &&
+            ! (umask 077 && command mkdir -m 700 -- $parent) 2> /dev/null &&
+            [[ ! -e $parent && ! -L $parent ]]; then
+            REPLY="the engagement folder $shown_dir cannot be created"
+            return 1
+        fi
+        if ! _tlogger_check_dir $parent 'engagement folder'; then
+            return 1
+        fi
     fi
     if [[ $min != <-> ]]; then
         min=200
     fi
-    if ! _tlogger_df k $logdir; then
+    if ! _tlogger_df k $parent; then
         _tlogger_say yellow "warning: cannot read the free space in $shown_dir; recording anyway"
     elif (( reply[2] < min * 1024 )); then
         REPLY="less than $min MB free in $shown_dir"
         return 1
     fi
-    if _tlogger_df i $logdir && (( reply[1] > 0 && reply[2] < 100 )); then
+    if _tlogger_df i $parent && (( reply[1] > 0 && reply[2] < 100 )); then
         REPLY="fewer than 100 free inodes in $shown_dir"
         return 1
     fi
     _tlogger_utc stamp '%Y%m%dT%H%M%SZ'
-    if ! dir=$(command mktemp -d $logdir/$stamp-XXXXXX 2> /dev/null) ||
-        [[ $dir != $logdir/$stamp-?????? || -L $dir || ! -d $dir ]]; then
+    if ! dir=$(command mktemp -d $parent/$stamp-XXXXXX 2> /dev/null) ||
+        [[ $dir != $parent/$stamp-?????? || -L $dir || ! -d $dir ]]; then
         REPLY="cannot create a session folder in $shown_dir"
         return 1
     fi
@@ -425,17 +550,18 @@ _tlogger_seal() {
 }
 
 # Record this terminal, for tlogger start (KIND start) or for autostart (KIND auto): find the zsh
-# binary, run the preflight, print the banner and run the recorder in the foreground, with
-# TZ=UTC0 for its timestamps and SHELL set to that binary; then tell how the recording ended from
-# the markers in the session folder, never from the exit status or script's own messages, and
-# seal a session that ended or paused with _tlogger_seal. Prints the notice of each outcome, but
-# none for a recording that ended in KIND auto, and the line of the seal. Sets REPLY to
-# ended, paused, unexpected, failed or refused, and reply to the recorder's exit status, empty
-# unless it ran; callers declare both local. Returns 0 when the recording ended or was paused, 1
-# when a check refused it, it failed to start or it ended unexpectedly. Needs _tlogger_cfg filled.
+# binary, run the preflight, print the banner, which ends with '; engagement NAME' when the config
+# names one, and run the recorder in the foreground, with TZ=UTC0 for its timestamps and SHELL
+# set to that binary; then tell how the recording ended from the markers in the session folder,
+# never from the exit status or script's own messages, and seal a session that ended or paused
+# with _tlogger_seal. Prints the notice of each outcome, but none for a recording that ended in
+# KIND auto, and the line of the seal. Sets REPLY to ended, paused, unexpected, failed or
+# refused, and reply to the recorder's exit status, empty unless it ran; callers declare both
+# local. Returns 0 when the recording ended or was paused, 1 when a check refused it, it failed to
+# start or it ended unexpectedly. Needs _tlogger_cfg filled.
 _tlogger_record() {
     emulate -L zsh
-    local kind=$1 dir id zsh_bin tzset=0 tzval=
+    local kind=$1 dir id zsh_bin tzset=0 tzval= eng
     local -i rc
     local -a login
     reply=()
@@ -455,15 +581,19 @@ _tlogger_record() {
         return 1
     fi
     dir=$REPLY id=${REPLY:t}
+    # After the id, since the id is read up to the first ';'.
+    eng=${_tlogger_cfg[engagement]:+; engagement $_tlogger_cfg[engagement]}
     # Only an exported TZ reaches the commands this shell runs, so only that one is passed on.
     if [[ ${(t)TZ} == *export* ]]; then
         tzset=1 tzval=$TZ
     fi
     if [[ $_tlogger_cfg[record_input] == yes ]]; then
         login=(--log-in $dir/input.raw)
-        _tlogger_say green "recording session $id; everything typed and shown is saved, passwords included; tlogger stop pauses"
+        _tlogger_say green "recording session $id; everything typed and shown is saved,"\
+" passwords included; tlogger stop pauses$eng"
     else
-        _tlogger_say green "recording session $id; everything shown is saved, keystrokes are not; tlogger stop pauses"
+        _tlogger_say green "recording session $id; everything shown is saved, keystrokes are not;"\
+" tlogger stop pauses$eng"
     fi
     TLOGGER_HS=$dir TLOGGER_HS_TZSET=$tzset TLOGGER_HS_TZ=$tzval TZ=UTC0 SHELL=$zsh_bin \
         $_tlogger_cfg[recorder] --quiet --flush --return --logging-format advanced \
@@ -550,8 +680,9 @@ _tlogger_stop() {
 }
 
 # tlogger status: print on stdout the plugin version, this terminal's state, its session, the
-# config values mode, logdir (in the ~ form), record_input, prompt and stamp, and the VPN list,
-# shown as none when it is empty and as off when stamp_vpn=off. Config warnings go to stderr.
+# config values mode, logdir (in the ~ form), engagement (none when there is none), record_input,
+# prompt and stamp, and the VPN list, shown as none when it is empty and as off when
+# stamp_vpn=off. Config warnings go to stderr.
 _tlogger_status() {
     emulate -L zsh
     local REPLY version=unknown state session=none vpn=off
@@ -572,7 +703,8 @@ _tlogger_status() {
     _tlogger_shown $_tlogger_cfg[logdir]
     print -r -- "tlogger plugin ${version:-unknown}"
     printf '  %-13s %s\n' state: "$state" session: "$session" mode: "$_tlogger_cfg[mode]" \
-        logdir: "$REPLY" record_input: "$_tlogger_cfg[record_input]" \
+        logdir: "$REPLY" engagement: "${_tlogger_cfg[engagement]:-none}" \
+        record_input: "$_tlogger_cfg[record_input]" \
         prompt: "$_tlogger_cfg[prompt]" stamp: "$_tlogger_cfg[stamp]" vpn: "$vpn"
 }
 
@@ -807,7 +939,7 @@ _tlogger_preexec() {
 _tlogger_precmd() {
     local -i st=$?
     emulate -L zsh
-    local REPLY utc shown vpn= field= min
+    local REPLY utc shown vpn= field= min where
     local -a reply f
     local -i now=$EPOCHSECONDS
     if [[ -n ${_tlogger_cmd-} ]]; then
@@ -825,7 +957,12 @@ _tlogger_precmd() {
         fi
         # _tlogger_df forks df, which the 300 seconds keep rare.
         if _tlogger_df k $TLOGGER_SESSION && (( reply[2] < min * 1024 )); then
-            _tlogger_shown ${_tlogger_cfg[logdir]-}
+            # The folder that holds the session: the log folder, or an engagement folder in it.
+            where=${_tlogger_cfg[logdir]-}
+            if [[ -n $where && ${TLOGGER_SESSION:h:h} == "$where" ]]; then
+                where=${TLOGGER_SESSION:h}
+            fi
+            _tlogger_shown $where
             _tlogger_say yellow "warning: less than $min MB free in $REPLY; the recording goes on"
         fi
     fi

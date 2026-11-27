@@ -31,13 +31,32 @@ setup() {
 }
 
 # Print the names in the sessions folder but the MANIFEST that sealing writes, one per line,
-# sorted.
+# sorted. A real folder in it that is not named as a session is an engagement folder: its own
+# entries, but its MANIFEST, take its place, each as ENGAGEMENT/NAME, and an empty one prints
+# nothing.
 session_names() {
-    find "$SESSIONS" -mindepth 1 -maxdepth 1 ! -name MANIFEST -printf '%f\n' | LC_ALL=C sort
+    local entry name sub
+    local id_re='^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9]{6}$' skip_re='^(MANIFEST|\.|\.\.)$'
+    for entry in "$SESSIONS"/* "$SESSIONS"/.*; do
+        name=${entry##*/}
+        if [[ $name =~ $skip_re || ! ( -e $entry || -L $entry ) ]]; then
+            continue
+        fi
+        if [[ -d $entry && ! -L $entry && ! $name =~ $id_re ]]; then
+            for sub in "$entry"/* "$entry"/.*; do
+                if [[ ! ${sub##*/} =~ $skip_re && ( -e $sub || -L $sub ) ]]; then
+                    printf '%s/%s\n' "$name" "${sub##*/}"
+                fi
+            done
+        else
+            printf '%s\n' "$name"
+        fi
+    done | LC_ALL=C sort
 }
 
-# Set DIR to the only session folder. Fails unless there is exactly one, named as tlogger names
-# sessions: the UTC time, then 6 random characters.
+# Set DIR to the only session folder, in the sessions folder or in an engagement folder in it.
+# Fails unless there is exactly one, named as tlogger names sessions: the UTC time, then 6 random
+# characters.
 one_session() {
     local -a names
     mapfile -t names < <(session_names)
@@ -45,7 +64,7 @@ one_session() {
         printf 'expected one session folder, found %s: %s\n' "${#names[@]}" "${names[*]}" >&2
         return 1
     fi
-    [[ ${names[0]} =~ ^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9]{6}$ ]]
+    [[ ${names[0]##*/} =~ ^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9]{6}$ ]]
     DIR="$SESSIONS/${names[0]}"
 }
 
@@ -290,4 +309,37 @@ EOF
     one_session
     [ ! -e "$DIR/started" ]
     [ ! -e "$DIR/recorder" ]
+}
+
+@test "an unmounted logdir_mount gives the red notice, a usable NOREC shell and no log folder" {
+    mkdir -p "$HOME/evidence"
+    sed -i '/^logdir=/d; /^logdir_mount=/d' "$CONFIG"
+    printf '%s\n' "logdir=$HOME/evidence/tlogger" "logdir_mount=$HOME/evidence" >> "$CONFIG"
+    assert_auto_refused 'the volume ~/evidence of the log folder is not mounted'
+    [ -z "$(ls -A "$HOME/evidence")" ]
+}
+
+@test "an invalid engagement gives the red notice, a usable NOREC shell and no folder" {
+    assert_auto_refused 'engagement in the config is not a valid name' TLOGGER_ENGAGEMENT=MANIFEST
+    [ ! -e "$SESSIONS/MANIFEST" ]
+}
+
+@test "with an engagement, a new terminal records itself into the engagement folder and says so" {
+    sed -i '/^engagement=/d' "$CONFIG"
+    printf 'engagement=acme\n' >> "$CONFIG"
+    drive << 'EOF'
+pty_auto_shell
+want="tlogger: recording session $PTY_ID; everything typed and shown is saved, passwords included;"
+want+=" tlogger stop pauses; engagement acme"
+[[ $PTY_BANNER == "$want" ]] || pty_fail "the banner is: $PTY_BANNER"
+pty_send exit
+pty_wait_gone $PTY_OUTER
+EOF
+    one_session
+    [ "${DIR%/*}" = "$SESSIONS/acme" ]
+    [ "$(stat -c %a "$SESSIONS/acme")" = 700 ]
+    [ -f "$DIR/started" ]
+    [ -f "$DIR/exited" ]
+    [ -f "$DIR/SEAL" ]
+    grep -qF "  ${DIR##*/}/SHA256SUMS" "$SESSIONS/acme/MANIFEST"
 }

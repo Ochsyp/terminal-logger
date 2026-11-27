@@ -23,14 +23,6 @@ setup() {
     RELEASE="$DATA/releases/$VERSION_TEXT"
 }
 
-# Fail if the last run printed the test's HOME in full: tlogger shows home paths as ~.
-refute_home_shown() {
-    if [[ $output == *"$HOME"* || $stderr == *"$HOME"* ]]; then
-        printf 'the output names the home folder in full:\n%s\n%s\n' "$output" "$stderr" >&2
-        return 1
-    fi
-}
-
 # Print the number of rc backups in the state folder: the files named as tlogger names them,
 # zshrc.<UTC time>.<6 random characters>.
 count_backups() {
@@ -677,7 +669,7 @@ list_releases() {
     run_tlogger install --mode manual --yes
     [ "$status" -eq 0 ]
     for key in record_input min_free_mb record_ssh record_tmux prompt prompt_time stamp stamp_vpn \
-        vpn_ifaces history_timestamps; do
+        vpn_ifaces history_timestamps engagement logdir_mount; do
         grep -q "^#.*$key=" "$CONF/config"
     done
     # stamp names its three values, and hidden as the default.
@@ -952,6 +944,22 @@ list_releases() {
     run_tlogger install --help
     [ "$status" -eq 0 ]
     [[ $output == "Usage: tlogger"* ]]
+}
+
+@test "help lists doctor and engagement, and names engagement folders for SESSION, --all and seal" {
+    local flat folders='the log folder or an engagement folder in it'
+    run_tlogger help
+    [ "$status" -eq 0 ]
+    grep -qE '^  doctor +[A-Z]' <<< "$output"
+    grep -qE '^  engagement \[NAME \| --none\]( |$)' <<< "$output"
+    # The texts wrap anywhere, so they are compared with every run of spaces and line breaks
+    # made one space.
+    flat=$(tr -s ' \n' '  ' <<< "$output")
+    [[ $flat == *'a line in the MANIFEST of the folder that holds it'* ]]
+    [[ $flat == *"a session id, which names a folder in $folders"* ]]
+    [[ $flat == *"or --all for every session of $folders"* ]]
+    # The exit status names what doctor's 1 means.
+    [[ ${flat##*Exit status:} == *doctor* ]]
 }
 
 @test "install keeps the current release and one older one" {

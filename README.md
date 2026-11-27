@@ -29,7 +29,10 @@ The finished `tlogger` command:
   the sums is kept apart from the logs; this version does so as each recording ends, as
   [Sealing and verifying](#sealing-and-verifying) describes;
 - keeps its logs under `~/.local/state/tlogger`, with mode 0700 for directories and 0600 for
-  files, 0400 once sealed.
+  files, 0400 once sealed, and in a folder of its own for each engagement that you name, as
+  [Engagements](#engagements) describes;
+- checks with `tlogger doctor` that the log folder lies on encrypted, private storage that is
+  mounted, as [Checking the log folder](#checking-the-log-folder) describes.
 
 ## Install
 
@@ -188,7 +191,7 @@ the rc backups, always stays: delete it by hand when the rules of the engagement
 | Status | Meaning |
 |---|---|
 | 0 | Done, or nothing to change |
-| 1 | An error or a refusal; a refusal changes nothing. For `status`: installed only in part. For `verify`: a sealed session changed |
+| 1 | An error or a refusal; a refusal changes nothing. For `status`: installed only in part. For `verify`: a sealed session changed. For `doctor`: at least one check says `warn` or `unknown` |
 | 2 | A usage error, or `--mode` or `--yes` missing outside a terminal |
 | 3 | Not installed, nothing to remove, or no session to view |
 | 4 | For `verify`: nothing changed, but a finished session is not sealed |
@@ -201,8 +204,10 @@ In a zsh terminal with the plugin loaded:
 |---|---|
 | `tlogger start` | Records this terminal: runs util-linux `script` in the foreground with a new zsh inside it |
 | `tlogger stop` | Pauses: ends the recording and returns to the shell that started it |
-| `tlogger status` | Shows this terminal's state and session, the plugin version, the mode, the log folder, `record_input`, `prompt`, `stamp` and the VPN list (`none` without VPN interfaces, `off` with `stamp_vpn=off`) |
+| `tlogger status` | Shows this terminal's state and session, the plugin version, the mode, the log folder, the engagement (`none` without one), `record_input`, `prompt`, `stamp` and the VPN list (`none` without VPN interfaces, `off` with `stamp_vpn=off`) |
 | `tlogger mode` | Prints the mode in the config; `tlogger mode auto` or `tlogger mode manual` sets it |
+| `tlogger engagement` | Prints the engagement in the config, or `none`; `tlogger engagement NAME` sets it, and `tlogger engagement --none` clears it, as [Engagements](#engagements) describes |
+| `tlogger doctor` | Checks the log folder and its volume, and changes nothing, as [Checking the log folder](#checking-the-log-folder) describes |
 
 A recording prints one line before it starts, and the recorded shell confirms that it records:
 
@@ -210,6 +215,8 @@ A recording prints one line before it starts, and the recorded shell confirms th
 tlogger: recording session 20261104T101500Z-a1B2c3; everything typed and shown is saved, passwords included; tlogger stop pauses
 tlogger: REC 20261104T101500Z-a1B2c3
 ```
+
+With an engagement set, the first line ends with its name, as in `; engagement acme`.
 
 The recording covers everything that runs in that shell: commands and programs, `sudo` and
 `ssh`, nested shells and subshells, reverse shells and unstable shells, because `script` wraps the
@@ -277,7 +284,8 @@ what to do instead.
 ### What is recorded
 
 Each recording gets a session folder of its own, `<log folder>/<UTC time>-<6 random characters>`,
-with mode 0700. Its files have mode 0600:
+with mode 0700, or `<log folder>/<engagement>/<UTC time>-<6 random characters>` while an
+engagement is set, as [Engagements](#engagements) describes. Its files have mode 0600:
 
 | File | Content |
 |---|---|
@@ -291,6 +299,37 @@ with mode 0700. Its files have mode 0600:
 The log folder is `~/.local/state/tlogger/sessions` unless the config names another one. The
 header of `output.raw`, the timing file, the journal, the stamps and the prompt segment use UTC;
 the recorded shell keeps your own time zone.
+
+### Engagements
+
+An engagement keeps the sessions of one job apart from those of others, in a folder of its own
+in the log folder, with its own `MANIFEST`:
+
+```bash
+tlogger engagement acme
+```
+
+The next sessions then go into `<log folder>/acme/`. `tlogger engagement` prints the engagement,
+or `none`, and `tlogger engagement --none` clears it, so that the next sessions go into the log
+folder itself again. Set the engagement before you open the first terminal of the job: new
+terminals and the next `tlogger start` use it, and a terminal that records already keeps its
+session where it started.
+
+- A name has letters, digits, `.`, `_` and `-`, at most 64 characters, and starts with a letter
+  or a digit. `MANIFEST` and a name shaped like a session id are refused. Upper and lower case
+  count as different, so `Acme` and `acme` are two engagements.
+- A bad name exits 2 with that rule and changes nothing.
+- `tlogger engagement` writes only the `engagement=` line, as `tlogger mode` writes the `mode=`
+  line: it keeps every other byte of the config, which it replaces in one rename with mode 0600.
+  `--none` writes `engagement=`. It refuses a config with an error, apart from an invalid
+  `engagement` line, which `--none` or a new name replaces.
+- It creates no folder. The first recording creates the engagement folder with mode 0700, and
+  uses one that exists already as it is, after the same checks as on the log folder.
+- An exported `TLOGGER_ENGAGEMENT` wins over the config in the shell that has it, and
+  `tlogger engagement` notes that.
+
+Sessions recorded before engagements existed, or while none is set, stay directly in the log
+folder, with its `MANIFEST`. tlogger moves no session.
 
 ### Command journal and prompt segment
 
@@ -420,6 +459,8 @@ never runs it.
 |---|---|---|
 | `mode` | `auto` or `manual` | `manual` |
 | `logdir` | An absolute path | `~/.local/state/tlogger/sessions` |
+| `logdir_mount` | The absolute path where the volume that holds the log folder is mounted; a recording then refuses while that volume is not mounted or does not hold the log folder. Empty for no such check | empty |
+| `engagement` | The name of the engagement, whose folder in the log folder takes the new sessions, as [Engagements](#engagements) describes; empty for none | empty |
 | `record_input` | `yes`, or `no` to write no `input.raw` | `yes` |
 | `min_free_mb` | The free space in MB that a recording needs in the log folder | `200` |
 | `record_ssh` | `yes`, or `no` so that an SSH login does not record itself in auto mode | `yes` |
@@ -433,7 +474,9 @@ never runs it.
 
 An exported `TLOGGER_<KEY>` variable, such as `TLOGGER_LOGDIR=/home/kali/evidence` or
 `TLOGGER_PROMPT=off`, wins over the file in the shell that has it and in the shells that shell
-starts. An invalid value gets its default and one warning. The config also takes `recorder`, the
+starts. An invalid value gets its default and one warning, except for `logdir_mount` and
+`engagement`: there an invalid value makes a recording refuse, since a check that turned itself
+off, or a session in the wrong folder, would go unnoticed. The config also takes `recorder`, the
 path of the `script` binary, which exists for the tests.
 
 These variables give a terminal profile a policy of its own: set them in the environment that the
@@ -441,28 +484,109 @@ profile, or the launcher that opens it, gives the shell. `TLOGGER_MODE=manual` m
 terminals of that profile record only on request, `TLOGGER_RECORD_SSH=no` and
 `TLOGGER_RECORD_TMUX=no` act as the keys do, and `TLOGGER_DISABLE=1` keeps them from recording at
 all. In a terminal where `TLOGGER_MODE` is set, `tlogger mode` notes that it wins over the config
-there.
+there; `tlogger engagement` does the same for `TLOGGER_ENGAGEMENT`.
 
 ### Kill switches and refusals
 
 `TLOGGER_DISABLE=1` in the environment, or a file named `disable` in `~/.config/tlogger`, stops
 `tlogger start` and, in auto mode, the recording of each new terminal, which then shows the red
-notice below as it opens. Before it records, a recording also checks that nothing records the
-terminal already, that `/usr/bin/script` is util-linux 2.35 or newer, that the log folder is a
-folder of yours, not a symlink, that you can write in (a missing one is created with mode 0700),
-that its group and other users cannot write in it unless its sticky bit is set, and that it has
-at least `min_free_mb` MB and 100 inodes free. It also refuses when the new session folder or its
-files do not keep their private modes, as on a file system without POSIX modes such as vfat. When
-a check fails, it prints a red `tlogger: NOT recording this terminal: <reason>`, records nothing
-and leaves the shell as it was. A recording that fails to start, or ends without `exit`, Ctrl+D
-or `tlogger stop`, for example because the `script` process was killed, gets a red or yellow
-notice too. In auto mode the terminal then stays open, and the rest of the rc loads.
+notice below as it opens. Before it records, a recording also checks:
+
+- that nothing records the terminal already, and that `/usr/bin/script` is util-linux 2.35 or
+  newer;
+- with `logdir_mount` set, that a volume is mounted there, that it is not an automount point
+  that waits to be opened, and that the log folder is that mount point or lies inside it;
+- that the log folder exists. A missing log folder is created, with mode 0700, only when it is
+  the default one, or when it lies on the volume of `logdir_mount`, which was just found mounted.
+  Any other missing log folder is refused, and so is the default one while `logdir_mount` is set
+  and not mounted;
+- that the log folder is a folder of yours, not a symlink, that you can write in, and that its
+  group and other users cannot write in it unless its sticky bit is set;
+- with an engagement set, that its name is valid, and the same folder checks on the engagement
+  folder, which is created with mode 0700 when it is missing;
+- that the folder that takes the session has at least `min_free_mb` MB and 100 inodes free.
+
+It also refuses when the new session folder or its files do not keep their private modes, as on a
+file system without POSIX modes such as vfat. When a check fails, it prints a red
+`tlogger: NOT recording this terminal: <reason>`, records nothing and leaves the shell as it was.
+The reasons of the checks on the volume and the engagement read:
+
+```text
+tlogger: NOT recording this terminal: the volume /srv/work of the log folder is not mounted
+tlogger: NOT recording this terminal: the volume /srv/work of the log folder is not mounted yet (automount); open it, then run tlogger start
+tlogger: NOT recording this terminal: the log folder ~/evidence does not lie on the volume /srv/work that logdir_mount names
+tlogger: NOT recording this terminal: logdir_mount in the config is not an absolute path
+tlogger: NOT recording this terminal: the log folder /srv/work/tlogger does not exist; mount its volume or create the folder
+tlogger: NOT recording this terminal: engagement in the config is not a valid name
+tlogger: NOT recording this terminal: the engagement folder /srv/work/tlogger/acme is writable by its group or by others
+```
+
+Mount the volume, or fix the config, then run `tlogger start` or open a new terminal. A recording
+that fails to start, or ends without `exit`, Ctrl+D or `tlogger stop`, for example because the
+`script` process was killed, gets a red or yellow notice too. In auto mode the terminal then
+stays open, the prompt shows `NOREC`, and the rest of the rc loads.
 
 > **Warning:** the session folders hold secrets in cleartext: every password typed in a recorded
 > terminal, and every key, token or hash it showed. Keep the log folder on encrypted storage, such
-> as a LUKS volume, with its private permissions. A recording creates a missing log folder, so
-> mount that volume before you open a terminal, in auto mode above all: while it is not mounted,
-> the logs can land unencrypted on the disk beneath its mount point.
+> as a LUKS volume, with its private permissions, and run `tlogger doctor` to check it. While the
+> volume is not mounted, its mount point is a plain folder on the disk beneath, and logs written
+> there are not encrypted.
+>
+> - A recording no longer creates a missing log folder other than the default. That stops the
+>   most common way logs land on the disk beneath, but not a log folder that is the mount point
+>   itself, or one that a recording created there before.
+> - Set `logdir_mount` to the volume's mount point, as in `logdir_mount=/srv/work` with
+>   `logdir=/srv/work/tlogger`. A recording, in auto mode too, then refuses while that volume is
+>   not mounted.
+> - tlogger compares `logdir_mount` with the log folder as written, and with the mount points
+>   that the kernel lists, which are real paths. When the path to the log folder runs through a
+>   symlink, write both settings with the real path, as `readlink -f` prints it.
+> - The check runs as a recording starts, not during one. Keep the volume mounted until the
+>   recordings have ended.
+
+### Checking the log folder
+
+`tlogger doctor` checks the log folder of the config, or the default one, and the engagement
+folder the next session will use. It prints one line per check, and changes nothing:
+
+```text
+tlogger doctor: ~/.local/state/tlogger/sessions
+  ok       volume       on /, no unmounted fstab entry at or above the log folder
+  ok       folder       exists, yours, mode 700
+  ok       permissions  ext4 keeps Unix permissions
+  ok       encryption   LUKS2, under LVM
+  engagement            none; new sessions go into the log folder
+No warnings. Nothing was changed.
+```
+
+Each check says `ok` when it passed, `warn` for a problem and what to do about it, and
+`unknown` when doctor cannot tell, with what to check by hand. Doctor exits 0 when every check
+says `ok`, and 1 otherwise.
+
+| Check | What it looks at |
+|---|---|
+| `volume` | With `logdir_mount` set: that a volume is mounted there, not only an automount point, and that it holds the log folder, with no deeper volume in between, mounted or an unmounted entry of `/etc/fstab`. Without it: that no entry of `/etc/fstab` at or above the log folder is unmounted, and that the log folder lies on `/`. Without `logdir_mount`, a warning prints the line to add to the config, `logdir_mount=<mount point>`; with it, a warning about a deeper volume prints the line to change it to. Under your home folder that line shows `~`, which you write out as the full path. A log folder that exists on the disk beneath an unmounted volume is named, with its number of entries |
+| `folder` | That the folder exists, is a real folder and not a symlink, is yours, and that its group and other users have no access (`mode & 077` is 0). A missing engagement folder is `ok`, since the first recording creates it |
+| `permissions` | That the file system keeps Unix permissions. FAT, exFAT, NTFS, the shared folders of a virtual machine (VMware, VirtualBox, 9p, virtiofs), WSL's Windows drives and SMB do not: there, 0700 and 0600 mean nothing |
+| `encryption` | That every layer under the file system leads through a LUKS or other dm-crypt layer before it reaches a disk, as with the Kali installer's encrypted LVM; or that the file system encrypts itself, as `ecryptfs` and `gocryptfs` do. `tmpfs`, NFS, SMB and `sshfs` are warnings. `overlay`, `zfs` and other types are `unknown` |
+| `config` | Only when the config has an error: doctor names it, and checks the default log folder |
+
+An engagement folder that lies on another mount than the log folder gets the volume,
+permissions and encryption checks too. An exported `TLOGGER_LOGDIR`, `TLOGGER_LOGDIR_MOUNT` or
+`TLOGGER_ENGAGEMENT` gets a note on stderr: in that terminal it wins over the config, and doctor
+checked the config's value.
+
+Doctor cannot see disk encryption outside Kali, such as that of the host when Kali runs in a
+virtual machine, a self-encrypting drive, or fscrypt, which `lsattr -d` shows. On those, "no
+encryption found" is a warning that you check by hand.
+
+Doctor only reads: `/proc/self/mountinfo`, `/sys`, `/etc/fstab` and the folder modes. It creates
+no folder, writes no file and runs no root tool, such as `cryptsetup` or `blkid`. It does not
+touch a path behind an automount point that is not mounted yet, since that could mount it and ask
+for a passphrase. Every look it takes at the folder's path runs under `timeout`, so a network
+share, a FUSE remote or a disk that stops answering gives `unknown` after 10 seconds instead of a
+hang, and so does a slow disk that wakes up; run `tlogger doctor` again then. Doctor needs
+`timeout`, from coreutils.
 
 ## Viewing a session
 
@@ -475,12 +599,21 @@ writes, moves or renames them; sealing only makes them read-only. Three commands
 | `tlogger show [SESSION]` | Pages the transcript with `less`, after rendering it when `transcript.txt` is missing, older than the logs, or not what `render` writes (see below); without a terminal on stdout, prints it |
 | `tlogger replay [--speed N] [--maxdelay S] [SESSION]` | Replays the session in this terminal at its recorded pace with util-linux `scriptreplay`, through a filter; `--speed 2` replays twice as fast and `--speed 0.5` at half the pace, and `--maxdelay 1` waits at most a second between two outputs. Space pauses, Up and Down change the speed, Ctrl+C stops, and Ctrl+Z suspends it until `fg`. Keys still queued when a replay ends are discarded |
 
-`SESSION` is a session id, which names a folder in the log folder, such as
-`20261104T101500Z-a1B2c3`; or a path to a session folder anywhere, by any name, which holds a
-`/`, such as `./20261104T101500Z-a1B2c3` or `/media/evidence/case-1`; or nothing, for the newest
-session in the log folder. A session folder must be a real folder of yours, not a symlink, with
-`output.raw` and `timing` as regular files of yours. Without a log folder or a session in it, the
-commands exit 3; with a `SESSION` they cannot use, 1.
+`SESSION` is a session id, which names a folder in the log folder or an engagement folder in it,
+such as `20261104T101500Z-a1B2c3`; or a path to a session folder anywhere, by any name, which
+holds a `/`, such as `./20261104T101500Z-a1B2c3` or `/media/evidence/case-1`; or nothing, for the
+newest session in the log folder and its engagement folders. A session folder must be a real
+folder of yours, not a symlink, with `output.raw` and `timing` as regular files of yours. Without
+a log folder or a session in it, the commands exit 3; with a `SESSION` they cannot use, 1.
+
+An engagement folder, for these commands and for `list`, `seal` and `verify`, is a folder
+directly in the log folder that is named as an engagement may be, is a real folder and not a
+symlink, and is yours. tlogger looks into no other subfolder. Ids start with the time, so one id
+in two folders comes only from a copy by hand; tlogger then refuses, and asks for the path:
+
+```text
+tlogger: session 20261104T101500Z-a1B2c3 is in more than one folder of ~/.local/state/tlogger/sessions; name the one you mean by its path
+```
 
 `render` and `show` need `python3` and `python3-pyte` (`sudo apt install python3-pyte`), and
 `replay` needs `python3` and `scriptreplay`, which Kali installs by default. tlogger runs
@@ -599,7 +732,8 @@ Sealing writes `SHA256SUMS` in the session folder, with the SHA-256 of each log 
 those files and `SHA256SUMS` read-only (0400), writes `SEAL`, 0400, with the tlogger version, the
 UTC time and the SHA-256 of `SHA256SUMS`, and flushes them to the disk. It then adds the line
 `<SHA-256 of SHA256SUMS>  <session>/SHA256SUMS` to `MANIFEST` in the folder that holds the
-session, the log folder for a session id, so that `sha256sum -c MANIFEST` there and
+session: the engagement folder for a session of an engagement, and the log folder for one
+recorded without. So there is one `MANIFEST` per folder, and `sha256sum -c MANIFEST` there and
 `sha256sum -c SHA256SUMS` in a session folder check them with standard tools. When that line
 cannot be written, as with a read-only `MANIFEST`, the session is sealed without it, and
 `tlogger seal` on it adds the line later. The folder itself stays 0700, so that `render` can
@@ -607,9 +741,9 @@ still write `transcript.txt`, which is derived and not sealed.
 
 | Command | What it does |
 |---|---|
-| `tlogger seal [SESSION \| --all]` | Seals a session whose recording has ended, by default the newest; `--all` seals every ended session of the log folder and names the ones still recorded |
+| `tlogger seal [SESSION \| --all]` | Seals a session whose recording has ended, by default the newest; `--all` seals every ended session of the log folder and its engagement folders, and names the ones still recorded |
 | `tlogger verify [SESSION \| --all]` | Prints `<session>  ok`, `changed`, `unsealed` or `recording` for the session, or for every session with `--all`, and names each change on stderr: a log changed, missing or no longer 0400, a file the seal does not cover, or `SHA256SUMS` that matches neither its `SEAL` nor its `MANIFEST` line |
-| `tlogger list` | Lists the sessions of the log folder, oldest first: state (`recording`, `ended`, `sealed`, `changed`, or `unknown` without a recorder file), start in UTC, recorded time, number of commands, and whether a transcript exists |
+| `tlogger list` | Lists the sessions of the log folder and its engagement folders, oldest first: state (`recording`, `ended`, `sealed`, `changed`, or `unknown` without a recorder file), start in UTC, recorded time, number of commands, whether a transcript exists, and the engagement, or `-` for a session directly in the log folder |
 
 `seal` refuses a session whose recorder still runs, which it tells from the `recorder` file: the
 process, its start time and the boot it ran in. It refuses one without that file, and a folder
@@ -618,15 +752,31 @@ ended unexpectedly is not sealed by itself; its notice says to run `tlogger seal
 0 when nothing changed and every finished session is sealed, 1 when a sealed session changed, and
 4 when a finished session is not sealed yet; a session still recorded does not count.
 
+`seal --all` and `verify --all` sort the sessions of every folder by id, so by start time. A
+folder that you made by hand in the log folder counts as an engagement folder when it is named
+and owned as one, as [Viewing a session](#viewing-a-session) describes: `seal --all` seals its
+ended sessions too, makes their logs read-only and adds their lines to its `MANIFEST`.
+
+The sessions of 0.2.0 and older stay where they are, directly in the log folder, with its
+`MANIFEST` as it was. `list` shows them with the engagement `-`, and `verify` keeps saying `ok`
+for them. tlogger never moves a session and never removes a `MANIFEST` line. If you move a sealed
+session by hand, for example into another engagement folder, `verify` says `changed` for it,
+since no `MANIFEST` line there names it, until you move it back or run `tlogger seal <id>`, which
+adds the missing line to the `MANIFEST` of its new folder as long as `SHA256SUMS` still matches
+its `SEAL`. So set the engagement before the first terminal of the job.
+
 > **Note:** the sums show a later change only against a copy kept apart from the logs. Anyone who
 > can write the log folder can also rewrite `SHA256SUMS`, `SEAL` and `MANIFEST` together. Note the
-> sum that the terminal prints, or keep a copy of `MANIFEST`, in the engagement's records.
+> sum that the terminal prints, or keep a copy of the engagement folder's `MANIFEST`, in the
+> engagement's records.
 
 ## Security
 
 The logs hold everything typed and shown in a recorded terminal, passwords included.
 
 - Keep the log folder on encrypted storage, such as a LUKS volume, with private permissions.
+  `tlogger doctor` checks both, and `logdir_mount` keeps a recording from starting while that
+  volume is not mounted.
 - Record only systems and engagements you are authorized to test. Keep and destroy the logs
   under the engagement's rules.
 - Treat what a target printed as hostile: view a session with `tlogger show` or
