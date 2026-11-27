@@ -171,6 +171,35 @@ volume_at() {
 # readlink and timeout append '<name>\t<arguments>' to CALLS and run the real tool; a tool that
 # runs under the stand-in for timeout logs '<name> under timeout\t<arguments>'. cryptsetup,
 # blkid, dmsetup, lsblk, findmnt, lsattr and sudo, which doctor must never run, only log.
+fake_timeout() {
+    local bin="$BATS_TEST_TMPDIR/timeout-bin"
+    mkdir -p "$bin"
+    cat > "$bin/timeout" << 'EOF'
+#!/usr/bin/env bash
+# A stand-in for timeout -k 2 N: a call whose command line matches a rule of TIMEOUT_RULES, lines
+# 'STATUS GLOB', exits STATUS at once, as a command that runs out of time exits 124.
+shift 3
+while read -r status glob; do
+    if [[ -n $glob && "$*" == $glob ]]; then
+        exit "$status"
+    fi
+done <<< "${TIMEOUT_RULES-}"
+exec "$@"
+EOF
+    chmod 755 "$bin/timeout"
+    PATH="$bin:$PATH"
+}
+
+# Fail unless the last doctor run said unknown, and that a part did not answer, for each check of
+# the log folder that looks at it: volume, folder, permissions and encryption; never ok.
+assert_all_unknown() {
+    local check
+    assert_doctor 1 || return 1
+    for check in volume folder permissions encryption; do
+        assert_check log "$check" unknown 'did not answer within 10 seconds' || return 1
+    done
+}
+
 log_calls() {
     local bin="$BATS_TEST_TMPDIR/calls-bin" name real extra
     CALLS="$BATS_TEST_TMPDIR/calls"
@@ -397,6 +426,53 @@ assert_doctor() {
             [ -z "$(calls_on "$V/evidence" 1)" ]
         fi
     done
+}
+
+@test "a part of the path that does not answer makes every check of the folder unknown, never ok" {
+    volume_at ext4 254:0 "$LUKS_SOURCE"
+    fake_timeout
+    TIMEOUT_RULES="124 test -L $V/evidence/tlogger" run_tlogger doctor
+    assert_all_unknown
+    # The walk stopped there: no later look at the folder waits again.
+    [[ $(grep -c 'did not answer' <<< "$output") -eq 4 ]]
+}
+
+@test "a symlink whose readlink does not answer leaves every check of the folder unknown" {
+    root_on_lvm
+    mkdir -p "$V/real/tlogger"
+    chmod 700 "$V/real/tlogger"
+    ln -s "$V/real" "$V/link"
+    write_config "logdir=$V/link/tlogger"$'\n'
+    fake_timeout
+    TIMEOUT_RULES="124 readlink -- $V/link" run_tlogger doctor
+    assert_all_unknown
+}
+
+@test "a look at the folder that does not answer after stat failed is unknown, not missing" {
+    volume_at ext4 254:0 "$LUKS_SOURCE"
+    local rules="1 stat * $V/evidence/tlogger"$'\n'"124 test -e $V/evidence/tlogger"
+    fake_timeout
+    TIMEOUT_RULES=$rules run_tlogger doctor
+    assert_doctor 1
+    assert_check log folder unknown 'did not answer within 10 seconds'
+}
+
+@test "the text of a look that runs out of time names a slow disk, and says to run doctor again" {
+    volume_at ext4 254:0 "$LUKS_SOURCE"
+    fake_timeout
+    TIMEOUT_RULES="124 stat * $V/evidence/tlogger" run_tlogger doctor
+    assert_doctor 1
+    assert_check log folder unknown 'did not answer within 10 seconds' 'slow' \
+        'run tlogger doctor again'
+}
+
+@test "doctor refuses, and names timeout, when timeout is not on PATH" {
+    local bin="$BATS_TEST_TMPDIR/no-timeout-bin"
+    mkdir -p "$bin"
+    run --separate-stderr env PATH="$bin" "$BASH" "$TLOGGER" doctor < /dev/null
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+    [[ $stderr == *'doctor needs timeout, from coreutils'* ]]
 }
 
 @test "doctor touches the log folder only under timeout, also on a file system it does not know" {
