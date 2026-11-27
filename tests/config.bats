@@ -2,6 +2,10 @@
 # Tests for lib/config.zsh, the plugin's config parser, run in zsh -f: the defaults, values from
 # the config, exported TLOGGER_<KEY> presets, invalid values and lines, values that look like
 # code, an unsafe config file, and parity with bin/tlogger's read_config. They need a real zsh.
+# The keys engagement and logdir_mount are empty by default in _tlogger_cfg. lib/config.zsh keeps
+# an invalid value of either one as it is, without a warning, so that the plugin refuses to
+# record; bin/tlogger's read_config sets CONFIG_ERROR for it, and otherwise always sets
+# CONFIG_ENGAGEMENT and CONFIG_LOGDIR_MOUNT, empty when the config lacks the key.
 
 bats_require_minimum_version 1.5.0
 
@@ -55,6 +59,18 @@ load_display() {
         zsh "$REPO_ROOT/lib/config.zsh" < /dev/null
 }
 
+# Load the config as load_config does, but print engagement and logdir_mount, separated by |;
+# a key that _tlogger_cfg lacks prints as unset.
+load_places() {
+    # zsh expands these, not bash.
+    # shellcheck disable=SC2016
+    run --separate-stderr zsh -f -c '
+        source "$1" || exit 1
+        _tlogger_load_config || exit 1
+        print -r -- "${_tlogger_cfg[engagement]-unset}|${_tlogger_cfg[logdir_mount]-unset}"' \
+        zsh "$REPO_ROOT/lib/config.zsh" < /dev/null
+}
+
 # Fail unless the last load_config exited 0 and printed MODE, LOGDIR, RECORD_INPUT, MIN_FREE_MB
 # and RECORDER, with the default config folder.
 assert_config() {
@@ -68,13 +84,17 @@ assert_config() {
     fi
 }
 
-# Print the mode and the logdir that lib/config.zsh reads from the config, one per line. Fails
-# when it warns, since every config the parity test uses is valid.
-zsh_mode_logdir() {
+# Print the mode, logdir, engagement and logdir_mount that lib/config.zsh reads from the config,
+# as one KEY=VALUE line each; a key that _tlogger_cfg lacks prints as unset. Fails when it warns,
+# since every config the parity test uses is valid.
+zsh_shared_keys() {
     local out
     # zsh expands these, not bash.
     # shellcheck disable=SC2016
-    out=$(zsh -f -c 'source "$1" && _tlogger_load_config && print -rl -- "$_tlogger_cfg[mode]" "$_tlogger_cfg[logdir]"' \
+    out=$(zsh -f -c 'source "$1" && _tlogger_load_config &&
+        print -rl -- "mode=$_tlogger_cfg[mode]" "logdir=$_tlogger_cfg[logdir]" \
+            "engagement=${_tlogger_cfg[engagement]-unset}" \
+            "logdir_mount=${_tlogger_cfg[logdir_mount]-unset}"' \
         zsh "$REPO_ROOT/lib/config.zsh" < /dev/null 2> "$BATS_TEST_TMPDIR/zsh-stderr") || return 1
     if [[ -s $BATS_TEST_TMPDIR/zsh-stderr ]]; then
         printf 'lib/config.zsh warned:\n' >&2
@@ -84,10 +104,11 @@ zsh_mode_logdir() {
     printf '%s\n' "$out"
 }
 
-# Print the mode and the logdir that bin/tlogger's read_config reads from the config, one per
-# line, with a key the config lacks mapped to the default the plugin uses. Fails when read_config
-# refuses the config.
-bash_mode_logdir() {
+# Print the mode, logdir, engagement and logdir_mount that bin/tlogger's read_config reads from
+# the config, as zsh_shared_keys prints them, with a mode or logdir the config lacks mapped to
+# the default the plugin uses; CONFIG_ENGAGEMENT and CONFIG_LOGDIR_MOUNT print as unset when
+# read_config leaves them unset. Fails when read_config refuses the config.
+bash_shared_keys() {
     # bash expands these in the child, after the source.
     # shellcheck disable=SC2016
     bash -c 'source "$1" || exit 1
@@ -97,13 +118,30 @@ bash_mode_logdir() {
             printf "read_config: the config %s\n" "$CONFIG_ERROR" >&2
             exit 1
         fi
-        printf "%s\n" "${CONFIG_MODE:-manual}" "${CONFIG_LOGDIR:-$3}"' \
+        printf "%s\n" "mode=${CONFIG_MODE:-manual}" "logdir=${CONFIG_LOGDIR:-$3}" \
+            "engagement=${CONFIG_ENGAGEMENT-unset}" "logdir_mount=${CONFIG_LOGDIR_MOUNT-unset}"' \
         _ "$TLOGGER" "$CONFIG" "$DEFAULT_LOGDIR" < /dev/null
+}
+
+# Print the CONFIG_ERROR that bin/tlogger's read_config sets for the config, or an empty line
+# when it accepts the config.
+bash_config_error() {
+    # bash expands these in the child, after the source.
+    # shellcheck disable=SC2016
+    bash -c 'source "$1" || exit 1
+        CONFIG_FILE=$2
+        read_config
+        printf "%s\n" "$CONFIG_ERROR"' _ "$TLOGGER" "$CONFIG" < /dev/null
 }
 
 @test "without a config or a preset every key has its default" {
     load_config
     assert_config manual "$DEFAULT_LOGDIR" yes 200 /usr/bin/script
+    [ -z "$stderr" ]
+    # No engagement and no mount check.
+    load_places
+    [ "$status" -eq 0 ]
+    [ "$output" = '|' ]
     [ -z "$stderr" ]
 }
 
@@ -138,6 +176,12 @@ bash_mode_logdir() {
     TLOGGER_MODE=manual TLOGGER_LOGDIR=/home/kali/env-logs/ TLOGGER_RECORD_INPUT=' yes ' \
         TLOGGER_MIN_FREE_MB=50 TLOGGER_RECORDER=/opt/script load_config
     assert_config manual /home/kali/env-logs yes 50 /opt/script
+    [ -z "$stderr" ]
+    # The two keys of the log folder's place come for free, from the same loop.
+    printf '%s\n' engagement=acme logdir_mount=/srv/work >> "$CONFIG"
+    TLOGGER_ENGAGEMENT=' demo ' TLOGGER_LOGDIR_MOUNT=/home/kali/evidence/ load_places
+    [ "$status" -eq 0 ]
+    [ "$output" = 'demo|/home/kali/evidence' ]
     [ -z "$stderr" ]
     # An empty preset counts as unset.
     TLOGGER_MODE='' load_config
@@ -251,6 +295,81 @@ bash_mode_logdir() {
     [ -z "$(find "$BATS_TEST_TMPDIR" -name 'pwned*')" ]
 }
 
+@test "engagement and logdir_mount take the config, trimmed, and an empty value means none" {
+    local value
+    printf '%s\n' 'engagement= demo ' $'logdir_mount=/srv/work//\t' > "$CONFIG"
+    load_places
+    [ "$status" -eq 0 ]
+    [ "$output" = 'demo|/srv/work' ]
+    [ -z "$stderr" ]
+    # An empty preset counts as unset.
+    TLOGGER_ENGAGEMENT='' TLOGGER_LOGDIR_MOUNT='' load_places
+    [ "$output" = 'demo|/srv/work' ]
+    # An empty value in the config is no engagement and no mount check, without a warning.
+    printf 'engagement=\nlogdir_mount=\n' > "$CONFIG"
+    load_places
+    [ "$status" -eq 0 ]
+    [ "$output" = '|' ]
+    [ -z "$stderr" ]
+    # The root folder stays /.
+    printf 'logdir_mount=/\n' > "$CONFIG"
+    load_places
+    [ "$output" = '|/' ]
+    [ -z "$stderr" ]
+    # Letters, digits, . _ and -, at most 64 characters, starting with a letter or a digit; the
+    # case is kept, and read_config takes the same names.
+    for value in a Acme 9lives acme.2026_q4-x manifest "$(printf 'a%.0s' {1..64})"; do
+        printf 'engagement=%s\n' "$value" > "$CONFIG"
+        load_places
+        [ "$output" = "$value|" ]
+        [ -z "$stderr" ]
+        [ -z "$(bash_config_error)" ]
+        [ "$(bash_shared_keys)" = "$(zsh_shared_keys)" ]
+    done
+}
+
+@test "a bad engagement or logdir_mount stays for the plugin to refuse; read_config refuses it" {
+    local value err
+    # Names that are not engagement names: a path, a leading - or ., a space, /, a glob, the
+    # MANIFEST, a session id, 65 characters and code, which must stay text.
+    # shellcheck disable=SC2016
+    local -a names=('../acme' -acme .acme 'acme corp' acme/x 'ac*me' MANIFEST
+        20261104T101500Z-a1B2c3 "$(printf 'a%.0s' {1..65})" '$(touch pwned-engagement)')
+    # shellcheck disable=SC2016
+    local -a mounts=(relative/evidence evidence $'/srv/a\tb' '$(touch pwned-mount)')
+    mkdir -p "$BATS_TEST_TMPDIR/work"
+    cd "$BATS_TEST_TMPDIR/work"
+    for value in "${names[@]}"; do
+        printf 'mode=auto\nengagement=%s\n' "$value" > "$CONFIG"
+        load_places
+        [ "$status" -eq 0 ]
+        [ "$output" = "$value|" ]
+        [ -z "$stderr" ]
+        err=$(bash_config_error)
+        if [[ $err != *engagement*'line 2'* ]]; then
+            printf 'read_config accepted the engagement %s: %s\n' "$value" "$err" >&2
+            return 1
+        fi
+    done
+    for value in "${mounts[@]}"; do
+        printf 'logdir_mount=%s\n' "$value" > "$CONFIG"
+        load_places
+        [ "$status" -eq 0 ]
+        [ "$output" = "|$value" ]
+        [ -z "$stderr" ]
+        err=$(bash_config_error)
+        if [[ $err != *logdir_mount*'line 1'* ]]; then
+            printf 'read_config accepted the logdir_mount %s: %s\n' "$value" "$err" >&2
+            return 1
+        fi
+    done
+    # A preset is kept the same way.
+    TLOGGER_ENGAGEMENT=MANIFEST TLOGGER_LOGDIR_MOUNT=relative load_places
+    [ "$output" = 'MANIFEST|relative' ]
+    [ -z "$stderr" ]
+    [ -z "$(find "$BATS_TEST_TMPDIR" -name 'pwned*')" ]
+}
+
 @test "min_free_mb takes 1 to 12 digits only, and logdir no control character" {
     local value
     for value in -5 1e3 0x10 ' ' 1234567890123 '1 000'; do
@@ -293,7 +412,7 @@ bash_mode_logdir() {
 }
 
 @test "comments, blank lines and unknown keys are skipped, and every other bad line warns" {
-    printf '%s\n' '# a comment' '' '   # an indented comment' $'\t ' 'engagement=demo' \
+    printf '%s\n' '# a comment' '' '   # an indented comment' $'\t ' 'colour=blue' \
         'mode=auto' ' mode=manual' 'Mode=manual' 'mode = manual' 'mode=manual' 'just text' > "$CONFIG"
     load_config
     assert_config auto "$DEFAULT_LOGDIR" yes 200 /usr/bin/script
@@ -327,31 +446,38 @@ bash_mode_logdir() {
     chmod 600 "$CONFIG"
 }
 
-@test "lib/config.zsh and bin/tlogger's read_config read the same mode and logdir" {
+@test "lib/config.zsh and read_config read the same mode, logdir, engagement and logdir_mount" {
     local name zsh_read bash_read
-    # Configs that both parsers accept, and the mode and logdir each one gives.
+    # Configs that both parsers accept, and the mode, logdir, engagement and logdir_mount each
+    # one gives.
     local -A configs=(
         [plain]=$'mode=auto\nlogdir=/home/kali/evidence\n'
         [spaced]=$'# a comment\n\n   # an indented comment\n\t \nmode= manual \t\nlogdir=/home/kali/ev//  \n'
         [crlf]=$'mode=auto\r\nlogdir=/home/kali/crlf\r\n'
-        [plugin-keys]=$'record_input=no\nmin_free_mb=500\nrecorder=/usr/bin/script\nrecord_ssh=no\nrecord_tmux=no\nprompt=off\nstamp=off\nstamp_vpn=off\nvpn_ifaces=tun*, wg0\nhistory_timestamps=yes\nengagement=demo\nmode=auto\n'
+        [plugin-keys]=$'record_input=no\nmin_free_mb=500\nrecorder=/usr/bin/script\nrecord_ssh=no\nrecord_tmux=no\nprompt=off\nstamp=off\nstamp_vpn=off\nvpn_ifaces=tun*, wg0\nhistory_timestamps=yes\ncolour=blue\nmode=auto\n'
         [root]=$'logdir=/\n'
+        [places]=$'engagement= demo \nlogdir_mount=/srv/work//\nlogdir=/srv/work/tlogger\n'
+        [places-crlf]=$'engagement=acme\r\nlogdir_mount=/\r\n'
+        [no-places]=$'engagement=\nlogdir_mount=  \nmode=auto\n'
         [no-final-newline]='mode=auto'
         [empty]=''
     )
     local -A wants=(
-        [plain]=$'auto\n/home/kali/evidence'
-        [spaced]=$'manual\n/home/kali/ev'
-        [crlf]=$'auto\n/home/kali/crlf'
-        [plugin-keys]="auto"$'\n'"$DEFAULT_LOGDIR"
-        [root]=$'manual\n/'
-        [no-final-newline]="auto"$'\n'"$DEFAULT_LOGDIR"
-        [empty]="manual"$'\n'"$DEFAULT_LOGDIR"
+        [plain]=$'mode=auto\nlogdir=/home/kali/evidence\nengagement=\nlogdir_mount='
+        [spaced]=$'mode=manual\nlogdir=/home/kali/ev\nengagement=\nlogdir_mount='
+        [crlf]=$'mode=auto\nlogdir=/home/kali/crlf\nengagement=\nlogdir_mount='
+        [plugin-keys]="mode=auto"$'\n'"logdir=$DEFAULT_LOGDIR"$'\nengagement=\nlogdir_mount='
+        [root]=$'mode=manual\nlogdir=/\nengagement=\nlogdir_mount='
+        [places]=$'mode=manual\nlogdir=/srv/work/tlogger\nengagement=demo\nlogdir_mount=/srv/work'
+        [places-crlf]="mode=manual"$'\n'"logdir=$DEFAULT_LOGDIR"$'\nengagement=acme\nlogdir_mount=/'
+        [no-places]="mode=auto"$'\n'"logdir=$DEFAULT_LOGDIR"$'\nengagement=\nlogdir_mount='
+        [no-final-newline]="mode=auto"$'\n'"logdir=$DEFAULT_LOGDIR"$'\nengagement=\nlogdir_mount='
+        [empty]="mode=manual"$'\n'"logdir=$DEFAULT_LOGDIR"$'\nengagement=\nlogdir_mount='
     )
     for name in "${!configs[@]}"; do
         printf '%s' "${configs[$name]}" > "$CONFIG"
-        zsh_read=$(zsh_mode_logdir)
-        bash_read=$(bash_mode_logdir)
+        zsh_read=$(zsh_shared_keys)
+        bash_read=$(bash_shared_keys)
         if [[ $zsh_read != "${wants[$name]}" || $bash_read != "$zsh_read" ]]; then
             printf 'config %s: expected\n%s\nlib/config.zsh read\n%s\nread_config read\n%s\n' \
                 "$name" "${wants[$name]}" "$zsh_read" "$bash_read" >&2

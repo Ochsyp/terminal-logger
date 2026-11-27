@@ -3,6 +3,13 @@
 # in TLOGGER_PROC): REC on the terminal its recorder records, EXT under another script process,
 # NOREC otherwise with the stale variables dropped, and the handshake and the exit of a recorded
 # shell. They need a real zsh and run no recorder.
+# Also the two helpers of _tlogger_preflight, called directly. Each returns 0 when its check
+# passes, and otherwise sets REPLY to the reason, the text after 'NOT recording this terminal: ',
+# and returns 1; neither prints anything or creates anything.
+# - _tlogger_mount_ok MOUNT LOGDIR: the volume guard of logdir_mount=MOUNT for the log folder
+#   LOGDIR, over <TLOGGER_PROC>/self/mountinfo (TLOGGER_PROC defaults to /proc).
+# - _tlogger_check_dir DIR WHAT: the checks of a folder that holds sessions, WHAT being
+#   'log folder' or 'engagement folder', as in 'the engagement folder ~/x is a symlink'.
 
 bats_require_minimum_version 1.5.0
 
@@ -53,11 +60,77 @@ run_guard() {
 }
 
 # Create HS_DIR, a session folder as tlogger start hands it to the recorded shell: directly under
-# the default logdir, named as tlogger names sessions, with an empty output.raw.
+# the default logdir, or in its engagement folder ENGAGEMENT when one is given, named as tlogger
+# names sessions, with an empty output.raw.
 make_hs_session() {
-    HS_DIR="$SESSIONS/20261104T101500Z-a1B2c3"
+    HS_DIR="$SESSIONS${1:+/$1}/20261104T101500Z-a1B2c3"
     mkdir -p "$HS_DIR"
     : > "$HS_DIR/output.raw"
+}
+
+# Write the fake <TLOGGER_PROC>/self/mountinfo with the rows ROW..., one per line.
+fake_mountinfo() {
+    mkdir -p "$PROC/self"
+    printf '%s\n' "$@" > "$PROC/self/mountinfo"
+}
+
+# Print a mountinfo row, as Linux writes it, for the mount point MOUNT with the file system type
+# TYPE and the optional fields OPTIONAL (default shared:1; empty for none). MOUNT is encoded as
+# the kernel encodes it: \134 for a backslash, \040 for a space, \011 for a tab, \012 for a
+# newline.
+mount_row() {
+    local mount=$1 type=$2 optional=${3-shared:1}
+    # The backslash goes first, so that the escapes the others add stay as they are. Quoted, the
+    # patterns and replacements are literal text in every bash.
+    mount=${mount//"\\"/"\\134"}
+    mount=${mount//" "/"\\040"}
+    mount=${mount//$'\t'/"\\011"}
+    mount=${mount//$'\n'/"\\012"}
+    printf '61 22 0:52 / %s rw,relatime %s- %s none rw\n' "$mount" "${optional:+$optional }" \
+        "$type"
+}
+
+# The row of the root file system.
+ROOT_ROW='22 1 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw,errors=remount-ro'
+
+# Run _tlogger_mount_ok MOUNT LOGDIR over the fake tree, through run_guard: it prints ok, or
+# 'refused: ' and the reason.
+run_mount_ok() {
+    # zsh expands these, not bash.
+    # shellcheck disable=SC2016
+    T_MOUNT=$1 T_LOGDIR=$2 run_guard '' 'if _tlogger_mount_ok "$T_MOUNT" "$T_LOGDIR"; then
+            print -r -- ok
+        else
+            print -r -- "refused: $REPLY"
+        fi'
+}
+
+# Fail unless _tlogger_mount_ok MOUNT LOGDIR, over the fake tree, prints WANT and nothing on
+# stderr.
+assert_mount_ok() {
+    run_mount_ok "$1" "$2"
+    if [[ $status -ne 0 || $output != "$3" || -n $stderr ]]; then
+        printf 'mount %s, log folder %s: expected\n%s\ngot, with exit %s:\n%s\nstderr:\n%s\n' \
+            "$1" "$2" "$3" "$status" "$output" "$stderr" >&2
+        return 1
+    fi
+}
+
+# Fail unless _tlogger_check_dir DIR WHAT prints WANT, ok or 'refused: ' and the reason, and
+# nothing on stderr.
+assert_check_dir() {
+    # zsh expands these, not bash.
+    # shellcheck disable=SC2016
+    T_DIR=$1 T_WHAT=$2 run_guard '' 'if _tlogger_check_dir "$T_DIR" "$T_WHAT"; then
+            print -r -- ok
+        else
+            print -r -- "refused: $REPLY"
+        fi'
+    if [[ $status -ne 0 || $output != "$3" || -n $stderr ]]; then
+        printf 'folder %s as the %s: expected\n%s\ngot, with exit %s:\n%s\nstderr:\n%s\n' \
+            "$1" "$2" "$3" "$status" "$output" "$stderr" >&2
+        return 1
+    fi
 }
 
 # Run the handshake for the folder DIR, with TZ unset outside the recording, over the fake tree
@@ -301,4 +374,148 @@ assert_handshake_refuses() {
     [ "$output" = "TZ=CET-1/scalar-export HS=000" ]
     [[ $stderr == "tlogger: warning: "*"/lib/config.zsh is missing or broken; tlogger cannot record"* ]]
     [ ! -e "$HS_DIR/started" ]
+}
+
+@test "the handshake accepts a session folder in an engagement folder of the log folder" {
+    make_hs_session acme
+    # Another engagement in the config: the handshake does not compare with it, so that a change
+    # while a terminal starts cannot break that recording.
+    mkdir -p "$HOME/.config/tlogger"
+    printf 'engagement=demo\n' > "$HOME/.config/tlogger/config"
+    TLOGGER_HS=$HS_DIR TLOGGER_HS_TZSET=0 TLOGGER_HS_TZ='' TZ=UTC0 run_guard "$HS_TREE" "$HS_REPORT"
+    [ "$status" -eq 0 ]
+    [ "${lines[0]}" = "REC main $HS_DIR" ]
+    [ "${lines[1]}" = "TZ=unset/ HS=000" ]
+    [ "$stderr" = "tlogger: REC 20261104T101500Z-a1B2c3" ]
+    [ -s "$HS_DIR/recorder" ]
+    [ -s "$HS_DIR/started" ]
+}
+
+@test "the handshake refuses a folder two levels down, or in a symlinked or misnamed engagement" {
+    need symlinks
+    local deep="$SESSIONS/a/b/20261104T101500Z-b2C3d4"
+    local hidden="$SESSIONS/.acme/20261104T101500Z-c3D4e5"
+    local idlike="$SESSIONS/20261104T101500Z-d4E5f6/20261104T101500Z-e5F6g7"
+    local real="$HOME/elsewhere/acme" dir
+    mkdir -p "$deep" "$hidden" "$idlike" "$real/20261104T101500Z-f6G7h8"
+    for dir in "$deep" "$hidden" "$idlike" "$real/20261104T101500Z-f6G7h8"; do
+        : > "$dir/output.raw"
+    done
+    ln -s "$real" "$SESSIONS/acme"
+    # Only a valid engagement name directly in the log folder counts: not a/b, not a name that
+    # starts with a dot and not a session id.
+    assert_handshake_refuses "$deep" 'its folder does not lie directly under the log folder'
+    assert_handshake_refuses "$hidden" 'its folder does not lie directly under the log folder'
+    assert_handshake_refuses "$idlike" 'its folder does not lie directly under the log folder'
+    assert_handshake_refuses "$SESSIONS/acme/20261104T101500Z-f6G7h8" \
+        "its engagement folder is a symlink, not a folder or another user's"
+}
+
+@test "the volume guard refuses a logdir_mount that nothing is mounted at" {
+    local want='refused: the volume ~/evidence of the log folder is not mounted'
+    # Another file system, a bind mount whose root, not its mount point, is that folder, and a
+    # mount below it.
+    fake_mountinfo "$ROOT_ROW" "$(mount_row /srv/work tmpfs)" \
+        "62 22 8:2 $HOME/evidence /srv/bind rw,relatime - ext4 /dev/sda2 rw" \
+        "$(mount_row "$HOME/evidence/tlogger" ext4)"
+    assert_mount_ok "$HOME/evidence" "$HOME/evidence/tlogger" "$want"
+    # A mount above it is not its volume either.
+    fake_mountinfo "$ROOT_ROW" "$(mount_row "$HOME" ext4)"
+    assert_mount_ok "$HOME/evidence" "$HOME/evidence/tlogger" "$want"
+    # Without a mountinfo to read, the guard fails closed.
+    rm "$PROC/self/mountinfo"
+    assert_mount_ok "$HOME/evidence" "$HOME/evidence/tlogger" "$want"
+}
+
+@test "the volume guard refuses a logdir_mount where only an automount point is" {
+    local want='refused: the volume ~/evidence of the log folder is not mounted yet (automount);'
+    want+=' open it, then run tlogger start'
+    fake_mountinfo "$ROOT_ROW" "$(mount_row "$HOME/evidence" autofs '')"
+    assert_mount_ok "$HOME/evidence" "$HOME/evidence/tlogger" "$want"
+}
+
+@test "the volume guard takes the last mountinfo row of the mount point" {
+    local want='refused: the volume ~/evidence of the log folder is not mounted yet (automount);'
+    want+=' open it, then run tlogger start'
+    # The automount point, then the volume mounted over it.
+    fake_mountinfo "$ROOT_ROW" "$(mount_row "$HOME/evidence" autofs '')" \
+        "$(mount_row "$HOME/evidence" ext4 'shared:7 master:3')"
+    assert_mount_ok "$HOME/evidence" "$HOME/evidence/tlogger" ok
+    fake_mountinfo "$ROOT_ROW" "$(mount_row "$HOME/evidence" ext4)" \
+        "$(mount_row "$HOME/evidence" autofs '')"
+    assert_mount_ok "$HOME/evidence" "$HOME/evidence/tlogger" "$want"
+}
+
+@test "the volume guard decodes the escapes in the mount point of a mountinfo row" {
+    fake_mountinfo "$ROOT_ROW" "$(mount_row "$HOME/my evidence" ext4)" \
+        "$(mount_row "$HOME/back\\slash" ext4 '')"
+    assert_mount_ok "$HOME/my evidence" "$HOME/my evidence/tlogger" ok
+    assert_mount_ok "$HOME/back\\slash" "$HOME/back\\slash/tlogger" ok
+    # The escape as the row writes it is not the mount point.
+    assert_mount_ok "$HOME/my\\040evidence" "$HOME/my\\040evidence/tlogger" \
+        'refused: the volume ~/my\040evidence of the log folder is not mounted'
+}
+
+@test "the volume guard refuses a log folder that does not lie on the volume of logdir_mount" {
+    local rest='does not lie on the volume ~/evidence that logdir_mount names'
+    fake_mountinfo "$ROOT_ROW" "$(mount_row "$HOME/evidence" ext4)"
+    assert_mount_ok "$HOME/evidence" "$HOME/other/tlogger" \
+        "refused: the log folder ~/other/tlogger $rest"
+    # A name that only begins as the mount point does is outside it, and so is its parent.
+    assert_mount_ok "$HOME/evidence" "$HOME/evidence2/tlogger" \
+        "refused: the log folder ~/evidence2/tlogger $rest"
+    assert_mount_ok "$HOME/evidence" "$HOME" "refused: the log folder ~ $rest"
+}
+
+@test "the volume guard refuses a logdir_mount that is not an absolute path" {
+    local mount
+    fake_mountinfo "$ROOT_ROW" "$(mount_row "$HOME/evidence" ext4)"
+    for mount in relative/evidence evidence $'/srv/a\tb'; do
+        assert_mount_ok "$mount" "$HOME/evidence/tlogger" \
+            'refused: logdir_mount in the config is not an absolute path'
+    done
+}
+
+@test "the volume guard passes a log folder that is the mounted volume or lies on it" {
+    fake_mountinfo "$ROOT_ROW" "$(mount_row /srv/work tmpfs)" \
+        "$(mount_row "$HOME/evidence" ext4 '')"
+    assert_mount_ok "$HOME/evidence" "$HOME/evidence" ok
+    assert_mount_ok "$HOME/evidence" "$HOME/evidence/tlogger" ok
+    assert_mount_ok "$HOME/evidence" "$HOME/evidence/a/b/tlogger" ok
+    # The root file system holds every log folder.
+    assert_mount_ok / "$HOME/evidence/tlogger" ok
+    assert_mount_ok / /srv/work/tlogger ok
+    # The guard reads mountinfo alone and creates nothing.
+    [ ! -e "$HOME/evidence" ]
+}
+
+@test "the folder check passes a private folder, and refuses a symlink, a file or a shared one" {
+    need symlinks
+    need modes
+    local dir="$SESSIONS/acme" rel=.local/state/tlogger/sessions
+    mkdir -p "$dir" "$HOME/elsewhere"
+    chmod 700 "$dir" "$HOME/elsewhere"
+    assert_check_dir "$dir" 'engagement folder' ok
+    # Read and search bits of the group and others are allowed; only their write bits are not.
+    chmod 750 "$dir"
+    assert_check_dir "$dir" 'engagement folder' ok
+    chmod 770 "$dir"
+    assert_check_dir "$dir" 'engagement folder' \
+        "refused: the engagement folder ~/$rel/acme is writable by its group or by others"
+    chmod 702 "$dir"
+    assert_check_dir "$dir" 'engagement folder' \
+        "refused: the engagement folder ~/$rel/acme is writable by its group or by others"
+    rmdir "$dir"
+    ln -s "$HOME/elsewhere" "$dir"
+    assert_check_dir "$dir" 'engagement folder' \
+        "refused: the engagement folder ~/$rel/acme is a symlink"
+    rm "$dir"
+    : > "$dir"
+    assert_check_dir "$dir" 'engagement folder' \
+        "refused: the engagement folder ~/$rel/acme is not a folder"
+    # As the log folder, the same checks give the texts tlogger start has always given.
+    chmod 777 "$SESSIONS"
+    assert_check_dir "$SESSIONS" 'log folder' \
+        "refused: the log folder ~/$rel is writable by its group or by others"
+    chmod 700 "$SESSIONS"
 }

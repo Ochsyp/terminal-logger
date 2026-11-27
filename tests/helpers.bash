@@ -270,6 +270,14 @@ assert_block_on_top() {
     head -n 4 "$1" | cmp - "$GOLDEN_BLOCK"
 }
 
+# Fail if the last run printed the test's HOME in full: tlogger shows home paths as ~.
+refute_home_shown() {
+    if [[ $output == *"$HOME"* || $stderr == *"$HOME"* ]]; then
+        printf 'the output names the home folder in full:\n%s\n%s\n' "$output" "$stderr" >&2
+        return 1
+    fi
+}
+
 # Print the SHA-256 of FILE.
 sha_of() {
     local sum

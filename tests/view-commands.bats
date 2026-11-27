@@ -26,14 +26,6 @@ run_cmd() {
     stderr=${stderr//$'\r'/}
 }
 
-# Fail if the last run printed the test's HOME in full: tlogger shows home paths as ~.
-refute_home_shown() {
-    if [[ $output == *"$HOME"* || $stderr == *"$HOME"* ]]; then
-        printf 'the output names the home folder in full:\n%s\n%s\n' "$output" "$stderr" >&2
-        return 1
-    fi
-}
-
 # Fail unless the last run exited STATUS, printed nothing on stdout and printed MESSAGE alone on
 # stderr, with no home path in full.
 assert_refused() {
@@ -278,6 +270,85 @@ crafted_transcript() {
     printf 'not a key line\n' > "$HOME/.config/tlogger/config"
     run_tlogger show "$ID"
     assert_refused 1 'tlogger: the config ~/.config/tlogger/config has line 1, which is not a key=value line; fix it by hand'
+}
+
+@test "an id is found in an engagement folder, and none names the newest session of both levels" {
+    local name id want
+    mkdir "$LOGS/acme" "$LOGS/demo"
+    for name in 20261110T090000Z-aaaaaa acme/20261112T080000Z-bbbbbb \
+        demo/20261111T235959Z-cccccc; do
+        session_new "$LOGS/$name"
+        fresh_transcript "transcript of ${name##*/}"
+    done
+    # Newer sessions where no lookup goes: in folders whose names are no engagement's, and two
+    # levels down.
+    for name in .old/20261112T235959Z-zzzzz1 'x y/20261112T235959Z-zzzzz2' \
+        acme/sub/20261112T235959Z-zzzzz3 MANIFEST/20261112T235959Z-zzzzz4; do
+        session_new "$LOGS/$name"
+        fresh_transcript "transcript of ${name##*/}"
+    done
+    run_tlogger show
+    [ "$status" -eq 0 ]
+    want=$(transcript_header 20261112T080000Z-bbbbbb; echo 'transcript of 20261112T080000Z-bbbbbb')
+    [ "$output" = "$want" ]
+    [ -z "$stderr" ]
+    run_tlogger show 20261111T235959Z-cccccc
+    [ "$status" -eq 0 ]
+    [ "${output##*$'\n'}" = 'transcript of 20261111T235959Z-cccccc' ]
+    run_tlogger show 20261110T090000Z-aaaaaa
+    [ "$status" -eq 0 ]
+    [ "${output##*$'\n'}" = 'transcript of 20261110T090000Z-aaaaaa' ]
+    for id in zzzzz1 zzzzz2 zzzzz3 zzzzz4; do
+        run_tlogger show "20261112T235959Z-$id"
+        want="tlogger: there is no session 20261112T235959Z-$id"
+        assert_refused 1 "$want in ~/.local/state/tlogger/sessions"
+    done
+    # A path still names a session folder anywhere.
+    run_tlogger show "$LOGS/x y/20261112T235959Z-zzzzz2"
+    [ "$status" -eq 0 ]
+    [ "${output##*$'\n'}" = 'transcript of 20261112T235959Z-zzzzz2' ]
+}
+
+@test "a symlinked engagement folder is not looked into" {
+    need symlinks
+    mkdir "$LOGS/acme"
+    session_new "$LOGS/20261110T090000Z-aaaaaa"
+    fresh_transcript 'a flat session'
+    session_new "$LOGS/acme/20261111T090000Z-bbbbbb"
+    fresh_transcript 'the newest real session'
+    session_new "$HOME/elsewhere/20261112T235959Z-zzzzzz"
+    fresh_transcript 'behind a symlink'
+    ln -s "$HOME/elsewhere" "$LOGS/linked"
+    run_tlogger show
+    [ "$status" -eq 0 ]
+    [ "${output##*$'\n'}" = 'the newest real session' ]
+    run_tlogger show 20261112T235959Z-zzzzzz
+    assert_refused 1 \
+        'tlogger: there is no session 20261112T235959Z-zzzzzz in ~/.local/state/tlogger/sessions'
+}
+
+@test "an id in more than one folder is refused, and a path still names each copy" {
+    local want="tlogger: session $ID is in more than one folder of"
+    want+=' ~/.local/state/tlogger/sessions; name the one you mean by its path'
+    mkdir "$LOGS/acme" "$LOGS/demo"
+    session_new "$LOGS/acme/$ID"
+    fresh_transcript 'the copy in acme'
+    session_new "$LOGS/demo/$ID"
+    fresh_transcript 'the copy in demo'
+    run_tlogger show "$ID"
+    assert_refused 1 "$want"
+    # The newest id is the same one, so none is refused too.
+    run_tlogger show
+    assert_refused 1 "$want"
+    run_tlogger show "$LOGS/demo/$ID"
+    [ "$status" -eq 0 ]
+    [ "${output##*$'\n'}" = 'the copy in demo' ]
+    # A session in the log folder itself and a copy in an engagement folder count twice as well.
+    rm -rf "${LOGS:?}/demo/$ID"
+    session_new "$LOGS/$ID"
+    fresh_transcript 'the flat copy'
+    run_tlogger show "$ID"
+    assert_refused 1 "$want"
 }
 
 @test "usage errors exit 2: extra sessions, unknown options and bad --speed and --maxdelay values" {
