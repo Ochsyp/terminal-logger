@@ -309,8 +309,10 @@ crafted_transcript() {
     [ "${output##*$'\n'}" = 'transcript of 20261112T235959Z-zzzzz2' ]
 }
 
-@test "a symlinked engagement folder is not looked into" {
+@test "a symlinked engagement folder is not looked into, and refuses every lookup by id" {
     need symlinks
+    local want='tlogger: the engagement folder ~/.local/state/tlogger/sessions/linked is a'
+    want+=' symlink, which tlogger does not follow'
     mkdir "$LOGS/acme"
     session_new "$LOGS/20261110T090000Z-aaaaaa"
     fresh_transcript 'a flat session'
@@ -320,11 +322,15 @@ crafted_transcript() {
     fresh_transcript 'behind a symlink'
     ln -s "$HOME/elsewhere" "$LOGS/linked"
     run_tlogger show
+    assert_refused 1 "$want"
+    run_tlogger show 20261112T235959Z-zzzzzz
+    assert_refused 1 "$want"
+    run_tlogger show 20261110T090000Z-aaaaaa
+    assert_refused 1 "$want"
+    rm "$LOGS/linked"
+    run_tlogger show
     [ "$status" -eq 0 ]
     [ "${output##*$'\n'}" = 'the newest real session' ]
-    run_tlogger show 20261112T235959Z-zzzzzz
-    assert_refused 1 \
-        'tlogger: there is no session 20261112T235959Z-zzzzzz in ~/.local/state/tlogger/sessions'
 }
 
 @test "an id in more than one folder is refused, and a path still names each copy" {

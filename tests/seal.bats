@@ -512,28 +512,24 @@ assert_usage_error() {
 }
 
 @test "seal --all reaches a hand-made folder named like an engagement, and no other subfolder" {
-    need symlinks
     local f=20261112T100000Z-ffffff name dir
     # Made by hand, with the default mode, and named like an engagement.
     mkdir "$LOGS/Case_2026.x"
     make_session "Case_2026.x/$f"
-    # Not engagement folders: a hidden name, a name with a space, the name MANIFEST, a second
-    # level, and a symlink to a folder outside the log folder.
+    # Not engagement folders: a hidden name, a name with a space, the name MANIFEST and a second
+    # level. A symlink named like an engagement is refused; tests/folder-modes.bats checks that.
     for name in .old/20261112T110000Z-gggggg 'bad name/20261112T120000Z-hhhhhh' \
         MANIFEST/20261112T130000Z-iiiiii Case_2026.x/sub/20261112T140000Z-jjjjjj; do
         make_session "$name"
     done
-    mkdir -p "$BATS_TEST_TMPDIR/outside"
-    session_new "$BATS_TEST_TMPDIR/outside/20261112T150000Z-kkkkkk"
-    ln -s "$BATS_TEST_TMPDIR/outside" "$LOGS/linked"
     run_tlogger seal --all
     [ "$status" -eq 0 ]
     [ "$stderr" = "$(sealed_notice "Case_2026.x/$f")" ]
     [ "$(stat -c %a "$LOGS/Case_2026.x/$f/output.raw")" = 400 ]
     [ "$(cat "$LOGS/Case_2026.x/MANIFEST")" = "$(manifest_entry "Case_2026.x/$f")" ]
     for dir in "$LOGS/.old/20261112T110000Z-gggggg" "$LOGS/bad name/20261112T120000Z-hhhhhh" \
-        "$LOGS/MANIFEST/20261112T130000Z-iiiiii" "$LOGS/Case_2026.x/sub/20261112T140000Z-jjjjjj" \
-        "$BATS_TEST_TMPDIR/outside/20261112T150000Z-kkkkkk"; do
+        "$LOGS/MANIFEST/20261112T130000Z-iiiiii" \
+        "$LOGS/Case_2026.x/sub/20261112T140000Z-jjjjjj"; do
         [ ! -e "$dir/SEAL" ]
         [ "$(stat -c %a "$dir/output.raw")" = 600 ]
         [ ! -e "${dir%/*}/MANIFEST" ]

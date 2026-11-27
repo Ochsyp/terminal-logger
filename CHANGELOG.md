@@ -17,6 +17,11 @@ Each version is the GitHub release `vX.Y.Z`.
 
 ### Changed
 
+- `list`, `seal`, `verify`, `render`, `show` and `replay` refuse a log folder or engagement folder
+  that is a symlink, another user's, or writable by its group or by others without the sticky
+  bit, as a recording does; so does the folder that holds a session named by its path. Such an
+  engagement folder is no longer skipped silently. They do not need write permission, so a folder
+  closed to mode 0500 still lists and verifies.
 - A recording no longer creates a missing log folder other than the default. It refuses to record
   while the volume that `logdir_mount` names is not mounted, or while the engagement in the config
   is not a valid name; the terminal stays usable. `list` has an engagement column. `seal --all`,
