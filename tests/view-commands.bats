@@ -558,6 +558,7 @@ exec '"$real_rm"' "$@"'
 
 @test "show keeps a transcript whose UTF-8 character crosses 64 KiB" {
     local pad
+    need long-output
     session_new "$LOGS/$ID"
     # The padding puts the 3-byte character 1 byte before the 64 KiB mark, so that a check read in
     # 64 KiB chunks sees it cut in two.

@@ -99,8 +99,9 @@ require_test_home() {
 # scriptreplay (util-linux scriptreplay 2.35 or newer at /usr/bin/scriptreplay), python3 (a
 # PYTHON3 that runs), python3-signals (a POSIX PYTHON3, to which kill sends real signals), pyte
 # (a POSIX PYTHON3 that imports pyte), proc (the Linux /proc), symlinks, modes (POSIX file
-# modes), hardlinks, 'command NAME' or 'file PATH' (readable). With TLOGGER_CI=1 the test fails
-# instead, since CI must run every test. Call it before the test writes anything.
+# modes), hardlinks, long-output (Linux, where bats run takes a 64 KiB line), 'command NAME' or
+# 'file PATH' (readable). With TLOGGER_CI=1 the test fails instead, since CI must run every
+# test. Call it before the test writes anything.
 need() {
     local why help
     case $1 in
@@ -161,6 +162,10 @@ need() {
         hardlinks)
             if has_hardlinks; then return 0; fi
             why="it needs hard links, which ln does not make here"
+            ;;
+        long-output)
+            if [[ $(uname -s) == Linux ]]; then return 0; fi
+            why="it needs Linux: under Git Bash, bats run never ends on a 64 KiB line of output"
             ;;
         command)
             if command -v "$2" > /dev/null 2>&1; then return 0; fi
