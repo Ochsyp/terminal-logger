@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 # tlogger: install, remove and report the zsh plugin that records terminal sessions as evidence
-# for penetration tests, set its mode, and render, show and replay the sessions. It manages a
-# 4-line block at the top of the zsh rc, the plugin files, the config and the state folders; the
-# plugin does the recording, on tlogger start or, in auto mode, in every new terminal.
+# for penetration tests, set its mode and engagement, check where the logs lie, and render, show
+# and replay the sessions. It manages a 4-line block at the top of the zsh rc, the plugin files,
+# the config and the state folders; the plugin does the recording, on tlogger start or, in auto
+# mode, in every new terminal.
 
-# Exit status: 0 done or nothing to change; 1 error or refusal, for status an install in part, and
-# for verify a changed session; 2 usage error, or --mode or --yes missing where no terminal can
-# answer; 3 not installed, nothing to remove or no session to view; 4 for verify, a finished
-# session left unsealed. Executing the file runs main; sourcing it only sets the
-# globals and defines the functions, for tests.
+# Exit status: 0 done or nothing to change; 1 error or refusal, for status an install in part, for
+# verify a changed session, and for doctor a warning or a check it could not decide; 2 usage
+# error, or --mode or --yes missing where no terminal can answer; 3 not installed, nothing to
+# remove or no session to view; 4 for verify, a finished session left unsealed. Executing the
+# file runs main; sourcing it only sets the globals and defines the functions, for tests.
 # TLOGGER_SKEL, the file a missing rc is seeded from, exists for tests, as do TLOGGER_PYTHON and
 # TLOGGER_SCRIPTREPLAY, which name the python3 and scriptreplay that render, show and replay run,
-# and TLOGGER_PROC, the /proc whose boot id and processes seal's liveness check reads; production
-# never sets them.
+# TLOGGER_PROC, the /proc whose boot id and processes seal's liveness check reads and whose
+# self/mountinfo doctor reads, TLOGGER_SYSFS, the /sys whose block devices doctor follows, and
+# TLOGGER_FSTAB, the file doctor reads instead of /etc/fstab; production never sets them.
 
 # =======================================================
 #                    GLOBAL SETTINGS
@@ -49,6 +51,11 @@ BACKUP_NAME_RE='^zshrc\.[0-9]{8}T[0-9]{6}Z\.[A-Za-z0-9]{6}$'
 # The name of a session folder, as the plugin's _tlogger_preflight gives it: the UTC time the
 # recording started, then the 6 characters mktemp picks. The names sort in time order.
 SESSION_NAME_RE='^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9]{6}$'
+
+# The name of an engagement, a folder in the log folder that holds sessions: letters, digits, .,
+# _ and -, at most 64 characters, starting with a letter or a digit. engagement_name_ok also
+# refuses MANIFEST and a name shaped like a session id; upper and lower case differ.
+ENGAGEMENT_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
 
 # A positive decimal number as replay's --speed and --maxdelay take it, such as 2, 0.5 or .25;
 # positive_decimal also wants a digit other than 0.
@@ -156,9 +163,14 @@ STALE_DATE=
 STALE_MOVED=
 
 # What read_config found in the config: CONFIG_RECORDER is the recorder= value, unchecked, and
-# CONFIG_RECORDER_LINE its line number, 0 when there is none.
+# CONFIG_RECORDER_LINE its line number, 0 when there is none. CONFIG_ENGAGEMENT and
+# CONFIG_LOGDIR_MOUNT are empty for none. CONFIG_ENGAGEMENT_BAD is 1 when the only error in the
+# config is an invalid engagement, which tlogger engagement may replace.
 CONFIG_MODE=
 CONFIG_LOGDIR=
+CONFIG_ENGAGEMENT=
+CONFIG_LOGDIR_MOUNT=
+CONFIG_ENGAGEMENT_BAD=0
 CONFIG_RECORDER=
 CONFIG_RECORDER_LINE=0
 CONFIG_ERROR=
@@ -170,10 +182,12 @@ SMOKE_DIR=
 
 # The session that render, show, replay, seal and verify work on, set by resolve_session: its
 # folder, an absolute path, and its id, the folder's name. LOGDIR is the log folder, set by
-# resolve_logdir, and SESSIONS its session folders, set by list_sessions.
+# resolve_logdir, ENGAGEMENT_DIRS its engagement folders, set by find_engagement_dirs, and
+# SESSIONS the session folders of both, set by list_sessions.
 SESSION_DIR=
 SESSION_ID=
 LOGDIR=
+ENGAGEMENT_DIRS=()
 SESSIONS=()
 
 # The files a seal covers, in the order SHA256SUMS lists them: the logs that script writes, the
@@ -196,6 +210,27 @@ SEAL_RESULT=
 SEAL_SUM=
 WHY=
 VERDICT=
+
+# What doctor found. read_mountinfo fills MI_POINT, MI_TYPE, MI_DEV and MI_SOURCE, one entry per
+# row of mountinfo; mount_row_of sets ROW, a row or -1; doctor_place sets PLACE_REAL, PLACE_ROW,
+# PLACE_AUTOFS and PLACE_NET for a folder; doctor_volume sets MOUNT_OK; walk_device fills
+# WALK_CRYPT, WALK_LAYERS, WALK_PLAIN and WALK_OTHER; doctor_line counts DOCTOR_WARN and
+# DOCTOR_UNKNOWN.
+MI_POINT=()
+MI_TYPE=()
+MI_DEV=()
+MI_SOURCE=()
+ROW=-1
+PLACE_REAL=
+PLACE_ROW=-1
+PLACE_AUTOFS=0
+PLACE_NET=0
+MOUNT_OK=0
+WALK_CRYPT=()
+WALK_LAYERS=()
+WALK_PLAIN=()
+WALK_OTHER=()
+declare -i DOCTOR_WARN=0 DOCTOR_UNKNOWN=0
 
 # The interpreter that runs libexec/tlogger_view.py, set by require_python, and the scriptreplay
 # that replay runs, set by require_scriptreplay.
@@ -283,18 +318,23 @@ Commands:
              given; logs and rc backups always stay.
   mode       Print the mode in the config, auto or manual. tlogger mode auto|manual sets it;
              auto first runs a smoke test of the recorder.
+  engagement [NAME | --none]
+             Print the engagement in the config, or none. With NAME, new sessions go into
+             the folder NAME in the log folder, with its own MANIFEST; --none clears it.
   status     Show whether tlogger is installed and where its files are.
+  doctor     Check, and change nothing, that the log folder is private and lies on a mounted,
+             encrypted volume that keeps Unix permissions.
   render     Write the plain-text transcript of a session to transcript.txt in its folder.
   show       Page the transcript of a session, rendered first when it is missing or older
              than the logs.
   replay     Replay a session in this terminal at its recorded pace, through a filter that
              drops the escape sequences a target could abuse.
   seal       Seal a session whose recording has ended: SHA256SUMS over its logs, the logs
-             read-only, a SEAL file and a line in the MANIFEST of the log folder. A recording
-             that ends normally is sealed by itself.
+             read-only, a SEAL file and a line in the MANIFEST of the folder that holds it. A
+             recording that ends normally is sealed by itself.
   verify     Check that a sealed session is unchanged: its sums, its modes and its files.
-  list       List the sessions of the log folder with their state, start, duration and
-             number of commands.
+  list       List the sessions of the log folder and its engagement folders with their state,
+             start, duration, number of commands and engagement.
   version    Print the version.
   help       Show this help; -h and --help do the same.
 
@@ -302,15 +342,17 @@ In a zsh terminal with the plugin loaded, tlogger start records that terminal, t
 pauses the recording and tlogger status shows whether the terminal is recorded. In auto mode
 every new terminal records itself as its shell starts.
 
-render, show and replay take one SESSION: a session id, which names a folder in the log folder;
-a path to a session folder, which holds a /; or nothing, for the newest session. output.raw
-with timing is the evidence; the transcript is derived from it and holds no keystrokes typed at
-hidden prompts. render and show need python3 and python3-pyte, replay python3 and scriptreplay.
+render, show and replay take one SESSION: a session id, which names a folder in the log folder
+or an engagement folder in it; a path to a session folder, which holds a /; or nothing, for the
+newest session. output.raw with timing is the evidence; the transcript is derived from it and
+holds no keystrokes typed at hidden prompts. render and show need python3 and python3-pyte,
+replay python3 and scriptreplay.
   render --stdout      Print the transcript instead of writing transcript.txt.
   replay --speed N     Replay N times as fast; N is a positive number, such as 2 or 0.5.
   replay --maxdelay S  Wait at most S seconds between two outputs.
 During a replay, Space pauses, Up and Down change the speed, Ctrl+C stops and Ctrl+Z suspends it.
-seal and verify take one SESSION in the same way, or --all for every session of the log folder.
+seal and verify take one SESSION in the same way, or --all for every session of the log folder
+or an engagement folder in it.
   verify               Print '<session>  ok', changed, unsealed or recording for each; keep the
                        SHA-256 that seal prints, or the MANIFEST, apart from the logs.
 
@@ -337,8 +379,9 @@ Uninstall options:
   --purge-config      Remove the config as well.
 
 Exit status: 0 done or nothing to change; 1 error or refusal (status: installed only in part;
-verify: a session changed); 2 usage error, or --mode or --yes missing outside a terminal; 3 not
-installed, nothing to remove or no session to view; 4 verify: a finished session is not sealed.
+verify: a session changed; doctor: a warning, or a check it could not decide); 2 usage error, or
+--mode or --yes missing outside a terminal; 3 not installed, nothing to remove or no session to
+view; 4 verify: a finished session is not sealed.
 EOF
 }
 
@@ -1691,19 +1734,23 @@ ensure_dir() {
     fi
 }
 
-# Read the config into CONFIG_MODE and CONFIG_LOGDIR without running it, by the line rules of
-# lib/config.zsh: key=value lines, blank lines and '#' comments, with the whitespace around a
-# value trimmed and a logdir's trailing slashes dropped. Every other key, the plugin's
-# record_input, min_free_mb, record_ssh, record_tmux, recorder, prompt, prompt_time, stamp,
-# stamp_vpn, vpn_ifaces and history_timestamps included, is accepted unchecked, and install keeps its line
-# as it is; the recorder value goes to CONFIG_RECORDER and its line number to
+# Read the config into CONFIG_MODE, CONFIG_LOGDIR, CONFIG_ENGAGEMENT and CONFIG_LOGDIR_MOUNT
+# without running it, by the line rules of lib/config.zsh: key=value lines, blank lines and '#'
+# comments, with the whitespace around a value trimmed and the trailing slashes of a logdir or a
+# logdir_mount dropped; an empty engagement or logdir_mount means none. Every other key, the
+# plugin's record_input, min_free_mb, record_ssh, record_tmux, recorder, prompt, prompt_time,
+# stamp, stamp_vpn, vpn_ifaces and history_timestamps included, is accepted unchecked, and install
+# keeps its line as it is; the recorder value goes to CONFIG_RECORDER and its line number to
 # CONFIG_RECORDER_LINE, for resolve_recorder. Sets CONFIG_ERROR, instead of exiting, for an
-# unsafe file, a bad line, a repeated key or an invalid mode or logdir.
+# unsafe file, a bad line, a repeated key or an invalid mode, logdir, engagement or logdir_mount.
+# An invalid engagement does not stop the reading, so that any other error still wins; when it is
+# the only one, CONFIG_ENGAGEMENT_BAD is 1 and the other values are read.
 read_config() {
-    local line key value n=0
+    local line key value n=0 bad_engagement=''
     local blank_re='^[[:space:]]*(#|$)' key_re='^[a-z][a-z0-9_]*='
     local -A seen=()
     CONFIG_MODE='' CONFIG_LOGDIR='' CONFIG_RECORDER='' CONFIG_RECORDER_LINE=0 CONFIG_ERROR=''
+    CONFIG_ENGAGEMENT='' CONFIG_LOGDIR_MOUNT='' CONFIG_ENGAGEMENT_BAD=0
     if [[ ! -e $CONFIG_FILE && ! -L $CONFIG_FILE ]]; then
         return 0
     fi
@@ -1755,12 +1802,40 @@ read_config() {
                 fi
                 CONFIG_LOGDIR=$value
                 ;;
+            engagement)
+                if [[ -n $value ]] && ! engagement_name_ok "$value"; then
+                    bad_engagement="has an engagement on line $n that is not a valid name"
+                    continue
+                fi
+                CONFIG_ENGAGEMENT=$value
+                ;;
+            logdir_mount)
+                while [[ $value == */ && $value != / ]]; do
+                    value=${value%/}
+                done
+                if [[ -n $value && ( $value != /* || $value == *[[:cntrl:]]* ) ]]; then
+                    CONFIG_ERROR="has a logdir_mount on line $n that is not an absolute path"
+                    return 0
+                fi
+                CONFIG_LOGDIR_MOUNT=$value
+                ;;
             recorder)
                 CONFIG_RECORDER=$value
                 CONFIG_RECORDER_LINE=$n
                 ;;
         esac
     done < "$CONFIG_FILE"
+    if [[ -n $bad_engagement ]]; then
+        CONFIG_ERROR=$bad_engagement CONFIG_ENGAGEMENT_BAD=1
+    fi
+}
+
+# Succeed when NAME is a valid engagement name: ENGAGEMENT_RE, and neither MANIFEST nor a name
+# shaped like a session id, which would mix with the sessions of the log folder.
+engagement_name_ok() {
+    # Byte ranges, as the plugin checks them: in some locales [A-Za-z] matches more letters.
+    local LC_ALL=C
+    [[ $1 =~ $ENGAGEMENT_RE && $1 != MANIFEST && ! $1 =~ $SESSION_NAME_RE ]]
 }
 
 # Write the config CONTENT read from stdin to a temp file in the config folder, mode 0600, and
@@ -1835,6 +1910,9 @@ install_config() {
 # stamp_vpn=on|off (default on) for the VPN addresses in both, vpn_ifaces=<patterns> (default
 # tun* wg* tap*) for the VPN interfaces, and history_timestamps=yes|no (default no) for start
 # times in the zsh history.
+# engagement=<name> (default none) puts new sessions into the folder <name> in logdir, as
+# tlogger engagement sets it, and logdir_mount=<absolute path> (default none) makes a recording
+# refuse while the volume mounted there is not mounted or does not hold logdir.
 mode=$MODE
 logdir=$SESSIONS_DIR
 EOF
@@ -2526,12 +2604,19 @@ cmd_uninstall() {
 #                          MODE
 # =======================================================
 
+# Print a note on stderr when the variable NAME, such as TLOGGER_MODE, is exported and not empty:
+# in the terminal that has it, it wins over the config. TAIL, when given, follows after a ;.
+note_preset() {
+    local name=$1 tail=${2-}
+    if [[ -n ${!name-} && ${!name@a} == *x* ]]; then
+        msg "note: $name is set, and in this terminal it wins over the config${tail:+; $tail}"
+    fi
+}
+
 # Print a note on stderr when an exported TLOGGER_MODE is set, which in the terminal that has it
 # wins over the config.
 note_mode_preset() {
-    if [[ -n ${TLOGGER_MODE-} && ${TLOGGER_MODE@a} == *x* ]]; then
-        msg "note: TLOGGER_MODE is set, and in this terminal it wins over the config"
-    fi
+    note_preset TLOGGER_MODE
 }
 
 # tlogger mode [auto|manual]: without an argument, print the mode in the config on stdout, manual
@@ -2592,6 +2677,81 @@ cmd_mode() {
 }
 
 # =======================================================
+#                       ENGAGEMENT
+# =======================================================
+
+# tlogger engagement [NAME | --none]: without an argument, print the engagement in the config on
+# stdout, none when it has none. With NAME, set it, and with --none clear it, as engagement=: only
+# the engagement= line changes, or one is appended, through a temp file in the config folder,
+# mode 0600, and a rename, as tlogger mode does. Creates no folder: the first recording in the
+# engagement makes it. Refuses every config error but an invalid engagement, which a new value
+# replaces and only the printing form refuses. Exits 0 when done or already so, 1 for an unsafe
+# or invalid config, 2 for a bad name or a usage error and 3 when there is no config.
+cmd_engagement() {
+    local want='' current logdir
+    local -i change=0
+    case ${1-} in
+        -h | --help) usage; exit 0 ;;
+    esac
+    if (( $# > 1 )); then
+        usage_error "engagement takes one argument at most: a name or --none"
+    fi
+    if (( $# == 1 )); then
+        change=1
+        case $1 in
+            --none) ;;
+            -?*) usage_error "unknown option for engagement: $1" ;;
+            *)
+                if ! engagement_name_ok "$1"; then
+                    die 2 "'$1' is not a valid engagement name; use letters, digits, ., _ and -," \
+                        "at most 64 characters, starting with a letter or a digit, and not" \
+                        "MANIFEST or a session id"
+                fi
+                want=$1
+                ;;
+        esac
+    fi
+    refuse_foreign_root
+    resolve_paths
+    check_dir_safe "$CONFIG_DIR"
+    if [[ ! -e $CONFIG_FILE && ! -L $CONFIG_FILE ]]; then
+        die 3 "tlogger is not installed; run tlogger install"
+    fi
+    read_config
+    if [[ -n $CONFIG_ERROR ]] && (( ! (change && CONFIG_ENGAGEMENT_BAD) )); then
+        if (( CONFIG_ENGAGEMENT_BAD )); then
+            die 1 "the config $(shown "$CONFIG_FILE") $CONFIG_ERROR; set another one with" \
+                "tlogger engagement NAME, or clear it with tlogger engagement --none"
+        fi
+        die 1 "the config $(shown "$CONFIG_FILE") $CONFIG_ERROR; fix it by hand"
+    fi
+    current=$CONFIG_ENGAGEMENT
+    logdir=${CONFIG_LOGDIR:-$SESSIONS_DIR}
+    if (( ! change )); then
+        printf '%s\n' "${current:-none}"
+        note_preset TLOGGER_ENGAGEMENT
+        return 0
+    fi
+    if (( ! CONFIG_ENGAGEMENT_BAD )) && [[ $want == "$current" ]]; then
+        msg "engagement is already ${want:-none}"
+        note_preset TLOGGER_ENGAGEMENT
+        return 0
+    fi
+    make_work
+    # Through a file, not a pipe, so that replace_config runs in this shell and cleanup knows its
+    # temp file.
+    { config_with engagement "$want" > "$WORK/config"; } 2> /dev/null ||
+        die 1 "cannot copy $(shown "$CONFIG_FILE") to the temp folder"
+    replace_config < "$WORK/config"
+    if [[ -n $want ]]; then
+        msg "engagement is now $want; new sessions go into $(shown "${logdir%/}/$want")"
+    else
+        msg "engagement is now none; new sessions go into $(shown "$logdir")"
+    fi
+    note_preset TLOGGER_ENGAGEMENT
+}
+
+# =======================================================
 #                    STATUS AND VERSION
 # =======================================================
 
@@ -2601,6 +2761,7 @@ cmd_mode() {
 # install follows, since the zsh query runs the .zshenv of the home it is given.
 cmd_status() {
     local block=0 code=0 version=unknown rc_note plugin_note mode_note logdir_note result
+    local engagement_note
     case ${1-} in
         -h | --help) usage; exit 0 ;;
     esac
@@ -2639,8 +2800,10 @@ cmd_status() {
     read_config
     mode_note=${CONFIG_MODE:-unset}
     logdir_note=$(shown "${CONFIG_LOGDIR:-$SESSIONS_DIR}")
+    engagement_note=${CONFIG_ENGAGEMENT:-none}
     if [[ -n $CONFIG_ERROR ]]; then
         mode_note="unknown: the config $CONFIG_ERROR"
+        engagement_note=unknown
     elif [[ ! -e $CONFIG_FILE ]]; then
         mode_note="unset: there is no config"
         logdir_note="$logdir_note (the default)"
@@ -2657,12 +2820,13 @@ cmd_status() {
         3) printf 'tlogger is not installed.\n' ;;
         *) printf 'tlogger is installed only in part; run tlogger install to repair it.\n' ;;
     esac
-    printf '  %-9s %s\n' \
+    printf '  %-11s %s\n' \
         version: "$version" \
         rc: "$(shown "$RC") ($rc_note)" \
         plugin: "$(shown "$PLUGIN") ($plugin_note)" \
         mode: "$mode_note" \
         logdir: "$logdir_note" \
+        engagement: "$engagement_note" \
         config: "$(shown "$CONFIG_FILE")" \
         state: "$(shown "$STATE_DIR")"
     exit "$result"
@@ -2673,6 +2837,674 @@ cmd_version() {
     (( $# == 0 )) || usage_error "version takes no options"
     read_version
     printf 'tlogger %s\n' "$VERSION_STR"
+}
+
+# =======================================================
+#                         DOCTOR
+# =======================================================
+
+# Print PATH as a config line logdir_mount=PATH, in the ~ form, noting that the config wants the
+# full path when PATH lies under HOME.
+mount_hint() {
+    local hint
+    hint=$(shown "$1")
+    if [[ $hint != "$1" ]]; then
+        printf 'logdir_mount=%s (with ~ written out as the full path)\n' "$hint"
+    else
+        printf 'logdir_mount=%s\n' "$hint"
+    fi
+}
+
+# Set REPLY to the field FIELD of /proc/self/mountinfo or /etc/fstab with its escapes decoded:
+# \040 a space, \011 a tab, \012 a newline and \134 a backslash, the last one last.
+unescape_mount() {
+    local s=$1
+    s=${s//\\040/ }
+    s=${s//\\011/$'\t'}
+    s=${s//\\012/$'\n'}
+    REPLY=${s//\\134/\\}
+}
+
+# Fill MI_POINT, MI_TYPE, MI_DEV and MI_SOURCE, one entry per row of TLOGGER_PROC/self/mountinfo
+# (default /proc), in its order: the mount point and the source decoded, the file system type and
+# the MAJ:MIN of the device. Only reads that file. Returns 1 when it cannot be read.
+read_mountinfo() {
+    local file=${TLOGGER_PROC:-/proc}/self/mountinfo line left type source
+    local -a f
+    MI_POINT=() MI_TYPE=() MI_DEV=() MI_SOURCE=()
+    if [[ ! -f $file || ! -r $file ]]; then
+        return 1
+    fi
+    while IFS= read -r line || [[ -n $line ]]; do
+        left=${line%% - *}
+        if [[ $left == "$line" ]]; then
+            continue
+        fi
+        type='' source=''
+        read -r -a f <<< "$left" || true
+        read -r type source _ <<< "${line#* - }" || true
+        if (( ${#f[@]} < 5 )) || [[ -z $type ]]; then
+            continue
+        fi
+        unescape_mount "${f[4]}"
+        MI_POINT+=("$REPLY")
+        MI_TYPE+=("$type")
+        MI_DEV+=("${f[2]}")
+        unescape_mount "$source"
+        MI_SOURCE+=("$REPLY")
+    done < "$file"
+}
+
+# Set ROW to the mountinfo row whose mount point is the longest prefix of PATH, ending at a /;
+# the last one when two tie, as the later mount covers the earlier. -1 when none is.
+mount_row_of() {
+    local path=$1 point i
+    local -i len=-1
+    ROW=-1
+    for i in "${!MI_POINT[@]}"; do
+        point=${MI_POINT[i]}
+        if [[ $point == / || $path == "$point" || $path == "$point"/* ]] &&
+            (( ${#point} >= len )); then
+            ROW=$i len=${#point}
+        fi
+    done
+}
+
+# Succeed when the file system type TYPE keeps its files on another host.
+network_type() {
+    case $1 in
+        nfs | nfs4 | cifs | smb3 | fuse.sshfs) return 0 ;;
+    esac
+    return 1
+}
+
+# Run COMMAND with its arguments, under timeout 5 when NET is 1: on a network file system that
+# no longer answers, a command that touches a path would hang.
+doctor_tool() {
+    local net=$1
+    shift
+    if (( net )); then
+        timeout 5 "$@"
+    else
+        "$@"
+    fi
+}
+
+# Set PLACE_REAL, PLACE_ROW, PLACE_AUTOFS and PLACE_NET for the folder PATH: its real path, with
+# every symlink of the part that exists resolved, the mountinfo row it lies on, 1 when that row
+# is an automount point not mounted yet, and 1 when it is a network file system.
+# The path is resolved one part at a time, by readlink on each symlink, up to 40 of them, and
+# readlink -m on the result. A part that lies on an automount point not mounted yet, as written
+# or reached through a symlink, ends it, with the rest kept as written: looking into that point
+# would mount it, and for LUKS could ask for a passphrase. On a network file system, a part is
+# only looked at under timeout.
+doctor_place() {
+    local rest=$1 cur=/ next part target real tail=''
+    local -i links=0 net link
+    PLACE_AUTOFS=0 PLACE_NET=0 PLACE_ROW=-1
+    while [[ -n $rest ]]; do
+        part=${rest%%/*}
+        if [[ $rest == */* ]]; then
+            rest=${rest#*/}
+        else
+            rest=
+        fi
+        case $part in
+            '' | .) continue ;;
+            ..)
+                # cur holds no symlink, so .. is its parent as written.
+                cur=${cur%/*}
+                cur=${cur:-/}
+                continue
+                ;;
+        esac
+        next=${cur%/}/$part
+        # The rest as written: a deeper mount that holds it, as a key of an indirect automount
+        # map that is mounted, lets doctor look at next.
+        mount_row_of "$next${rest:+/$rest}"
+        if (( ROW >= 0 )) && [[ ${MI_TYPE[ROW]} == autofs && ${MI_POINT[ROW]} != / ]]; then
+            tail=$part${rest:+/$rest}
+            break
+        fi
+        mount_row_of "$next"
+        net=0 link=0
+        if (( ROW >= 0 )) && network_type "${MI_TYPE[ROW]}"; then
+            net=1
+            if doctor_tool 1 test -L "$next" 2> /dev/null; then
+                link=1
+            fi
+        elif [[ -L $next ]]; then
+            link=1
+        fi
+        if (( link )); then
+            if (( links == 40 )); then
+                tail=$part${rest:+/$rest}
+                break
+            fi
+            target=$(doctor_tool "$net" readlink -- "$next" 2> /dev/null) || target=
+            if [[ -n $target ]]; then
+                links+=1
+                if [[ $target == /* ]]; then
+                    cur=/
+                fi
+                rest=$target${rest:+/$rest}
+                continue
+            fi
+        fi
+        cur=$next
+    done
+    mount_row_of "$cur"
+    net=0
+    if (( ROW >= 0 )) && network_type "${MI_TYPE[ROW]}"; then
+        net=1
+    fi
+    real=$(doctor_tool "$net" readlink -m -- "$cur" 2> /dev/null) || real=
+    cur=${real:-$cur}
+    if [[ -n $tail ]]; then
+        PLACE_REAL=${cur%/}/$tail
+    else
+        PLACE_REAL=$cur
+    fi
+    mount_row_of "$PLACE_REAL"
+    PLACE_ROW=$ROW
+    if (( ROW >= 0 )) && [[ ${MI_TYPE[ROW]} == autofs ]]; then
+        PLACE_AUTOFS=1
+    elif (( ROW >= 0 )) && network_type "${MI_TYPE[ROW]}"; then
+        PLACE_NET=1
+    fi
+}
+
+# Print one check line of doctor: VERDICT (ok, warn or unknown), CHECK and TEXT, the further
+# arguments joined by spaces, and count the warnings and unknowns in DOCTOR_WARN and
+# DOCTOR_UNKNOWN.
+doctor_line() {
+    local verdict=$1 check=$2
+    shift 2
+    printf '  %-8s %-12s %s\n' "$verdict" "$check" "$*"
+    case $verdict in
+        warn) DOCTOR_WARN+=1 ;;
+        unknown) DOCTOR_UNKNOWN+=1 ;;
+    esac
+}
+
+# Set REPLY to the deepest mount point in TLOGGER_FSTAB (default /etc/fstab) at or above one of
+# the PATHs, when mountinfo shows it not mounted, or to nothing: a deeper entry that is mounted
+# holds the PATHs, whatever is not mounted above it. / and entries that are no path, such as
+# swap, do not count.
+fstab_unmounted() {
+    local file=${TLOGGER_FSTAB:-/etc/fstab} spec point path i best=''
+    local -i mounted best_mounted=0
+    if [[ -f $file && -r $file ]]; then
+        while read -r spec point _; do
+            if [[ -z $spec || $spec == '#'* ]]; then
+                continue
+            fi
+            unescape_mount "${point-}"
+            point=$REPLY
+            while [[ $point == */ && $point != / ]]; do
+                point=${point%/}
+            done
+            if [[ $point != /* || $point == / || ${#point} -le ${#best} ]]; then
+                continue
+            fi
+            for path in "$@"; do
+                if [[ $path == "$point" || $path == "$point"/* ]]; then
+                    mounted=0
+                    for i in "${!MI_POINT[@]}"; do
+                        if [[ ${MI_POINT[i]} == "$point" && ${MI_TYPE[i]} != autofs ]]; then
+                            mounted=1
+                        fi
+                    done
+                    best=$point best_mounted=$mounted
+                    break
+                fi
+            done
+        done < "$file"
+    fi
+    if (( best_mounted )); then
+        best=
+    fi
+    REPLY=$best
+}
+
+# Set REPLY, for the log folder DIR on a volume that is not mounted, to a note on what already
+# lies there on the disk beneath: its number of entries, or nothing when it is no folder. Lists
+# the folder and reads none of its files. Nothing when doctor_place found the folder on an
+# automount point not mounted yet, which the listing would mount, or on a network file system,
+# where it could hang.
+shadow_note() {
+    local e
+    local -i n=0
+    REPLY=
+    if (( PLACE_AUTOFS || PLACE_NET )); then
+        return 0
+    fi
+    if [[ -d $1 && ! -L $1 ]]; then
+        for e in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+            if [[ -e $e || -L $e ]]; then
+                n+=1
+            fi
+        done
+        REPLY="; the log folder already exists on the disk beneath it, with $n"
+        if (( n == 1 )); then
+            REPLY+=" entry"
+        else
+            REPLY+=" entries"
+        fi
+        REPLY+=", which the volume hides once it is mounted"
+    fi
+}
+
+# Print the volume check of the log folder LOGDIR, placed by doctor_place, for the logdir_mount
+# MOUNT, empty for none. Sets MOUNT_OK to 1 when MOUNT is mounted and holds LOGDIR as written,
+# which is how the guard at the start of a recording compares them.
+doctor_volume() {
+    local logdir=$1 mount=$2 point i text
+    local -i row=-1
+    MOUNT_OK=0
+    if [[ -n $mount ]]; then
+        for i in "${!MI_POINT[@]}"; do
+            if [[ ${MI_POINT[i]} == "$mount" ]]; then
+                row=$i
+            fi
+        done
+        text="the volume $(shown "$mount") that logdir_mount names"
+        if (( row < 0 )); then
+            shadow_note "$logdir"
+            doctor_line warn volume "$text is not mounted; mount it before you record$REPLY"
+            return 0
+        fi
+        if [[ ${MI_TYPE[row]} == autofs ]]; then
+            text+=" is an automount point that is not mounted yet; open it, then run tlogger"
+            doctor_line warn volume "$text doctor again"
+            return 0
+        fi
+        if [[ $logdir != "$mount" && $logdir != "${mount%/}"/* ]]; then
+            text="the log folder does not lie on $text, so a recording refuses; fix logdir or"
+            doctor_line warn volume "$text logdir_mount"
+            return 0
+        fi
+        MOUNT_OK=1
+    fi
+    if (( PLACE_ROW < 0 )); then
+        text="no row of /proc/self/mountinfo holds the log folder; check by hand that its volume"
+        doctor_line unknown volume "$text is mounted"
+        return 0
+    fi
+    point=${MI_POINT[PLACE_ROW]}
+    if (( PLACE_AUTOFS )); then
+        text="the log folder lies on the automount point $(shown "$point"), which is not mounted"
+        doctor_line warn volume "$text yet; open it, then run tlogger doctor again"
+    elif [[ -n $mount ]]; then
+        # The guard only checks logdir_mount: a deeper volume between it and the log folder is
+        # not guarded.
+        fstab_unmounted "$logdir" "$PLACE_REAL"
+        if [[ -n $REPLY && $REPLY != "$mount" && $REPLY == "${mount%/}"/* ]]; then
+            point=$REPLY
+            shadow_note "$logdir"
+            text="the fstab entry $(shown "$point") between logdir_mount and the log folder is"
+            text+=" not mounted; mount it, and change the config to $(mount_hint "$point"), so"
+            doctor_line warn volume "$text that a recording refuses while it is not mounted$REPLY"
+        elif [[ $point != "$mount" ]]; then
+            text="the log folder lies on $(shown "$point"), another volume than the one that"
+            if [[ $point == "${mount%/}"/* ]]; then
+                text+=" logdir_mount names, which it does not guard; change the config to"
+                doctor_line warn volume "$text $(mount_hint "$point")"
+            else
+                text+=" logdir_mount names, which it does not guard; fix logdir or logdir_mount"
+                doctor_line warn volume "$text"
+            fi
+        else
+            doctor_line ok volume "on $(shown "$mount"), which logdir_mount names, mounted"
+        fi
+    else
+        fstab_unmounted "$logdir" "$PLACE_REAL"
+        if [[ -n $REPLY ]]; then
+            point=$REPLY
+            shadow_note "$logdir"
+            text="the fstab entry $(shown "$point") at or above the log folder is not mounted;"
+            text+=" mount it, and add $(mount_hint "$point") to the config, so that a recording"
+            doctor_line warn volume "$text refuses while it is not mounted$REPLY"
+        elif [[ $point != / ]]; then
+            text="on $(shown "$point"), a volume of its own; add $(mount_hint "$point") to the"
+            doctor_line warn volume "$text config, so that a recording refuses while it is not" \
+                "mounted"
+        else
+            doctor_line ok volume "on /, no unmounted fstab entry at or above the log folder"
+        fi
+    fi
+}
+
+# Print the volume check of an engagement folder that lies on another mount than the log folder:
+# logdir_mount does not guard it.
+doctor_engagement_volume() {
+    local text
+    if (( PLACE_ROW < 0 )); then
+        text="no row of /proc/self/mountinfo holds the engagement folder; check by hand that its"
+        doctor_line unknown volume "$text volume is mounted"
+        return 0
+    fi
+    text="the engagement folder lies on"
+    if (( PLACE_AUTOFS )); then
+        text+=" the automount point $(shown "${MI_POINT[PLACE_ROW]}"), which is not mounted yet;"
+        doctor_line warn volume "$text open it, then run tlogger doctor again"
+    else
+        text+=" a volume of its own, $(shown "${MI_POINT[PLACE_ROW]}"), which logdir_mount does"
+        doctor_line warn volume "$text not guard; keep it on the volume of the log folder"
+    fi
+}
+
+# Print the line of the check CHECK that would have to look into an automount point that is not
+# mounted yet.
+doctor_not_yet() {
+    local text="the volume is not mounted yet (automount), and doctor does not look into it;"
+    doctor_line unknown "$1" "$text open it, then run tlogger doctor again"
+}
+
+# Print the folder check of DIR, placed by doctor_place: it must be a real folder of this user's,
+# not a symlink, with no group or other bits in its mode. A missing DIR is ok when CREATE is 1,
+# as the first recording creates it, else a warning. One stat names DIR, under timeout on a
+# network file system; it changes nothing.
+doctor_folder() {
+    local dir=$1 info hex uid mode
+    local -i create=$2 rc=0 kind
+    if (( PLACE_AUTOFS )); then
+        doctor_not_yet folder
+        return 0
+    fi
+    info=$(doctor_tool "$PLACE_NET" stat -c '%f %u %a' -- "$dir" 2> /dev/null) || rc=$?
+    if (( rc == 124 )); then
+        doctor_line unknown folder "its network file system did not answer within 5 seconds"
+        return 0
+    fi
+    if (( rc != 0 )); then
+        if doctor_tool "$PLACE_NET" test -e "$dir" || doctor_tool "$PLACE_NET" test -L "$dir"
+        then
+            doctor_line unknown folder "doctor cannot look at it; check its owner and mode by hand"
+        elif (( create )); then
+            doctor_line ok folder "does not exist yet; the first recording creates it, mode 700"
+        else
+            doctor_line warn folder "does not exist yet; a recording refuses until you create it" \
+                "or mount its volume"
+        fi
+        return 0
+    fi
+    read -r hex uid mode <<< "$info" || true
+    if [[ ! $hex =~ ^[0-9a-f]+$ || ! $uid =~ ^[0-9]+$ || ! $mode =~ ^[0-7]+$ ]]; then
+        doctor_line unknown folder "doctor cannot read its mode; check its owner and mode by hand"
+        return 0
+    fi
+    kind=$(( 16#$hex & 16#F000 ))
+    if (( kind == 16#A000 )); then
+        doctor_line warn folder "is a symlink, which a recording refuses; name the real folder"
+    elif (( kind != 16#4000 )); then
+        doctor_line warn folder "is not a folder"
+    elif (( uid != EUID )); then
+        doctor_line warn folder "belongs to another user"
+    elif (( 8#$mode & 8#077 )); then
+        doctor_line warn folder "exists, yours, mode $mode: its group or others may enter it;" \
+            "chmod 700 $(shown "$dir") makes it private"
+    else
+        doctor_line ok folder "exists, yours, mode $mode"
+    fi
+}
+
+# Print the permissions check of the file system that doctor_place found: a type that ignores
+# Unix modes, or that another machine reads freely, is a warning.
+doctor_permissions() {
+    local type
+    if (( PLACE_AUTOFS )); then
+        doctor_not_yet permissions
+        return 0
+    fi
+    if (( PLACE_ROW < 0 )); then
+        doctor_line unknown permissions "no row of /proc/self/mountinfo holds it; check its file" \
+            "system by hand"
+        return 0
+    fi
+    type=${MI_TYPE[PLACE_ROW]}
+    case $type in
+        vfat | msdos | exfat | ntfs | ntfs3 | fuseblk | vboxsf | 9p | drvfs | virtiofs | \
+            fuse.vmhgfs-fuse | cifs | smb3)
+            doctor_line warn permissions "$type does not keep Unix permissions: modes 700 and" \
+                "600 mean nothing there, and another machine reads the medium freely"
+            ;;
+        fuse.gocryptfs | fuse.cryfs | fuse.encfs | fuse.securefs | fuse.sshfs)
+            doctor_line ok permissions "$type keeps Unix permissions"
+            ;;
+        fuse.*)
+            doctor_line unknown permissions "$type may not keep Unix permissions; check by hand" \
+                "that mode 700 holds there"
+            ;;
+        *)
+            doctor_line ok permissions "$type keeps Unix permissions"
+            ;;
+    esac
+}
+
+# Follow the block device folder DIR of sysfs down to the disks: each dm/uuid and every branch of
+# slaves/. A branch ends at an encryption layer, which goes into WALK_CRYPT, or at a device
+# without slaves, which goes into WALK_PLAIN when it is a real disk and into WALK_OTHER when it
+# is virtual, such as a loop device. Every other layer on the way goes into WALK_LAYERS. Only
+# reads sysfs; DEPTH stops a loop.
+walk_device() {
+    local dir=$1 real uuid='' slave
+    local -i depth=$2
+    local -a slaves=()
+    real=$(readlink -f -- "$dir" 2> /dev/null) || real=$dir
+    if (( depth > 16 )); then
+        WALK_OTHER+=("${real##*/}")
+        return 0
+    fi
+    if [[ -f $real/dm/uuid && -r $real/dm/uuid ]]; then
+        IFS= read -r uuid < "$real/dm/uuid" || true
+    fi
+    case $uuid in
+        CRYPT-LUKS1-*) WALK_CRYPT+=(LUKS1); return 0 ;;
+        CRYPT-LUKS2-*) WALK_CRYPT+=(LUKS2); return 0 ;;
+        CRYPT-PLAIN-*) WALK_CRYPT+=("plain dm-crypt"); return 0 ;;
+        CRYPT-LOOPAES-*) WALK_CRYPT+=(loop-AES); return 0 ;;
+        CRYPT-TCRYPT-*) WALK_CRYPT+=(TrueCrypt); return 0 ;;
+        CRYPT-BITLK-*) WALK_CRYPT+=(BitLocker); return 0 ;;
+        CRYPT-FVAULT2-*) WALK_CRYPT+=("FileVault 2"); return 0 ;;
+        CRYPT-VERITY-*) WALK_LAYERS+=(dm-verity) ;;
+        CRYPT-INTEGRITY-*) WALK_LAYERS+=(dm-integrity) ;;
+        CRYPT-*) WALK_LAYERS+=(dm-crypt) ;;
+        LVM-*) WALK_LAYERS+=(LVM) ;;
+        mpath-*) WALK_LAYERS+=(multipath) ;;
+        ?*) WALK_LAYERS+=(device-mapper) ;;
+    esac
+    if [[ -d $real/md ]]; then
+        WALK_LAYERS+=(RAID)
+    fi
+    for slave in "$real"/slaves/*; do
+        if [[ -e $slave ]]; then
+            slaves+=("$slave")
+        fi
+    done
+    if (( ${#slaves[@]} == 0 )); then
+        if [[ $real == */devices/virtual/* ]]; then
+            WALK_OTHER+=("${real##*/}")
+        else
+            WALK_PLAIN+=("${real##*/}")
+        fi
+        return 0
+    fi
+    for slave in "${slaves[@]}"; do
+        walk_device "$slave" "$(( depth + 1 ))"
+    done
+}
+
+# Print the words given, each once, in their order, joined by ', '.
+join_unique() {
+    local word out=''
+    local -A seen=()
+    for word in "$@"; do
+        if [[ -z ${seen[$word]+set} ]]; then
+            seen[$word]=1
+            out+="${out:+, }$word"
+        fi
+    done
+    printf '%s\n' "$out"
+}
+
+# Print the encryption check of the file system that doctor_place found for the folder DIR: an
+# encrypting file system type passes; memory and other hosts are a warning; a disk-backed file
+# system passes when every branch below it reaches an encryption layer before a disk, and is a
+# warning when one reaches a disk without one. What doctor cannot see is unknown, with what to
+# check by hand.
+doctor_encryption() {
+    local dir=$1 type dev majmin source sysfs=${TLOGGER_SYSFS:-/sys} text
+    if (( PLACE_AUTOFS )); then
+        doctor_not_yet encryption
+        return 0
+    fi
+    if (( PLACE_ROW < 0 )); then
+        doctor_line unknown encryption "no row of /proc/self/mountinfo holds it; check by hand" \
+            "that its storage is encrypted"
+        return 0
+    fi
+    type=${MI_TYPE[PLACE_ROW]} majmin=${MI_DEV[PLACE_ROW]} source=${MI_SOURCE[PLACE_ROW]}
+    case $type in
+        ecryptfs | fuse.gocryptfs | fuse.cryfs | fuse.encfs | fuse.securefs)
+            doctor_line ok encryption "$type encrypts the files"
+            return 0
+            ;;
+        tmpfs | ramfs)
+            doctor_line warn encryption "$type keeps the logs in memory only, and a reboot loses" \
+                "them"
+            return 0
+            ;;
+        nfs | nfs4 | cifs | smb3 | fuse.sshfs)
+            doctor_line warn encryption "$type keeps the logs on another host, whose storage" \
+                "doctor cannot see"
+            return 0
+            ;;
+        overlay)
+            doctor_line unknown encryption "overlay, as in Kali Live persistence or a container;" \
+                "check by hand that the storage beneath it is encrypted"
+            return 0
+            ;;
+        zfs)
+            doctor_line unknown encryption "zfs; check its own encryption by hand, with zfs get" \
+                "encryption"
+            return 0
+            ;;
+    esac
+    if [[ $majmin == 0:* && $type == btrfs && $source == /dev/* ]]; then
+        # btrfs reports a device number of its own; its source names the block device.
+        dev=$(readlink -f -- "$source" 2> /dev/null) || dev=
+        majmin=
+        if [[ $dev == /dev/* && -f $sysfs/class/block/${dev##*/}/dev ]]; then
+            IFS= read -r majmin < "$sysfs/class/block/${dev##*/}/dev" || true
+        fi
+    fi
+    if [[ ! $majmin =~ ^[0-9]+:[0-9]+$ || $majmin == 0:* ]]; then
+        doctor_line unknown encryption "$type lies on no block device that doctor can follow;" \
+            "check by hand that its storage is encrypted"
+        return 0
+    fi
+    if [[ ! -e $sysfs/dev/block/$majmin ]]; then
+        doctor_line unknown encryption "/sys/dev/block/$majmin is missing, as in a container;" \
+            "check by hand that the storage beneath $type is encrypted"
+        return 0
+    fi
+    WALK_CRYPT=() WALK_LAYERS=() WALK_PLAIN=() WALK_OTHER=()
+    walk_device "$sysfs/dev/block/$majmin" 0
+    if (( ${#WALK_PLAIN[@]} )); then
+        text="no encryption found above $(join_unique "${WALK_PLAIN[@]}"); doctor cannot see"
+        text+=" the host's disk encryption when Kali runs in a virtual machine, a self-encrypting"
+        doctor_line warn encryption "$text drive, or fscrypt (check by hand with lsattr -d" \
+            "$(shown "$dir"))"
+    elif (( ${#WALK_OTHER[@]} )); then
+        doctor_line unknown encryption "$(join_unique "${WALK_OTHER[@]}") is a virtual device," \
+            "such as a loop device, that doctor cannot follow; check by hand that its storage" \
+            "is encrypted"
+    elif (( ${#WALK_CRYPT[@]} )); then
+        text=$(join_unique "${WALK_CRYPT[@]}")
+        if (( ${#WALK_LAYERS[@]} )); then
+            text+=", under $(join_unique "${WALK_LAYERS[@]}")"
+        fi
+        doctor_line ok encryption "$text"
+    else
+        doctor_line unknown encryption "doctor found no disk below $type; check by hand that" \
+            "its storage is encrypted"
+    fi
+}
+
+# tlogger doctor: check, and change nothing, the log folder of the config and, with an
+# engagement, its engagement folder: whether the volume that holds it is mounted, whether the
+# folder is a private real folder of this user's, whether its file system keeps Unix permissions
+# and whether its storage is encrypted. Prints one line per check, ok, warn or unknown, and a
+# last line. Reads TLOGGER_PROC/self/mountinfo, TLOGGER_SYSFS, TLOGGER_FSTAB and folder modes,
+# and runs only readlink, stat and timeout, found through PATH, and no root tool. It touches
+# nothing on an automount point that is not mounted yet, and runs every command that touches a
+# path on a network file system under timeout 5. A config error is a warning, and the default
+# log folder is checked instead. Exits 0 when every check is ok, 1 on any warn or unknown, 2 on
+# a usage error.
+cmd_doctor() {
+    local logdir mount='' engagement='' dir summary
+    local -i log_row create=0
+    case ${1-} in
+        -h | --help) usage; exit 0 ;;
+    esac
+    (( $# == 0 )) || usage_error "doctor takes no options"
+    refuse_foreign_root
+    resolve_paths
+    read_config
+    for dir in TLOGGER_LOGDIR TLOGGER_LOGDIR_MOUNT TLOGGER_ENGAGEMENT; do
+        note_preset "$dir" "doctor checked the config's value"
+    done
+    logdir=$SESSIONS_DIR
+    if [[ -z $CONFIG_ERROR ]]; then
+        logdir=${CONFIG_LOGDIR:-$SESSIONS_DIR}
+        mount=$CONFIG_LOGDIR_MOUNT engagement=$CONFIG_ENGAGEMENT
+    fi
+    DOCTOR_WARN=0 DOCTOR_UNKNOWN=0
+    read_mountinfo || true
+    printf 'tlogger doctor: %s\n' "$(shown "$logdir")"
+    if [[ -n $CONFIG_ERROR ]]; then
+        doctor_line warn config "the config $(shown "$CONFIG_FILE") $CONFIG_ERROR; doctor" \
+            "checked the default log folder"
+    fi
+    doctor_place "$logdir"
+    log_row=$PLACE_ROW
+    doctor_volume "$logdir" "$mount"
+    # A recording creates a missing log folder only when it is the default, or when it lies on
+    # the mounted volume of logdir_mount.
+    if [[ -n $mount ]]; then
+        create=$MOUNT_OK
+    elif [[ $logdir == "$SESSIONS_DIR" ]]; then
+        create=1
+    fi
+    doctor_folder "$logdir" "$create"
+    doctor_permissions
+    doctor_encryption "$logdir"
+    if [[ -n $CONFIG_ERROR ]]; then
+        printf '  %-21s %s\n' engagement "unknown, since the config has an error"
+    elif [[ -z $engagement ]]; then
+        printf '  %-21s %s\n' engagement "none; new sessions go into the log folder"
+    else
+        dir=${logdir%/}/$engagement
+        printf '  %-21s %s\n' engagement "$engagement; new sessions go into $(shown "$dir")"
+        doctor_place "$dir"
+        doctor_folder "$dir" 1
+        if (( PLACE_ROW != log_row )); then
+            doctor_engagement_volume
+            doctor_permissions
+            doctor_encryption "$dir"
+        fi
+    fi
+    if (( DOCTOR_WARN + DOCTOR_UNKNOWN == 0 )); then
+        printf 'No warnings. Nothing was changed.\n'
+        exit 0
+    fi
+    summary="$DOCTOR_WARN warnings"
+    if (( DOCTOR_WARN == 1 )); then
+        summary="1 warning"
+    fi
+    printf '%s and %s unknown. Nothing was changed.\n' "$summary" "$DOCTOR_UNKNOWN"
+    exit 1
 }
 
 # =======================================================
@@ -2718,13 +3550,15 @@ check_session_dir() {
 # Set SESSION_DIR and SESSION_ID from the SESSION argument of render, show and replay. An
 # argument with a / is a path to a session folder anywhere, made absolute without resolving
 # symlinks, whose last part must be neither '.' nor '..'. Any other argument must be a session
-# id, a folder in the log folder; none picks the newest session there by name, which starts
-# with the UTC time, among the real folders named like sessions. The log folder is the config's
-# logdir, else the default. Exits 3 when the log folder is missing or holds no session, 1 for an
-# argument that is no id, an id without a folder, an unsafe log folder or config, or a folder
-# that check_session_dir refuses.
+# id, a folder in the log folder or in one of its engagement folders (see find_engagement_dirs);
+# none picks the newest session of both levels by name, which starts with the UTC time, among
+# the real folders named like sessions. The log folder is the config's logdir, else the default.
+# Exits 3 when the log folder is missing or holds no session, 1 for an argument that is no id, an
+# id without a folder or with more than one, an unsafe log folder or config, or a folder that
+# check_session_dir refuses.
 resolve_session() {
-    local arg=$1 logdir dir entry name best=''
+    local arg=$1 logdir dir parent
+    local -a matches=()
     if [[ $arg == */* ]]; then
         dir=$(strip_slashes "$arg")
         if [[ $dir != /* ]]; then
@@ -2743,24 +3577,33 @@ resolve_session() {
     resolve_logdir
     logdir=$LOGDIR
     if [[ -n $arg ]]; then
-        dir=$logdir/$arg
-        if [[ ! -e $dir && ! -L $dir ]]; then
+        find_engagement_dirs
+        for parent in "$logdir" "${ENGAGEMENT_DIRS[@]}"; do
+            if [[ -e $parent/$arg || -L $parent/$arg ]]; then
+                matches+=("$parent/$arg")
+            fi
+        done
+        if (( ${#matches[@]} == 0 )); then
             die 1 "there is no session $arg in $(shown "$logdir")"
         fi
     else
-        # Byte order, so that the locale cannot reorder the names.
-        local LC_ALL=C
-        for entry in "$logdir"/*; do
-            name=${entry##*/}
-            if [[ $name =~ $SESSION_NAME_RE && -d $entry && ! -L $entry && $name > $best ]]; then
-                best=$name
-            fi
-        done
-        if [[ -z $best ]]; then
+        collect_sessions
+        if (( ${#SESSIONS[@]} == 0 )); then
             die 3 "no sessions in $(shown "$logdir")"
         fi
-        dir=$logdir/$best
+        # SESSIONS is sorted by id, so copies of the newest id come last.
+        arg=${SESSIONS[-1]##*/}
+        for dir in "${SESSIONS[@]}"; do
+            if [[ ${dir##*/} == "$arg" ]]; then
+                matches+=("$dir")
+            fi
+        done
     fi
+    if (( ${#matches[@]} > 1 )); then
+        die 1 "session $arg is in more than one folder of $(shown "$logdir"); name the one you" \
+            "mean by its path"
+    fi
+    dir=${matches[0]}
     check_session_dir "$dir"
     SESSION_DIR=$dir SESSION_ID=${dir##*/}
 }
@@ -2788,16 +3631,49 @@ resolve_logdir() {
     fi
 }
 
-# Set SESSIONS to the session folders of LOGDIR, by name in byte order, which is time order: the
-# real folders named like sessions. Exits 3 when there is none.
-list_sessions() {
-    local entry LC_ALL=C
-    SESSIONS=()
+# Set ENGAGEMENT_DIRS to the engagement folders of LOGDIR: its entries with a valid engagement
+# name that are real folders of this user's, not symlinks, whether the config names them or
+# they were made by hand. Nothing deeper counts.
+find_engagement_dirs() {
+    local LC_ALL=C entry
+    ENGAGEMENT_DIRS=()
     for entry in "$LOGDIR"/*; do
-        if [[ ${entry##*/} =~ $SESSION_NAME_RE && -d $entry && ! -L $entry ]]; then
-            SESSIONS+=("$entry")
+        if engagement_name_ok "${entry##*/}" && [[ -d $entry && ! -L $entry && -O $entry ]]; then
+            ENGAGEMENT_DIRS+=("$entry")
         fi
     done
+}
+
+# Set SESSIONS to the session folders of LOGDIR and of its engagement folders, the real folders
+# named like sessions, by name in byte order, which is time order, whichever folder holds them.
+# Copies of one id keep the order of their folders, the log folder first. SESSIONS may be empty.
+collect_sessions() {
+    # Byte order and byte ranges, so that the locale cannot reorder or widen the names.
+    local LC_ALL=C dir entry
+    local -a rows=()
+    SESSIONS=()
+    find_engagement_dirs
+    for dir in "$LOGDIR" "${ENGAGEMENT_DIRS[@]}"; do
+        for entry in "$dir"/*; do
+            if [[ ${entry##*/} =~ $SESSION_NAME_RE && -d $entry && ! -L $entry ]]; then
+                rows+=("${entry##*/}"$'\t'"$entry")
+            fi
+        done
+    done
+    if (( ${#rows[@]} )); then
+        # A session name holds no tab, and no path a newline: read_config and resolve_paths
+        # refuse a log folder with one.
+        mapfile -t SESSIONS < <(printf '%s\n' "${rows[@]}" | LC_ALL=C sort -s -t $'\t' -k 1,1 |
+            cut -f 2-)
+        if (( ${#SESSIONS[@]} != ${#rows[@]} )); then
+            die 1 "cannot sort the sessions of $(shown "$LOGDIR")"
+        fi
+    fi
+}
+
+# Set SESSIONS as collect_sessions does. Exits 3 when there is none.
+list_sessions() {
+    collect_sessions
     if (( ${#SESSIONS[@]} == 0 )); then
         die 3 "no sessions in $(shown "$LOGDIR")"
     fi
@@ -3595,7 +4471,8 @@ seal_notice() {
 }
 
 # tlogger seal [SESSION | --all]: seal one session, by default the newest, or with --all every
-# session of the log folder whose recording has ended. Prints 'sealed session <id>; SHA-256 of
+# session of the log folder and its engagement folders whose recording has ended, by id. Its line
+# goes into the MANIFEST of the folder that holds it. Prints 'sealed session <id>; SHA-256 of
 # its SHA256SUMS: <sum>' for each one it seals. With --all, sessions still recorded and sessions
 # without a recorder file are named and left; sessions sealed already are passed over, unless
 # their MANIFEST line is missing, which they get. Exits 0, 1 when a session was refused or could
@@ -3637,10 +4514,10 @@ cmd_seal() {
 }
 
 # tlogger verify [SESSION | --all]: check one session, by default the newest, or every session of
-# the log folder with --all, and print '<id>  <verdict>' for each (see verify_session). Exits 0
-# when no sealed session changed and every finished one is sealed, 1 when a sealed session
-# changed, 4 when none changed but a finished session is unsealed or has no recorder file, 3
-# without sessions. A session still recorded does not count.
+# the log folder and its engagement folders with --all, by id, and print '<id>  <verdict>' for
+# each (see verify_session). Exits 0 when no sealed session changed and every finished one is
+# sealed, 1 when a sealed session changed, 4 when none changed but a finished session is
+# unsealed or has no recorder file, 3 without sessions. A session still recorded does not count.
 cmd_verify() {
     local dir changed=0
     local -i open=0
@@ -3672,11 +4549,12 @@ cmd_verify() {
     fi
 }
 
-# tlogger list: print one line per session of the log folder, oldest first, under a header: its
-# id, its state (see list_state), its start in UTC, from its id, its recorded time, the number of
-# commands its journal started, and whether it has a transcript. Exits 0, 3 without sessions.
+# tlogger list: print one line per session of the log folder and its engagement folders, oldest
+# first, under a header: its id, its state (see list_state), its start in UTC, from its id, its
+# recorded time, the number of commands its journal started, whether it has a transcript, and its
+# engagement, - for a session directly in the log folder. Exits 0, 3 without sessions.
 cmd_list() {
-    local dir id state start count row='%-23s  %-9s  %-20s  %8s  %8s  %s\n'
+    local dir id state start count engagement row='%-23s  %-9s  %-20s  %8s  %8s  %-10s  %s\n'
     while (( $# )); do
         case $1 in
             -h | --help) usage; exit 0 ;;
@@ -3688,7 +4566,7 @@ cmd_list() {
     resolve_logdir
     list_sessions
     # shellcheck disable=SC2059 # The format is the row above.
-    printf "$row" SESSION STATE 'START (UTC)' DURATION COMMANDS TRANSCRIPT
+    printf "$row" SESSION STATE 'START (UTC)' DURATION COMMANDS TRANSCRIPT ENGAGEMENT
     for dir in "${SESSIONS[@]}"; do
         id=${dir##*/}
         state=$(list_state "$dir")
@@ -3697,9 +4575,15 @@ cmd_list() {
         if [[ -f $dir/commands.tsv && ! -L $dir/commands.tsv ]]; then
             count=$(grep -c "^S"$'\t' "$dir/commands.tsv") || count=0
         fi
+        engagement=-
+        if [[ ${dir%/*} != "$LOGDIR" ]]; then
+            engagement=${dir%/*}
+            engagement=${engagement##*/}
+        fi
         # shellcheck disable=SC2059
         printf "$row" "$id" "$state" "$start" "$(list_duration "$dir")" "$count" \
-            "$( [[ -f $dir/transcript.txt && ! -L $dir/transcript.txt ]] && echo yes || echo no)"
+            "$( [[ -f $dir/transcript.txt && ! -L $dir/transcript.txt ]] && echo yes || echo no)" \
+            "$engagement"
     done
 }
 
@@ -3726,7 +4610,9 @@ main() {
         install) cmd_install "$@" ;;
         uninstall) cmd_uninstall "$@" ;;
         mode) cmd_mode "$@" ;;
+        engagement) cmd_engagement "$@" ;;
         status) cmd_status "$@" ;;
+        doctor) cmd_doctor "$@" ;;
         render) cmd_render "$@" ;;
         show) cmd_show "$@" ;;
         replay) cmd_replay "$@" ;;

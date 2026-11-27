@@ -34,8 +34,35 @@ terminal is forgotten. `--mode manual` records only after `tlogger start`. Add `
 the plan and the change to your `.zshrc` without writing anything.
 
 **Check it.** Open a new terminal. It prints `tlogger: recording session <id>` in green, and the
-prompt shows `[REC]` in green. `tlogger status` names the state, the session, the mode and the log
-folder.
+prompt shows `[REC]` in green. `tlogger status` names the state, the session, the mode, the log
+folder and the engagement.
+
+**Check the log folder.** Run `tlogger doctor`. It checks whether the log folder lies on encrypted
+storage that keeps Unix permissions, whether the folder is private, and whether its volume is
+mounted. It changes nothing. Each line says `ok`, `warn` with what to do, or `unknown` with what
+to check by hand. It ends with `No warnings. Nothing was changed.` when every check is `ok`.
+
+**Guard the volume.** When the logs live on a volume of their own, such as a LUKS volume mounted
+at `/srv/work`, name its mount point in `~/.config/tlogger/config` beside the log folder:
+
+```text
+logdir=/srv/work/tlogger
+logdir_mount=/srv/work
+```
+
+A recording then refuses, in red, while that volume is not mounted, and the terminal stays
+usable: mount the volume, then run `tlogger start` or open a new terminal. Without that line,
+the logs could land unencrypted on the disk beneath the mount point. `tlogger doctor` prints the
+`logdir_mount=` line to add when it finds such a volume; under your home folder that line shows
+`~`, which you write out as the full path. If the path runs through a symlink, write the real
+path.
+
+**Name the engagement.** Before you open the first terminal of the job, run
+`tlogger engagement acme`, with the name of the job in place of `acme`. Its sessions then go into
+a folder of their own in the log folder, with their own `MANIFEST`. A name has letters, digits,
+`.`, `_` and `-`, and starts with a letter or a digit. A terminal that records already keeps its
+session where it started, so open a new one. Run `tlogger doctor` again: it checks the engagement
+folder too.
 
 ## During the engagement
 
@@ -56,8 +83,8 @@ terminal says why in red and stays usable. Fix the cause, or record by hand with
 
 ## After the engagement
 
-**Look at a session.** The session id is the folder name under the log folder. Leave it out to
-use the newest session.
+**Look at a session.** The session id is the folder name in the log folder, or in the
+engagement folder. Leave it out to use the newest session.
 
 - `tlogger render <id>` writes `transcript.txt`, a plain-text transcript, into the session's
   folder.
@@ -69,14 +96,20 @@ use the newest session.
 **Check the seals.** Each session was sealed as its recording ended, and the terminal printed
 its sum. `tlogger list` shows every session and its state. `tlogger seal --all` seals the ones
 that ended unexpectedly, and `tlogger verify --all` checks every sealed session; it must print
-`ok` for each. Keep a copy of `MANIFEST` from the log folder, or the sums the terminal printed,
-with the engagement's records, apart from the logs: only that copy shows a later change.
+`ok` for each. Keep a copy of `MANIFEST` from the engagement folder, or the sums the terminal
+printed, with the engagement's records, apart from the logs: only that copy shows a later change.
+Sessions recorded without an engagement have their lines in the `MANIFEST` of the log folder.
 
 **Keep the evidence.** `output.raw` with `timing` and `input.raw`, and `commands.tsv`, are the
 evidence. The transcript is derived from them, and its first line says so. Do not edit the
-logs; once sealed, they are read-only. Copy the session folders, with `MANIFEST`, to the
-engagement's encrypted archive. Never put a log into a repository, a ticket or an unencrypted
-report: it holds every password typed.
+logs; once sealed, they are read-only. Copy the engagement folder as a whole, with its
+`MANIFEST`, to the engagement's encrypted archive. Do not move a session into another folder:
+`verify` then says `changed` for it, since no `MANIFEST` line there names it, until you move it
+back or run `tlogger seal <id>`, which adds the line while its seal still matches. Never put a log
+into a repository, a ticket or an unencrypted report: it holds every password typed.
+
+**Close the engagement.** `tlogger engagement --none` sends the next sessions to the log folder
+again, or `tlogger engagement` with the next job's name to that job's folder.
 
 **Remove the recorder when you are done.** `tlogger uninstall` takes the block out of your
 `.zshrc` and removes the plugin. Your logs and the backups of your `.zshrc` stay.

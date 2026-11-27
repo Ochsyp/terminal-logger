@@ -103,10 +103,10 @@ assert_bad_name() {
     # Upper and lower case count as different names, and manifest is not MANIFEST.
     run_tlogger engagement TEST
     [ "$status" -eq 0 ]
-    grep -qx $'engagement=TEST\r' "$CONFIG"
+    grep -Uqx $'engagement=TEST\r' "$CONFIG"
     run_tlogger engagement manifest
     [ "$status" -eq 0 ]
-    grep -qx $'engagement=manifest\r' "$CONFIG"
+    grep -Uqx $'engagement=manifest\r' "$CONFIG"
     refute_temp_left
 }
 

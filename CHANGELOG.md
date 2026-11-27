@@ -7,8 +7,21 @@ Each version is the GitHub release `vX.Y.Z`.
 
 ## [Unreleased]
 
+### Added
+
+- `tlogger doctor` checks that the logs are on encrypted, private storage and that its volume is
+  mounted. It only reads, changes nothing, and exits 1 on any warning or unknown.
+  `tlogger engagement NAME` keeps each engagement's sessions in their own folder of the log
+  folder, with their own `MANIFEST`, and `tlogger engagement --none` clears it. Two new settings:
+  `engagement`, and `logdir_mount`, the mount point of the volume that holds the log folder.
+
 ### Changed
 
+- A recording no longer creates a missing log folder other than the default. It refuses to record
+  while the volume that `logdir_mount` names is not mounted, or while the engagement in the config
+  is not a valid name; the terminal stays usable. `list` has an engagement column. `seal --all`,
+  `verify --all`, session ids and the newest session also cover engagement folders. Sessions
+  recorded before stay where they are, and keep verifying `ok`.
 - `VERSION` is `0.2.1-dev` after the release of 0.2.0, so an install from a checkout of `main`
   names a development version again.
 - Repository standard 1.3.1, with seals off: releases from the next one on are not sealed, and

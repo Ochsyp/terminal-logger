@@ -2,15 +2,20 @@
 # _tlogger_load_config, which reads ${XDG_CONFIG_HOME:-$HOME/.config}/tlogger/config as data and
 # never runs or expands a value. bin/tlogger's read_config follows the same line rules.
 
-# Fill the global associative array _tlogger_cfg with mode, logdir, record_input, min_free_mb,
-# recorder, record_ssh, record_tmux, prompt, prompt_time, stamp, stamp_vpn, vpn_ifaces and
-# history_timestamps, and with config_dir, the folder that holds the config and the disable file. Lines are key=value,
-# blank or '#' comments; whitespace around a value is trimmed, a repeated key keeps its first
-# value and an unknown key is ignored. An exported TLOGGER_<KEY in upper case> that is not empty
-# wins over the file. An invalid value, or a line that is not key=value, gets one warning on
-# stderr, and the key keeps its default. vpn_ifaces is kept as its patterns joined by single
-# spaces. A file that is a symlink, not a regular file, another user's or unreadable is not read.
-# recorder= and TLOGGER_RECORDER exist for the tests. Always returns 0, and runs no command.
+# Fill the global associative array _tlogger_cfg with mode, logdir, engagement, logdir_mount,
+# record_input, min_free_mb, recorder, record_ssh, record_tmux, prompt, prompt_time, stamp,
+# stamp_vpn, vpn_ifaces and history_timestamps, with config_dir, the folder that holds the config
+# and the disable file, and with default_logdir, the logdir that applies without a logdir line.
+# Lines are key=value, blank or '#' comments; whitespace around a value is trimmed, a repeated key
+# keeps its first value and an unknown key is ignored. An exported TLOGGER_<KEY in upper case>
+# that is not empty wins over the file. An invalid value, or a line that is not key=value, gets
+# one warning on stderr, and the key keeps its default. vpn_ifaces is kept as its patterns joined
+# by single spaces. engagement and logdir_mount are empty by default, which means no engagement
+# and no mount check, and an empty value means the same; logdir_mount drops its trailing slashes,
+# but / stays. An invalid value of either is kept as it is, without a warning, so that
+# _tlogger_preflight refuses to record rather than drop the guard. A file that is a symlink, not
+# a regular file, another user's or unreadable is not read. recorder= and TLOGGER_RECORDER exist
+# for the tests. Always returns 0, and runs no command.
 _tlogger_load_config() {
     emulate -L zsh
     setopt extendedglob
@@ -38,11 +43,12 @@ _tlogger_load_config() {
     done
     state_dir=$base/tlogger
     # The keys in the order of their checks, and so of their warnings.
-    keys=(mode logdir record_input min_free_mb recorder record_ssh record_tmux prompt prompt_time
-        stamp stamp_vpn vpn_ifaces history_timestamps)
-    def=(mode manual logdir "$state_dir/sessions" record_input yes min_free_mb 200
-        recorder /usr/bin/script record_ssh yes record_tmux yes prompt on prompt_time readable
-        stamp hidden stamp_vpn on vpn_ifaces 'tun* wg* tap*' history_timestamps no)
+    keys=(mode logdir engagement logdir_mount record_input min_free_mb recorder record_ssh
+        record_tmux prompt prompt_time stamp stamp_vpn vpn_ifaces history_timestamps)
+    def=(mode manual logdir "$state_dir/sessions" engagement '' logdir_mount ''
+        record_input yes min_free_mb 200 recorder /usr/bin/script record_ssh yes record_tmux yes
+        prompt on prompt_time readable stamp hidden stamp_vpn on vpn_ifaces 'tun* wg* tap*'
+        history_timestamps no)
 
     file=$cfg_dir/config
     shown_file=$file
@@ -94,7 +100,7 @@ _tlogger_load_config() {
     done
 
     typeset -gA _tlogger_cfg
-    _tlogger_cfg=(config_dir "$cfg_dir")
+    _tlogger_cfg=(config_dir "$cfg_dir" default_logdir "$def[logdir]")
     for key in $keys; do
         if (( ! ${+raw[$key]} )); then
             _tlogger_cfg[$key]=$def[$key]
@@ -160,6 +166,13 @@ _tlogger_load_config() {
                 if [[ $value != /* || $value == *[[:cntrl:]]* ]]; then
                     why='must be an absolute path'
                 fi
+                ;;
+            logdir_mount)
+                # Checked by _tlogger_preflight, which refuses an invalid value: the default, no
+                # mount check, would turn the guard off.
+                while [[ $value == ?*/ ]]; do
+                    value=${value%/}
+                done
                 ;;
         esac
         if [[ -n $why ]]; then
