@@ -24,11 +24,9 @@ cd terminal-logger-X.Y.Z
 ./bin/tlogger install --mode auto
 ```
 
-`sha256sum -c` must print `OK`. From 0.2.0 on, check the release's seal as well, before `tar`:
-the README's Install section has the commands, which need the maintainer's public key once, and
-no login. The extra check, after those and before `tar`, is
-`gh attestation verify terminal-logger-X.Y.Z.tar.gz --repo Ochsyp/terminal-logger`, which proves
-where the archive was built; the README's Install section says more.
+`sha256sum -c` must print `OK`. Signed in to the GitHub CLI, you can also run
+`gh attestation verify terminal-logger-X.Y.Z.tar.gz --repo Ochsyp/terminal-logger` before `tar`,
+which proves where the archive was built; the README's Install section says more.
 
 `--mode auto` records every new terminal as its shell starts, which suits an engagement: no
 terminal is forgotten. `--mode manual` records only after `tlogger start`. Add `--dry-run` to see

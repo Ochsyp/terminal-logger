@@ -1,6 +1,6 @@
-# Repository standard 1.3.0. Written by tools/manifest; never edit it.
+# Repository standard 1.3.1. Written by tools/manifest; never edit it.
 # type  profile  blob-id                                   mode    path[#block[@variant]]
-standard 1.3.0
+standard 1.3.1
 file    all      0c3c9c971991b2943b468bf94d911cfb6dd984c4  100755  .githooks/commit-msg
 file    all      cc238bb39f7e3ceb481a632d18ada8a42fadafcf  100644  .githooks/lib.sh
 file    all      d5c698aa8c8da0560bb52304c8aafca57a0bf5c3  100755  .githooks/pre-commit
@@ -8,13 +8,13 @@ file    all      a75b31ca1d9056f5487e50c0d1d262725236ce5f  100755  .githooks/pre
 file    all      56c7891c3b469719682a53fae16eca4035887aef  100755  .githooks/pre-push
 file    all      4f5b3cdb160b8dc2720991a3c2aa569a4e780a23  100755  .githooks/privacy-scan
 file    all      0cbb587f8e8aea0fff4b1e61d129f1ccf7ebaacd  100644  .githooks/rules/base
-file    all      40ca1345fcae4b716888942e08db42edf18e5d1b  100644  .githooks/rules/disk
+file    all      4a58f0f9a3fb9ce5db8f1413e9755e402ddcddb4  100644  .githooks/rules/disk
 file    all      a34753f7f764dd463fe795f388a243da0b1fcf91  100644  .githooks/rules/vm
 file    all      1fd68eab7ce3eeb367ffab3722137032ca82bdd3  100644  .github/pull_request_template.md
 file    all      8c34d2bcf43ca4bea7cffd056380b034e3f210cf  100644  .github/standard/README.md
 file    all      a29ad273f519ed29d86dd3c3af12f93517b9edba  100644  .github/standard/actions.allow
 file    all      237de99e763079c5c9d02838f8ddbe7f5bbb22d2  100755  .github/standard/bin/changelog-entry
-file    all      653e53ffa3b87c1ad942ccd712aa8f19c21bd807  100755  .github/standard/bin/conf
+file    all      92cb7ec7ab92dff644fd57ba296a585921023b38  100755  .github/standard/bin/conf
 file    all      b71ae4209e2649292304f5c44291c6d0a36fe2a8  100755  .github/standard/bin/install-tools
 file    all      d22aeb934c3513ca17d7fdf6ba4f45ec0ffc87aa  100644  .github/standard/bin/lib.bash
 file    all      896c9969b818ba9bdbb300858c3fe95058849a25  100755  .github/standard/bin/no-skips
@@ -29,11 +29,11 @@ file    all      22d07ddae5d583537c2f27d52051c5bb76d7f53f  100755  .github/stand
 file    all      9014ed95df1a083e724d091582b6a3acd24f2ec7  100755  .github/standard/bin/run-stage
 file    all      7c96f4aacb3b0d8cddd410079e9778fa9ac166b4  100755  .github/standard/bin/secret-scan
 file    all      1768e14ea0085aa29617018c12230ad76b2d310c  100755  .github/standard/bin/standard-check
-file    all      1fee954a0ec0b922e65a395714d66d1b9f9b6792  100755  .github/standard/tests/conf.bats
+file    all      883b239032723b52a4bdf75e1032bce270e5dd76  100755  .github/standard/tests/conf.bats
 file    all      b89d28c2dfa1f6459f51bb6605109206446ad400  100755  .github/standard/tests/hooks.bats
 file    all      5b922b9bbc0b43ce419575826a09b4324e58b74b  100644  .github/standard/tests/lib.bash
 file    all      e99288d7e0b805cb5bc9c580d2242c82f2d026c7  100755  .github/standard/tests/lint.bats
-file    all      d9668dee2515e2d650d6cef7041fba4ecd99640c  100755  .github/standard/tests/privacy-scan.bats
+file    all      94cf502b2a142c99c4667ada680e03923768f9f6  100755  .github/standard/tests/privacy-scan.bats
 file    all      1461cfbcfbd2114ac4bb0da16398dff901efc174  100755  .github/standard/tests/release-meta.bats
 file    all      ce286a83d9cbfec96e2dedd238fbe7b87d956c68  100755  .github/standard/tests/release-tools.bats
 file    all      740269bdf3d9ac8a9879f435496d613eab940b8d  100755  .github/standard/tests/secret-scan.bats
