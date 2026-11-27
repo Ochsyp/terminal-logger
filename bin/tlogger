@@ -2936,7 +2936,7 @@ doctor_tool() {
 # doctor_tool, under timeout.
 doctor_place() {
     local rest=$1 cur=/ next part target real tail=''
-    local -i links=0 link
+    local -i links=0 link rc
     PLACE_AUTOFS=0 PLACE_NET=0 PLACE_ROW=-1
     while [[ -n $rest ]]; do
         part=${rest%%/*}
@@ -2962,9 +2962,14 @@ doctor_place() {
             tail=$part${rest:+/$rest}
             break
         fi
-        link=0
-        if doctor_tool test -L "$next" 2> /dev/null; then
+        link=0 rc=0
+        doctor_tool test -L "$next" 2> /dev/null || rc=$?
+        if (( rc == 0 )); then
             link=1
+        elif (( rc == 124 || rc == 137 )); then
+            # A part that does not answer: the rest stays as written, rather than wait again.
+            tail=$part${rest:+/$rest}
+            break
         fi
         if (( link )); then
             if (( links == 40 )); then
