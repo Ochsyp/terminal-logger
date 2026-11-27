@@ -39,9 +39,11 @@ on a host that others use.
 ### Install from a release
 
 Each [release](https://github.com/Ochsyp/terminal-logger/releases) has two assets: the archive
-`terminal-logger-X.Y.Z.tar.gz` and `SHA256SUMS`. The repository is public, so no account, login or
-key is needed. Download both into an empty folder, with the version in place of `X.Y.Z`, check
-them before you unpack anything, and install:
+`terminal-logger-X.Y.Z.tar.gz` and `SHA256SUMS`. Install only a release that the releases page
+does not mark as a pre-release: that mark is how the maintainer holds a bad one. The repository is
+public, so no account, login or key is needed. Download both into an empty folder, with the
+version in place of `X.Y.Z`, check them before you unpack anything, and install (signed in to the
+GitHub CLI, add the extra check further below before the `tar -xzf` line):
 
 ```bash
 curl -fLO https://github.com/Ochsyp/terminal-logger/releases/download/vX.Y.Z/terminal-logger-X.Y.Z.tar.gz

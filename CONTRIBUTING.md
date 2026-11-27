@@ -403,7 +403,8 @@ of `.gitattributes`.
 
 Releases are not sealed (`SEAL=no`): they rely on GitHub's immutable releases, `SHA256SUMS` and the
 build attestation. v0.2.0 alone carries a seal, the tag `seal/v0.2.0`, which stays as it is. A bad
-release is ticked **Set as a pre-release**, as the Releasing section says, and X.Y.Z+1 follows.
+release is ticked **Set as a pre-release**, as the Releasing section says, and X.Y.Z+1 follows;
+users install only a release that the releases page does not mark as a pre-release.
 
 A user installs a release on their own machine, never a host for others. They download the two
 assets with `curl` from the release's download URLs, which needs no login and no key, and check
@@ -411,8 +412,7 @@ the archive with `sha256sum -c SHA256SUMS` before they unpack it; the archive's 
 commit. Those signed in to the GitHub CLI can also run `gh attestation verify` on the archive,
 which proves that this repository's `release.yml` built it from `main`; the docs show it as that
 optional extra, after the steps without a login, and `tests/lint.bats` keeps it so. Then they
-unpack it anywhere
-and run `./bin/tlogger install` in the folder. That copies the release files to
+unpack it anywhere and run `./bin/tlogger install` in the folder. That copies the release files to
 `~/.local/share/tlogger/releases/X.Y.Z`, points `~/.local/share/tlogger/current` at it, and
 keeps the release before it. It refuses an unpacked release whose manifest names another version
 than its `VERSION`, and it refuses to replace a newer release.

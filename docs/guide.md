@@ -11,20 +11,21 @@ included. So keep the log folder on encrypted storage, readable by you only. By 
 volume. Mount that volume before you open the first terminal of the day.
 
 **Install, as the user whose terminals you record, not as root.** Download a release into an
-empty folder, with no login, and check it before you unpack it. Then install from the folder. If
-you are signed in to the GitHub CLI, add the extra check below the block between `sha256sum` and
-`tar`:
+empty folder, with no login, and check it before you unpack it; take only a release that the
+releases page does not mark as a pre-release. Then install from the folder:
 
 ```bash
 curl -fLO https://github.com/Ochsyp/terminal-logger/releases/download/vX.Y.Z/terminal-logger-X.Y.Z.tar.gz
 curl -fLO https://github.com/Ochsyp/terminal-logger/releases/download/vX.Y.Z/SHA256SUMS
 sha256sum -c SHA256SUMS
+tar -xzOf terminal-logger-X.Y.Z.tar.gz terminal-logger-X.Y.Z/terminal-logger-release.json | grep '"commit"'
 tar -xzf terminal-logger-X.Y.Z.tar.gz
 cd terminal-logger-X.Y.Z
 ./bin/tlogger install --mode auto
 ```
 
-`sha256sum -c` must print `OK`. Signed in to the GitHub CLI, you can also run
+`sha256sum -c` must print `OK`, and the manifest line names the commit the archive was built
+from. Signed in to the GitHub CLI, you can also run
 `gh attestation verify terminal-logger-X.Y.Z.tar.gz --repo Ochsyp/terminal-logger` before `tar`,
 which proves where the archive was built; the README's Install section says more.
 
