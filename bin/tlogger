@@ -1694,6 +1694,34 @@ check_dir_safe() {
     fi
 }
 
+# Exit 1 unless the existing folder DIR may hold sessions for the session commands: DIR, called
+# WHAT in the messages ('the log folder', 'the engagement folder' or 'the folder'), is no
+# symlink, is a folder, is this user's, and neither its group nor others may write in it unless
+# its sticky bit is set, as the plugin's _tlogger_check_dir asks of a folder it records into.
+# Another user who may write in DIR could rename a session folder and put another in its place.
+# Unlike the plugin, it does not ask for write permission: a folder closed to 0500 still lists
+# and verifies, and seal and render fail on their own when they cannot write.
+check_holder_dir() {
+    local dir=$1 what=$2 mode
+    if [[ -L $dir ]]; then
+        die 1 "$what $(shown "$dir") is a symlink, which tlogger does not follow"
+    fi
+    if [[ ! -d $dir ]]; then
+        die 1 "$what $(shown "$dir") is not a folder"
+    fi
+    if [[ ! -O $dir ]]; then
+        die 1 "$what $(shown "$dir") belongs to another user"
+    fi
+    mode=$(stat -c %a -- "$dir" 2> /dev/null) || mode=
+    if [[ ! $mode =~ ^[0-7]{3,4}$ ]]; then
+        die 1 "cannot read the mode of $what $(shown "$dir")"
+    fi
+    if (( (8#$mode & 8#022) != 0 && (8#$mode & 8#1000) == 0 )); then
+        die 1 "$what $(shown "$dir") is writable by its group or by others;" \
+            "chmod go-w $(shown "$dir") fixes it"
+    fi
+}
+
 # Create FOLDER and its missing parents with mode 0700, as the XDG base directory spec asks: the
 # umask of the subshell gives every level that mode. An existing FOLDER is left as it is.
 make_parent() {
@@ -3599,13 +3627,14 @@ check_session_dir() {
 
 # Set SESSION_DIR and SESSION_ID from the SESSION argument of render, show and replay. An
 # argument with a / is a path to a session folder anywhere, made absolute without resolving
-# symlinks, whose last part must be neither '.' nor '..'. Any other argument must be a session
-# id, a folder in the log folder or in one of its engagement folders (see find_engagement_dirs);
-# none picks the newest session of both levels by name, which starts with the UTC time, among
-# the real folders named like sessions. The log folder is the config's logdir, else the default.
-# Exits 3 when the log folder is missing or holds no session, 1 for an argument that is no id, an
-# id without a folder or with more than one, an unsafe log folder or config, or a folder that
-# check_session_dir refuses.
+# symlinks, whose last part must be neither '.' nor '..', in a folder that check_holder_dir
+# accepts when that folder exists. Any other argument must be a session id, a folder in the log
+# folder or in one of its engagement folders (see find_engagement_dirs); none picks the newest
+# session of both levels by name, which starts with the UTC time, among the real folders named
+# like sessions. The log folder is the config's logdir, else the default. Exits 3 when the log
+# folder is missing or holds no session, 1 for an argument that is no id, an id without a folder
+# or with more than one, an unsafe config, a log, engagement or holding folder that
+# check_holder_dir refuses, or a folder that check_session_dir refuses.
 resolve_session() {
     local arg=$1 logdir dir parent
     local -a matches=()
@@ -3617,6 +3646,11 @@ resolve_session() {
         case ${dir##*/} in
             . | ..) die 1 "name the session folder itself in the path, not . or .." ;;
         esac
+        parent=${dir%/*}
+        parent=${parent:-/}
+        if [[ -e $parent || -L $parent ]]; then
+            check_holder_dir "$parent" 'the folder'
+        fi
         check_session_dir "$dir"
         SESSION_DIR=$dir SESSION_ID=${dir##*/}
         return 0
@@ -3659,7 +3693,8 @@ resolve_session() {
 }
 
 # Set LOGDIR to the log folder: the config's logdir, else the default. Exits 3 when it does not
-# exist, 1 for an unsafe config or a log folder that is a symlink, no folder or another user's.
+# exist, 1 for an unsafe config or a log folder that check_holder_dir refuses: a symlink, no
+# folder, another user's, or writable by its group or by others without the sticky bit.
 resolve_logdir() {
     resolve_paths
     read_config
@@ -3667,28 +3702,23 @@ resolve_logdir() {
         die 1 "the config $(shown "$CONFIG_FILE") $CONFIG_ERROR; fix it by hand"
     fi
     LOGDIR=${CONFIG_LOGDIR:-$SESSIONS_DIR}
-    if [[ -L $LOGDIR ]]; then
-        die 1 "the log folder $(shown "$LOGDIR") is a symlink, which tlogger does not follow"
-    fi
-    if [[ ! -e $LOGDIR ]]; then
+    if [[ ! -e $LOGDIR && ! -L $LOGDIR ]]; then
         die 3 "no sessions: the log folder $(shown "$LOGDIR") does not exist"
     fi
-    if [[ ! -d $LOGDIR ]]; then
-        die 1 "the log folder $(shown "$LOGDIR") is not a folder"
-    fi
-    if [[ ! -O $LOGDIR ]]; then
-        die 1 "the log folder $(shown "$LOGDIR") belongs to another user"
-    fi
+    check_holder_dir "$LOGDIR" 'the log folder'
 }
 
 # Set ENGAGEMENT_DIRS to the engagement folders of LOGDIR: its entries with a valid engagement
-# name that are real folders of this user's, not symlinks, whether the config names them or
-# they were made by hand. Nothing deeper counts.
+# name that are folders, whether the config names them or they were made by hand. Nothing deeper
+# counts. Each one must pass check_holder_dir, so a symlink to a folder, another user's folder or
+# one that its group or others may write in exits 1 instead of being skipped, and no command
+# overlooks its sessions; a symlink to a file or to nothing is no engagement folder.
 find_engagement_dirs() {
     local LC_ALL=C entry
     ENGAGEMENT_DIRS=()
     for entry in "$LOGDIR"/*; do
-        if engagement_name_ok "${entry##*/}" && [[ -d $entry && ! -L $entry && -O $entry ]]; then
+        if engagement_name_ok "${entry##*/}" && [[ -d $entry ]]; then
+            check_holder_dir "$entry" 'the engagement folder'
             ENGAGEMENT_DIRS+=("$entry")
         fi
     done
