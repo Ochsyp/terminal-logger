@@ -2,8 +2,10 @@
 # Tests for the folder check of the session commands in bin/tlogger: list, seal, verify, render,
 # show and replay refuse a log folder, an engagement folder, or the folder that holds a session
 # named by its path, when it is a symlink, another user's, or writable by its group or by others
-# without the sticky bit, as a recording refuses it. They do not need write permission, so a
-# folder closed to 0500 still lists and verifies. Run as a subprocess in the test's own HOME on
+# without the sticky bit, as a recording refuses it. Only the folder that holds a session named
+# by its path may also be root's, as the root of a mounted disk is; a log folder or engagement
+# folder of root's is refused. They do not need write permission, so a folder closed to 0500
+# still lists and verifies. Run as a subprocess in the test's own HOME on
 # synthetic sessions, with a fake /proc, which TLOGGER_PROC names, so that no session counts as
 # still recorded.
 #
@@ -253,6 +255,24 @@ assert_every_command_refuses() {
     printf 'mode=manual\nlogdir=%s\n' "$other" > "$HOME/.config/tlogger/config"
     run_tlogger list
     assert_refused "tlogger: the log folder $other belongs to another user"
+}
+
+@test "a log folder of root's is refused, as only the folder of a path may be root's" {
+    local args
+    if (( EUID == 0 )); then
+        skip "it needs a user other than root"
+    fi
+    if [[ $(stat -c %u /usr) != 0 ]]; then
+        skip "it needs /usr to be root's"
+    fi
+    mkdir -p "$HOME/.config/tlogger"
+    chmod 700 "$HOME/.config/tlogger"
+    printf 'mode=manual\nlogdir=/usr\n' > "$HOME/.config/tlogger/config"
+    for args in list 'seal --all' 'verify --all' show; do
+        # shellcheck disable=SC2086 # The command and its arguments, split on spaces.
+        run_tlogger $args
+        assert_refused 'tlogger: the log folder /usr belongs to another user'
+    done
 }
 
 @test "a session named by its path may lie in a folder of root's that others cannot write in" {

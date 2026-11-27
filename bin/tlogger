@@ -3635,10 +3635,10 @@ check_session_dir() {
 # a session id, a folder in the log folder or in one of its engagement folders (see
 # find_engagement_dirs); none picks the newest session of both levels by name, which starts with
 # the UTC time, among the real folders named like sessions. The log folder is the config's
-# logdir, else the default. Exits 3 when the log
-# folder is missing or holds no session, 1 for an argument that is no id, an id without a folder
-# or with more than one, an unsafe config, a log, engagement or holding folder that
-# check_holder_dir refuses, or a folder that check_session_dir refuses.
+# logdir, else the default. Exits 3 when the log folder is missing or holds no session, 1 for an
+# argument that is no id, an id without a folder or with more than one, an unsafe config, a log,
+# engagement or holding folder that check_holder_dir refuses, or a folder that check_session_dir
+# refuses.
 resolve_session() {
     local arg=$1 logdir dir parent
     local -a matches=()
