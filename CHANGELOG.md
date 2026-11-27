@@ -11,6 +11,10 @@ Each version is the GitHub release `vX.Y.Z`.
 
 - `VERSION` is `0.2.1-dev` after the release of 0.2.0, so an install from a checkout of `main`
   names a development version again.
+- Repository standard 1.3.1, with seals off: releases from the next one on are not sealed, and
+  installing one needs no key and no login: download, `sha256sum -c SHA256SUMS` and the archive's
+  commit line, with `gh attestation verify` as an optional extra. They rely on GitHub's immutable
+  releases and the build attestation. v0.2.0 keeps its seal, the tag `seal/v0.2.0`.
 
 ## [0.2.0] - 2026-11-26
 

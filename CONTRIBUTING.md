@@ -354,8 +354,7 @@ last updated the tag, its `last_updated` field.
 <!-- standard:begin releasing -->
 ## Releasing
 
-GitHub Actions builds each release, and the maintainer publishes it in the browser, then seals
-it: hosts that install this repository's releases install a sealed release only.
+GitHub Actions builds each release, and the maintainer publishes it in the browser.
 
 1. The maintainer opens the release pull request `chore/release-X.Y.Z`, written with
    `.github/standard/bin/release-prepare`: `VERSION`, the `VERSION_COPY` files, and the
@@ -368,24 +367,16 @@ it: hosts that install this repository's releases install a sealed release only.
 3. The maintainer checks the draft (notes, assets, target commit, image digest) and clicks
    **Publish release**. GitHub creates the tag and the immutable release. The `verify` job then
    checks the published release, and the maintainer looks for it to pass.
-4. Then the maintainer seals the release. Double-click this repository's seal shortcut and check
-   what the dialog shows: the version, its commit, the release pull request, the commits since
-   the last seal and each check the tool ran. Click **Seal** and type the passphrase of the
-   offline signing key. The tool pushes the annotated, SSH-signed tag `seal/vX.Y.Z` on the
-   release's commit, from a mirror of its own; `pre-push` refuses `refs/tags/seal/*` from every
-   clone.
-5. To fix a draft, merge a pull request from `fix/release-X.Y.Z-<slug>`; its `CHANGELOG.md` line
+4. To fix a draft, merge a pull request from `fix/release-X.Y.Z-<slug>`; its `CHANGELOG.md` line
    goes into `## [X.Y.Z]`. Then run the `release` workflow on `main` (Actions, release, Run
    workflow). Merge nothing else until the draft is published: CI says so on every pull request
    while a release waits.
-6. Never delete a published release, and never move or delete a seal: a host stops on a seal
-   that moved. To stop a release before its seal, leave it unsealed and tick **Set as a
-   pre-release**, so repo-standard's `tools/status` stops asking for its seal; then ship X.Y.Z+1.
-   To stop a sealed release, use the hold that the Release contract names, and ship X.Y.Z+1.
-   For a container image, the pre-release tick also moves `latest` back.
+5. Never delete a published release. Tick **Set as a pre-release** on a bad one instead, so that
+   clients and updaters ignore it, and ship X.Y.Z+1. For a container image, the tick also moves
+   `latest` back.
 
-Only the maintainer publishes a release. No one creates a release tag or a seal by hand, and no
-script or automation publishes a release, or edits or deletes a published one.
+Only the maintainer publishes a release. No one creates a release tag by hand, and no script or
+automation publishes a release, or edits or deletes a published one.
 <!-- standard:end releasing -->
 
 ## Release contract
@@ -410,23 +401,18 @@ config, `.gitattributes` or the release files, and `tests/release-check.bats` ch
 of HEAD in every test run. Tests, CI files and tooling stay out through the `export-ignore` lines
 of `.gitattributes`.
 
-From 0.2.0 on, `SEAL=yes`: the maintainer seals each published release with the seal tool, as the
-Releasing section says, and a user installs only a sealed release. Before they unpack it, they
-check the seal against the maintainer's public key in their root-owned
-`/etc/tlogger/allowed_signers`, with `git verify-tag seal/vX.Y.Z`, in a tree-less clone they keep,
-which refuses a tag that has moved since it last saw it, and check that the seal, the release tag
-and the archive's manifest name the same commit, which is on `main`; the README's Install section
-gives the commands. The hold for a sealed release that must not be installed is the pre-release
-tick: the maintainer ticks **Set as a pre-release** on it and ships X.Y.Z+1, and users install only
-a release that the releases page does not mark as a pre-release. A seal is never moved or deleted.
+Releases are not sealed (`SEAL=no`): they rely on GitHub's immutable releases, `SHA256SUMS` and the
+build attestation. v0.2.0 alone carries a seal, the tag `seal/v0.2.0`, which stays as it is. A bad
+release is ticked **Set as a pre-release**, as the Releasing section says, and X.Y.Z+1 follows;
+users install only a release that the releases page does not mark as a pre-release.
 
 A user installs a release on their own machine, never a host for others. They download the two
-assets with `curl` from the release's download URLs, which needs no login, and check the archive
-with `sha256sum -c SHA256SUMS` before they unpack it. Those signed in to the GitHub CLI can also
-run `gh attestation verify` on the archive, which proves that this repository's `release.yml`
-built it from `main`; the docs show it as that optional extra, after the steps without a login,
-and `tests/lint.bats` keeps it so. Then they unpack it anywhere
-and run `./bin/tlogger install` in the folder. That copies the release files to
+assets with `curl` from the release's download URLs, which needs no login and no key, and check
+the archive with `sha256sum -c SHA256SUMS` before they unpack it; the archive's manifest names its
+commit. Those signed in to the GitHub CLI can also run `gh attestation verify` on the archive,
+which proves that this repository's `release.yml` built it from `main`; the docs show it as that
+optional extra, after the steps without a login, and `tests/lint.bats` keeps it so. Then they
+unpack it anywhere and run `./bin/tlogger install` in the folder. That copies the release files to
 `~/.local/share/tlogger/releases/X.Y.Z`, points `~/.local/share/tlogger/current` at it, and
 keeps the release before it. It refuses an unpacked release whose manifest names another version
 than its `VERSION`, and it refuses to replace a newer release.

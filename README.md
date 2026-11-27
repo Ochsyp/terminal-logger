@@ -39,67 +39,39 @@ on a host that others use.
 ### Install from a release
 
 Each [release](https://github.com/Ochsyp/terminal-logger/releases) has two assets: the archive
-`terminal-logger-X.Y.Z.tar.gz` and `SHA256SUMS`. From 0.2.0 on, the maintainer also seals each
-release, after publishing it: the tag `seal/vX.Y.Z`, signed with an offline SSH key that GitHub
-never sees, on the release's commit (SECURITY.md, Sealed releases). Install only a sealed release
-that the releases page does not mark as a pre-release. The repository is public, so no account or
-login is needed.
-
-Once, before the first install, put the maintainer's public SSH key, the one that signs the seals,
-into a list that only root can change. Get the key from the maintainer over a channel you trust,
-never from this repository, and keep it: a key that changes later is a reason to stop. Then make
-a small clone that keeps the tags you have seen, with commits only and no files; keep it, since
-it is what notices a tag that moves:
-
-```bash
-sudo install -d -m 0755 /etc/tlogger
-printf 'maintainer %s\n' "$(cat maintainer-seal.pub)" | sudo tee /etc/tlogger/allowed_signers
-git clone -q --bare --filter=tree:0 https://github.com/Ochsyp/terminal-logger.git ~/tlogger-seals
-```
-
-For each install, download the two assets into an empty folder, with the version in place of
-`X.Y.Z`, and check them and the seal before you unpack anything (signed in to the GitHub CLI, add
-the extra check further below before the `tar -xzf` line):
+`terminal-logger-X.Y.Z.tar.gz` and `SHA256SUMS`. Install only a release that the releases page
+does not mark as a pre-release: that mark is how the maintainer holds a bad one. The repository is
+public, so no account, login or key is needed. Download both into an empty folder, with the
+version in place of `X.Y.Z`, check them before you unpack anything, and install (signed in to the
+GitHub CLI, add the extra check further below before the `tar -xzf` line):
 
 ```bash
 curl -fLO https://github.com/Ochsyp/terminal-logger/releases/download/vX.Y.Z/terminal-logger-X.Y.Z.tar.gz
 curl -fLO https://github.com/Ochsyp/terminal-logger/releases/download/vX.Y.Z/SHA256SUMS
 sha256sum -c SHA256SUMS
-git -C ~/tlogger-seals fetch origin '+refs/heads/main:refs/heads/main' 'refs/tags/*:refs/tags/*'
-git -C ~/tlogger-seals -c gpg.ssh.allowedSignersFile=/etc/tlogger/allowed_signers verify-tag seal/vX.Y.Z
-git -C ~/tlogger-seals tag -l --format='%(contents:subject)' seal/vX.Y.Z
-git -C ~/tlogger-seals rev-parse 'seal/vX.Y.Z^{commit}' 'vX.Y.Z^{commit}'
-git -C ~/tlogger-seals merge-base --is-ancestor 'seal/vX.Y.Z^{commit}' main && echo 'on main'
 tar -xzOf terminal-logger-X.Y.Z.tar.gz terminal-logger-X.Y.Z/terminal-logger-release.json | grep '"commit"'
 tar -xzf terminal-logger-X.Y.Z.tar.gz
 cd terminal-logger-X.Y.Z
 ./bin/tlogger install --mode auto
 ```
 
-Unpack nothing unless every check holds:
+`sha256sum -c` must print `terminal-logger-X.Y.Z.tar.gz: OK`; if it does not, unpack nothing. The
+manifest line names the commit the archive was built from, the commit that the tag `vX.Y.Z`
+names on the releases page.
 
-- `sha256sum -c` prints `terminal-logger-X.Y.Z.tar.gz: OK`, which proves that the archive is the
-  one the release lists;
-- `fetch` ends without an error: it never moves a tag the clone has seen, and refuses with
-  `would clobber existing tag` when one has moved on GitHub, which is a reason to stop;
-- `verify-tag` prints `Good "git" signature for maintainer`, which proves that the maintainer
-  sealed it with the key you keep;
-- the seal's message is `terminal-logger vX.Y.Z`;
-- `rev-parse` prints the same commit twice, `merge-base` prints `on main`, and the archive's
-  manifest names that commit too, so the seal, the release, `main` and the archive agree.
-
-A missing seal means that the maintainer has not sealed that release yet, or held it: wait, or
-take the release before it. Releases before 0.2.0 have no seal.
-
-If you use the GitHub CLI and are signed in to it, you can also check where the archive was built.
-Run this after the checks above, before the `tar -xzf` line:
+How anyone can trust a release without a key: GitHub's releases here are immutable, so once a
+release is published, neither its tag nor its assets can change, and `SHA256SUMS` proves that
+the download is those assets. GitHub also keeps an attestation of each archive, which proves that
+this repository's `release` workflow built it from `main` on GitHub's own runners. With the
+GitHub CLI, which needs a login for it even for a public repository, check it before the
+`tar -xzf` line:
 
 ```bash
 gh attestation verify terminal-logger-X.Y.Z.tar.gz --repo Ochsyp/terminal-logger
 ```
 
-It proves that this repository's `release` workflow built the archive from `main`, on GitHub's own
-runners. `gh` needs a login for it, even for a public repository.
+Release 0.2.0 also carries a seal, the tag `seal/v0.2.0` signed with the maintainer's offline
+key; later releases have none.
 
 `install` copies the release to `~/.local/share/tlogger/releases/X.Y.Z` and points
 `~/.local/share/tlogger/current` at it, so the unpacked folder can go afterwards. It keeps the
