@@ -584,8 +584,9 @@ Doctor only reads: `/proc/self/mountinfo`, `/sys`, `/etc/fstab` and the folder m
 no folder, writes no file and runs no root tool, such as `cryptsetup` or `blkid`. It does not
 touch a path behind an automount point that is not mounted yet, since that could mount it and ask
 for a passphrase. Every look it takes at the folder's path runs under `timeout`, so a network
-share, a FUSE remote or a disk that stops answering gives `unknown` after 5 seconds instead of a
-hang.
+share, a FUSE remote or a disk that stops answering gives `unknown` after 10 seconds instead of a
+hang, and so does a slow disk that wakes up; run `tlogger doctor` again then. Doctor needs
+`timeout`, from coreutils.
 
 ## Viewing a session
 

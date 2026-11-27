@@ -213,8 +213,8 @@ VERDICT=
 
 # What doctor found. read_mountinfo fills MI_POINT, MI_TYPE, MI_DEV and MI_SOURCE, one entry per
 # row of mountinfo; mount_row_of sets ROW, a row or -1; doctor_place sets PLACE_REAL, PLACE_ROW,
-# PLACE_AUTOFS and PLACE_NET for a folder; doctor_volume sets MOUNT_OK; walk_device fills
-# WALK_CRYPT, WALK_LAYERS, WALK_PLAIN and WALK_OTHER; doctor_line counts DOCTOR_WARN and
+# PLACE_AUTOFS, PLACE_NET and PLACE_STUCK for a folder; doctor_volume sets MOUNT_OK; walk_device
+# fills WALK_CRYPT, WALK_LAYERS, WALK_PLAIN and WALK_OTHER; doctor_line counts DOCTOR_WARN and
 # DOCTOR_UNKNOWN.
 MI_POINT=()
 MI_TYPE=()
@@ -225,6 +225,7 @@ PLACE_REAL=
 PLACE_ROW=-1
 PLACE_AUTOFS=0
 PLACE_NET=0
+PLACE_STUCK=
 MOUNT_OK=0
 WALK_CRYPT=()
 WALK_LAYERS=()
@@ -2918,26 +2919,40 @@ network_type() {
     return 1
 }
 
-# Run COMMAND with its arguments under timeout: 5 seconds, then SIGKILL 2 seconds later. Every
-# command of doctor that touches the log folder's path runs through it, whatever the file system:
-# a network share, a FUSE remote or a failing disk that stops answering would hang it otherwise.
-# Exits as COMMAND does, or 124 or 137 when the time ran out.
+# Run COMMAND with its arguments under timeout: 10 seconds, enough for a disk that wakes up, then
+# SIGKILL 2 seconds later. Every command of doctor that touches the log folder's path runs through
+# it, whatever the file system: a network share, a FUSE remote or a failing disk that stops
+# answering would hang it otherwise. Exits as COMMAND does, or 124 or 137 when the time ran out.
 doctor_tool() {
-    timeout -k 2 5 "$@"
+    timeout -k 2 10 "$@"
 }
 
-# Set PLACE_REAL, PLACE_ROW, PLACE_AUTOFS and PLACE_NET for the folder PATH: its real path, with
-# every symlink of the part that exists resolved, the mountinfo row it lies on, 1 when that row
-# is an automount point not mounted yet, and 1 when it is a network file system.
+# Succeed when the exit status STATUS of doctor_tool means that the time ran out.
+timed_out() {
+    (( $1 == 124 || $1 == 137 ))
+}
+
+# Print the line of the check CHECK as unknown, since the look at PATH ran out of time.
+doctor_stuck() {
+    doctor_line unknown "$1" "$(shown "$2") did not answer within 10 seconds; a slow disk, such" \
+        "as one that wakes up, can cause it: run tlogger doctor again, and if it stays, check" \
+        "that its volume works"
+}
+
+# Set PLACE_REAL, PLACE_ROW, PLACE_AUTOFS, PLACE_NET and PLACE_STUCK for the folder PATH: its real
+# path, with every symlink of the part that exists resolved, the mountinfo row it lies on, 1 when
+# that row is an automount point not mounted yet, 1 when it is a network file system, and the
+# part that did not answer in time, empty when every part did. With a part that did not answer,
+# the row is not known for sure, and every check that relies on it is unknown.
 # The path is resolved one part at a time, by readlink on each symlink, up to 40 of them, and
 # readlink -m on the result. A part that lies on an automount point not mounted yet, as written
 # or reached through a symlink, ends it, with the rest kept as written: looking into that point
 # would mount it, and for LUKS could ask for a passphrase. A part is only looked at through
-# doctor_tool, under timeout.
+# doctor_tool, under timeout, and the first that does not answer ends it too.
 doctor_place() {
     local rest=$1 cur=/ next part target real tail=''
     local -i links=0 link rc
-    PLACE_AUTOFS=0 PLACE_NET=0 PLACE_ROW=-1
+    PLACE_AUTOFS=0 PLACE_NET=0 PLACE_ROW=-1 PLACE_STUCK=
     while [[ -n $rest ]]; do
         part=${rest%%/*}
         if [[ $rest == */* ]]; then
@@ -2966,9 +2981,9 @@ doctor_place() {
         doctor_tool test -L "$next" 2> /dev/null || rc=$?
         if (( rc == 0 )); then
             link=1
-        elif (( rc == 124 || rc == 137 )); then
+        elif timed_out "$rc"; then
             # A part that does not answer: the rest stays as written, rather than wait again.
-            tail=$part${rest:+/$rest}
+            PLACE_STUCK=$next tail=$part${rest:+/$rest}
             break
         fi
         if (( link )); then
@@ -2976,7 +2991,11 @@ doctor_place() {
                 tail=$part${rest:+/$rest}
                 break
             fi
-            target=$(doctor_tool readlink -- "$next" 2> /dev/null) || target=
+            target=$(doctor_tool readlink -- "$next" 2> /dev/null) || rc=$?
+            if timed_out "$rc"; then
+                PLACE_STUCK=$next tail=$part${rest:+/$rest}
+                break
+            fi
             if [[ -n $target ]]; then
                 links+=1
                 if [[ $target == /* ]]; then
@@ -3114,6 +3133,10 @@ doctor_volume() {
         fi
         MOUNT_OK=1
     fi
+    if [[ -n $PLACE_STUCK ]]; then
+        doctor_stuck volume "$PLACE_STUCK"
+        return 0
+    fi
     if (( PLACE_ROW < 0 )); then
         text="no row of /proc/self/mountinfo holds the log folder; check by hand that its volume"
         doctor_line unknown volume "$text is mounted"
@@ -3167,6 +3190,10 @@ doctor_volume() {
 # logdir_mount does not guard it.
 doctor_engagement_volume() {
     local text
+    if [[ -n $PLACE_STUCK ]]; then
+        doctor_stuck volume "$PLACE_STUCK"
+        return 0
+    fi
     if (( PLACE_ROW < 0 )); then
         text="no row of /proc/self/mountinfo holds the engagement folder; check by hand that its"
         doctor_line unknown volume "$text volume is mounted"
@@ -3196,18 +3223,31 @@ doctor_not_yet() {
 doctor_folder() {
     local dir=$1 info hex uid mode
     local -i create=$2 rc=0 kind
+    if [[ -n $PLACE_STUCK ]]; then
+        doctor_stuck folder "$PLACE_STUCK"
+        return 0
+    fi
     if (( PLACE_AUTOFS )); then
         doctor_not_yet folder
         return 0
     fi
     info=$(doctor_tool stat -c '%f %u %a' -- "$dir" 2> /dev/null) || rc=$?
-    if (( rc == 124 || rc == 137 )); then
-        doctor_line unknown folder "its file system did not answer within 5 seconds; check that" \
-            "its volume works"
+    if timed_out "$rc"; then
+        doctor_stuck folder "$dir"
         return 0
     fi
     if (( rc != 0 )); then
-        if doctor_tool test -e "$dir" || doctor_tool test -L "$dir"; then
+        # Whether DIR is there at all, as stat could not say: a look that runs out of time is no
+        # answer, and never a folder that does not exist yet.
+        rc=0
+        doctor_tool test -e "$dir" || rc=$?
+        if (( rc != 0 )) && ! timed_out "$rc"; then
+            rc=0
+            doctor_tool test -L "$dir" || rc=$?
+        fi
+        if timed_out "$rc"; then
+            doctor_stuck folder "$dir"
+        elif (( rc == 0 )); then
             doctor_line unknown folder "doctor cannot look at it; check its owner and mode by hand"
         elif (( create )); then
             doctor_line ok folder "does not exist yet; the first recording creates it, mode 700"
@@ -3241,6 +3281,10 @@ doctor_folder() {
 # Unix modes, or that another machine reads freely, is a warning.
 doctor_permissions() {
     local type
+    if [[ -n $PLACE_STUCK ]]; then
+        doctor_stuck permissions "$PLACE_STUCK"
+        return 0
+    fi
     if (( PLACE_AUTOFS )); then
         doctor_not_yet permissions
         return 0
@@ -3343,6 +3387,10 @@ join_unique() {
 # check by hand.
 doctor_encryption() {
     local dir=$1 type dev majmin source sysfs=${TLOGGER_SYSFS:-/sys} text
+    if [[ -n $PLACE_STUCK ]]; then
+        doctor_stuck encryption "$PLACE_STUCK"
+        return 0
+    fi
     if (( PLACE_AUTOFS )); then
         doctor_not_yet encryption
         return 0
@@ -3427,9 +3475,10 @@ doctor_encryption() {
 # last line. Reads TLOGGER_PROC/self/mountinfo, TLOGGER_SYSFS, TLOGGER_FSTAB and folder modes,
 # and runs only readlink, stat, test, find and timeout, found through PATH, and no root tool. It
 # touches nothing on an automount point that is not mounted yet, and runs every command that
-# touches the folder's path under timeout, 5 seconds. A config error is a warning, and the default
-# log folder is checked instead. Exits 0 when every check is ok, 1 on any warn or unknown, 2 on
-# a usage error.
+# touches the folder's path under timeout, 10 seconds; a look that runs out of time makes the
+# checks that need it unknown, never ok. A config error is a warning, and the default log folder
+# is checked instead. Refuses without timeout. Exits 0 when every check is ok, 1 on any warn or
+# unknown or without timeout, 2 on a usage error.
 cmd_doctor() {
     local logdir mount='' engagement='' dir summary
     local -i log_row create=0 eng_create=0
@@ -3437,6 +3486,10 @@ cmd_doctor() {
         -h | --help) usage; exit 0 ;;
     esac
     (( $# == 0 )) || usage_error "doctor takes no options"
+    # Without it, a look at a folder that stops answering would hang doctor.
+    if ! command -v timeout > /dev/null 2>&1; then
+        die 1 "doctor needs timeout, from coreutils; install coreutils first"
+    fi
     refuse_foreign_root
     resolve_paths
     read_config
@@ -3469,7 +3522,7 @@ cmd_doctor() {
     # The first recording creates a missing engagement folder only in a log folder that is there
     # already, without logdir_mount, or that it creates itself.
     eng_create=$create
-    if [[ -z $mount ]] && (( ! create && ! PLACE_AUTOFS )) &&
+    if [[ -z $mount && -z $PLACE_STUCK ]] && (( ! create && ! PLACE_AUTOFS )) &&
         doctor_tool test -d "$logdir" && ! doctor_tool test -L "$logdir"
     then
         eng_create=1
@@ -3485,7 +3538,8 @@ cmd_doctor() {
         printf '  %-21s %s\n' engagement "$engagement; new sessions go into $(shown "$dir")"
         doctor_place "$dir"
         doctor_folder "$dir" "$eng_create"
-        if (( PLACE_ROW != log_row )); then
+        # On another mount, or not placed for sure, as a part of its path did not answer.
+        if (( PLACE_ROW != log_row )) || [[ -n $PLACE_STUCK ]]; then
             doctor_engagement_volume
             doctor_permissions
             doctor_encryption "$dir"
