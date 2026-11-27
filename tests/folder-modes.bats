@@ -130,11 +130,15 @@ assert_every_command_refuses() {
 
 @test "a symlink named like an engagement that leads to a folder is refused by every command" {
     need symlinks
+    local before
     make_session "$LOGS/$A"
     make_session "$HOME/elsewhere/$B"
     ln -s "$HOME/elsewhere" "$LOGS/linked"
+    before=$(find "$HOME/elsewhere" -printf '%p %m %s\n' | LC_ALL=C sort)
     assert_every_command_refuses "$A" \
         "tlogger: the engagement folder $SHOWN/linked is a symlink, which tlogger does not follow"
+    # Nothing behind the symlink was sealed or written either.
+    [ "$(find "$HOME/elsewhere" -printf '%p %m %s\n' | LC_ALL=C sort)" = "$before" ]
 }
 
 @test "a symlink named like an engagement that leads to a file or nowhere is no engagement folder" {
@@ -229,16 +233,46 @@ assert_every_command_refuses() {
     [ ! -e "$HOME/cases/MANIFEST" ]
 }
 
-@test "a session named by its path is refused when the folder that holds it is another user's" {
+@test "a folder of another user is refused as the log folder and as the folder of a path" {
+    local other args
     if (( EUID == 0 )); then
         skip "it needs a user other than root"
     fi
-    if [[ ! -d /root || -O /root ]]; then
-        skip "it needs /root, owned by another user"
+    # A folder of a system user, such as the partial folder of apt, on most systems.
+    other=$(find /var /usr /etc /opt -maxdepth 4 -type d ! -uid 0 ! -uid "$EUID" -print \
+        -quit 2> /dev/null || true)
+    if [[ -z $other || $other == *[[:space:]]* ]]; then
+        skip "it needs a folder of a user other than root and this one"
     fi
-    local args
     for args in seal verify render show replay; do
-        run_tlogger "$args" "/root/$A"
-        assert_refused 'tlogger: the folder /root belongs to another user'
+        run_tlogger "$args" "$other/$A"
+        assert_refused "tlogger: the folder $other belongs to another user"
     done
+    mkdir -p "$HOME/.config/tlogger"
+    chmod 700 "$HOME/.config/tlogger"
+    printf 'mode=manual\nlogdir=%s\n' "$other" > "$HOME/.config/tlogger/config"
+    run_tlogger list
+    assert_refused "tlogger: the log folder $other belongs to another user"
+}
+
+@test "a session named by its path may lie in a folder of root's that others cannot write in" {
+    local args
+    if (( EUID == 0 )); then
+        skip "it needs a user other than root"
+    fi
+    if [[ $(stat -c %u /) != 0 ]] || (( 8#$(stat -c %a /) & 8#022 )); then
+        skip "it needs / to be root's and closed to writing by others"
+    fi
+    # The root of a mounted disk is often root's; the folder check passes, and the check of the
+    # session folder itself speaks.
+    for args in seal verify render show replay; do
+        run_tlogger "$args" "/$A"
+        assert_refused "tlogger: /$A does not exist"
+    done
+}
+
+@test "a path whose parent is a file names the path, not the parent as a folder" {
+    : > "$HOME/notes"
+    run_tlogger verify "$HOME/notes/$A"
+    assert_refused "tlogger: ~/notes/$A does not exist"
 }

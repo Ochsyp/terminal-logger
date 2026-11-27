@@ -1700,21 +1700,24 @@ check_dir_safe() {
 # its sticky bit is set, as the plugin's _tlogger_check_dir asks of a folder it records into.
 # Another user who may write in DIR could rename a session folder and put another in its place.
 # Unlike the plugin, it does not ask for write permission: a folder closed to 0500 still lists
-# and verifies, and seal and render fail on their own when they cannot write.
+# and verifies, and seal and render fail on their own when they cannot write. With OWNERS root,
+# a folder of root's passes too, such as the root of a mounted disk that holds a copy of a
+# session; root can change any folder anyway.
 check_holder_dir() {
-    local dir=$1 what=$2 mode
+    local dir=$1 what=$2 owners=${3-} info mode uid
     if [[ -L $dir ]]; then
         die 1 "$what $(shown "$dir") is a symlink, which tlogger does not follow"
     fi
     if [[ ! -d $dir ]]; then
         die 1 "$what $(shown "$dir") is not a folder"
     fi
-    if [[ ! -O $dir ]]; then
-        die 1 "$what $(shown "$dir") belongs to another user"
-    fi
-    mode=$(stat -c %a -- "$dir" 2> /dev/null) || mode=
-    if [[ ! $mode =~ ^[0-7]{3,4}$ ]]; then
+    info=$(stat -c '%a %u' -- "$dir" 2> /dev/null) || info=
+    read -r mode uid <<< "$info" || true
+    if [[ ! $mode =~ ^[0-7]{3,4}$ || ! $uid =~ ^[0-9]+$ ]]; then
         die 1 "cannot read the mode of $what $(shown "$dir")"
+    fi
+    if [[ ! -O $dir ]] && ! [[ $owners == root && $uid == 0 ]]; then
+        die 1 "$what $(shown "$dir") belongs to another user"
     fi
     if (( (8#$mode & 8#022) != 0 && (8#$mode & 8#1000) == 0 )); then
         die 1 "$what $(shown "$dir") is writable by its group or by others;" \
@@ -3628,10 +3631,11 @@ check_session_dir() {
 # Set SESSION_DIR and SESSION_ID from the SESSION argument of render, show and replay. An
 # argument with a / is a path to a session folder anywhere, made absolute without resolving
 # symlinks, whose last part must be neither '.' nor '..', in a folder that check_holder_dir
-# accepts when that folder exists. Any other argument must be a session id, a folder in the log
-# folder or in one of its engagement folders (see find_engagement_dirs); none picks the newest
-# session of both levels by name, which starts with the UTC time, among the real folders named
-# like sessions. The log folder is the config's logdir, else the default. Exits 3 when the log
+# accepts, as this user's or root's, when it is a folder or a symlink. Any other argument must be
+# a session id, a folder in the log folder or in one of its engagement folders (see
+# find_engagement_dirs); none picks the newest session of both levels by name, which starts with
+# the UTC time, among the real folders named like sessions. The log folder is the config's
+# logdir, else the default. Exits 3 when the log
 # folder is missing or holds no session, 1 for an argument that is no id, an id without a folder
 # or with more than one, an unsafe config, a log, engagement or holding folder that
 # check_holder_dir refuses, or a folder that check_session_dir refuses.
@@ -3646,10 +3650,11 @@ resolve_session() {
         case ${dir##*/} in
             . | ..) die 1 "name the session folder itself in the path, not . or .." ;;
         esac
+        # The folder that holds it may also be root's, as the root of a mounted disk is.
         parent=${dir%/*}
         parent=${parent:-/}
-        if [[ -e $parent || -L $parent ]]; then
-            check_holder_dir "$parent" 'the folder'
+        if [[ -d $parent || -L $parent ]]; then
+            check_holder_dir "$parent" 'the folder' root
         fi
         check_session_dir "$dir"
         SESSION_DIR=$dir SESSION_ID=${dir##*/}

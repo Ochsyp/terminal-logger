@@ -609,9 +609,10 @@ a log folder or a session in it, the commands exit 3; with a `SESSION` they cann
 These commands, `list`, `seal` and `verify` check the log folder, each engagement folder and the
 folder that holds a session named by its path as a recording does: each must be a real folder
 of yours, not a symlink, and neither its group nor other users may write in it unless its sticky
-bit is set. Otherwise they exit 1 and name the folder, with `chmod go-w` as the fix. They do not
-need to write there, so a folder that you closed to mode 0500 after an engagement still lists
-and verifies.
+bit is set. The folder that holds a session named by its path may also be root's, as the root of
+a mounted disk often is. Otherwise they exit 1 and name the folder, with `chmod go-w` as the fix.
+They do not need to write there, so a folder that you closed to mode 0500 after an engagement
+still lists and verifies.
 
 An engagement folder, for these commands and for `list`, `seal` and `verify`, is a folder
 directly in the log folder that is named as an engagement may be. One that fails the check above,
