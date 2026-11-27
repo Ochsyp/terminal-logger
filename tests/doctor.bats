@@ -174,8 +174,13 @@ volume_at() {
 log_calls() {
     local bin="$BATS_TEST_TMPDIR/calls-bin" name real extra
     CALLS="$BATS_TEST_TMPDIR/calls"
-    mkdir -p "$bin"
     : > "$CALLS"
+    # Once only: a second round would find the stand-ins on PATH as the real tools, and each
+    # would then run itself without end.
+    if [[ :$PATH: == *":$bin:"* ]]; then
+        return 0
+    fi
+    mkdir -p "$bin"
     for name in stat df ls find du readlink timeout; do
         real=$(command -v "$name") || continue
         extra=
@@ -390,6 +395,25 @@ assert_doctor() {
         assert_check log encryption warn
         if [[ $args == nfs4* ]]; then
             [ -z "$(calls_on "$V/evidence" 1)" ]
+        fi
+    done
+}
+
+@test "doctor touches the log folder only under timeout, also on a file system it does not know" {
+    local args
+    # A FUSE remote such as rclone, or a local disk: any of them can stop answering.
+    for args in 'fuse.rclone 0:74 remote:evidence' 'ext4 254:0 /dev/mapper/luks-test'; do
+        # The words are the type, the device and the source.
+        # shellcheck disable=SC2086
+        volume_at $args
+        log_calls
+        run_tlogger doctor
+        [ -n "$(calls_on "$V/evidence")" ]
+        [ -z "$(calls_on "$V/evidence" 1)" ]
+        if grep -E $'^readlink\t' "$CALLS" | grep -qF -- "$V/evidence"; then
+            printf 'readlink ran on the log folder without timeout:\n' >&2
+            cat "$CALLS" >&2
+            return 1
         fi
     done
 }
