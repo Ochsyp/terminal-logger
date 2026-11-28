@@ -2,7 +2,63 @@
 # Tests for tlogger seal, verify and list in bin/tlogger, run as a subprocess in the test's own
 # HOME on synthetic sessions. A fake /proc, which TLOGGER_PROC names, holds the boot id and the
 # processes that the liveness check reads, so that a session counts as still recorded only when
-# a test says so.
+# a test says so. A session that prune removed is made here by hand: its folder removed and a line
+# appended to PRUNED in the form prune writes, so that these tests do not depend on prune.
+#
+# The contract of phase 11 that these tests pin. Every message starts with 'tlogger: ' and shows
+# a path under HOME with ~; <log folder> is ~/.local/state/tlogger/sessions here, and <folder> is
+# the log folder or an engagement folder in it.
+#
+# verify --all, besides each session folder, reads the MANIFEST of the log folder and of each
+# engagement folder:
+# - Only lines '<sum>  <id>/SHA256SUMS' whose <id> is named like a session count; a line that a
+#   seal by path wrote for a folder of another name never does. The last line for an id in a
+#   MANIFEST gives its sum.
+# - An id of a MANIFEST is gone when <folder> holds no entry of that name at all, of any type.
+#   Each gone id gets one of these lines on stdout:
+#     <id>  pruned   <folder>/PRUNED holds a line for <id> with that sum
+#     <id>  moved    another folder, the log folder or an engagement folder, holds a session
+#                    folder <id> whose SHA256SUMS has that sum; that folder gets its own line
+#     <id>  missing  anything else, a copy with another sum and a PRUNED line with another sum
+#                    included
+# - A PRUNED line has its fields split by two spaces: a UTC time, the id, the SHA-256 of the
+#   session's SHA256SUMS, the archive's file name, the archive's SHA-256 and 'tlogger <version>';
+#   a line written by hand has '-' for both archive fields and 'by hand' last. A PRUNED line
+#   whose id no MANIFEST line of its folder names gives no line at all.
+# - For each missing id, in the order of the stdout lines, this one line goes to stderr, <UTC
+#   time> being the time of the run as YYYY-MM-DDTHH:MM:SSZ, so that the line it names can be
+#   appended as it is:
+#     tlogger: <id>: its folder is gone from <folder> and <folder>/PRUNED does not record it; if
+#     it was removed on purpose, append this line to <folder>/PRUNED: <UTC time>  <id>  <sum>  -
+#     -  by hand
+#   (one line, with two spaces between the fields of the PRUNED line).
+# - stdout is one line per verdict, by id in byte order; for one id, the lines of its session
+#   folders come first, then those of the MANIFESTs, the log folder's first, then the engagement
+#   folders' by name.
+# - pruned and moved are fine. missing counts as changed: exit 1. verify --all exits 3, with
+#   'no sessions in <log folder>', only when there is neither a session folder nor a line that
+#   counts in any MANIFEST; with every session pruned it exits 0.
+# - verify <id> and list do not change: neither shows a pruned, moved or missing id.
+#
+# verify, with one session or --all, counts the unsealed and the unknown sessions apart. When no
+# session is changed or missing, it exits 4 if either count is not 0, with these lines on stderr,
+# the unsealed one first:
+#   tlogger: 1 finished session is not sealed; tlogger seal --all seals it
+#   tlogger: <N> finished sessions are not sealed; tlogger seal --all seals them
+#   tlogger: 1 session has no recorder file, so tlogger cannot tell whether it ended, and seal
+#   refuses it
+#   tlogger: <N> sessions have no recorder file, so tlogger cannot tell whether they ended, and
+#   seal refuses them
+# (each of the last two one line).
+#
+# MANIFEST and PRUNED are reserved names. A real folder of either name in the log folder that
+# holds an entry named like a session is refused by every command that walks the engagement
+# folders, list, seal --all and verify --all among them, before anything is read or written:
+# exit 1, nothing on stdout, and this line alone on stderr:
+#   tlogger: the folder <log folder>/<NAME> holds sessions, but <NAME> is a reserved name;
+#   rename it to a valid engagement name
+# (one line). Such a folder without a session-named entry is passed over, as before, and a
+# regular file named PRUNED in the log folder is the record prune --none writes.
 
 bats_require_minimum_version 1.5.0
 
@@ -11,10 +67,18 @@ load helpers
 # A UTC time as SEAL writes it, as an extended regular expression.
 UTC_RE='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'
 
-# The boot id of the fake /proc, and the recorder that each synthetic session names.
+# The boot id of the fake /proc, and the recorder that each synthetic session names; make_session
+# and fake_process in helpers.bash read them, and LOGS and PROC, which setup sets.
 BOOT=0b1e7c5a-4d2f-4c3b-9a8e-7f6d5c4b3a21
 REC_PID=4242
 REC_START=1000
+
+# The log folder as tlogger shows it.
+# shellcheck disable=SC2088 # The ~ is the text tlogger prints, not a path to expand.
+SHOWN='~/.local/state/tlogger/sessions'
+
+# A SHA-256 that no file here has, for the archive that a PRUNED line names.
+ZERO_SUM=0000000000000000000000000000000000000000000000000000000000000000
 
 # Run before each test by bats.
 # Gives the test its own HOME with the default layout, an empty log folder and a fake /proc with
@@ -33,66 +97,11 @@ setup() {
     export TLOGGER_PROC="$PROC"
 }
 
-# Create the ended session ID in the log folder, as a recording that ended with exit leaves it:
-# the logs with some output, a journal of COMMANDS S and E lines (default 2), and the recorder,
-# started and exited markers, each 0600. An ID of the form ENGAGEMENT/ID puts the session into
-# that engagement folder of the log folder.
-make_session() {
-    local id=$1 count=${2:-2} i
-    session_new "$LOGS/$id"
-    session_out 'kali@kali:~$ ls\r\nfile\r\n'
-    session_in 'ls\r'
-    for (( i = 0; i < count; i++ )); do
-        printf 'S\t%s\t2026-11-12T10:00:%02dZ\t4300\t/srv/work\t-\tls\n' \
-            $(( 1794391200 + i )) "$i" >> "$SDIR/commands.tsv"
-        printf 'E\t%s\t4300\t0\n' $(( 1794391201 + i )) >> "$SDIR/commands.tsv"
-    done
-    session_end
-    printf '%s %s %s 34817\n' "$REC_PID" "$REC_START" "$BOOT" > "$SDIR/recorder"
-    printf '2026-11-12T10:00:00Z\n' > "$SDIR/started"
-    printf '2026-11-12T10:01:00Z\n' > "$SDIR/exited"
-    chmod 600 "$SDIR/recorder" "$SDIR/started" "$SDIR/exited"
-}
-
-# Make the fake /proc hold process PID with STARTTIME as field 22 of its stat, as Linux writes it.
-fake_process() {
-    mkdir -p "$PROC/$1"
-    printf '%s (script) S 1 %s %s 34816 -1 4194560 100 0 0 0 0 0 0 0 20 0 1 0 %s 9887744 1024\n' \
-        "$1" "$1" "$1" "$2" > "$PROC/$1/stat"
-}
-
-# Print the files of the session folder DIR with their modes, 'NAME MODE' per line, sorted.
-modes_of() {
-    find "$1" -mindepth 1 -printf '%f %m\n' | LC_ALL=C sort
-}
-
 # Print the notice that seal prints for the session SESSION, an id or ENGAGEMENT/ID in the log
 # folder: its id and the SHA-256 of its SHA256SUMS.
 sealed_notice() {
     printf 'tlogger: sealed session %s; SHA-256 of its SHA256SUMS: %s\n' "${1##*/}" \
         "$(sha_of "$LOGS/$1/SHA256SUMS")"
-}
-
-# Print the MANIFEST line of the session SESSION, an id or ENGAGEMENT/ID in the log folder, as
-# seal writes it into the MANIFEST of the folder that holds it: '<sum>  <id>/SHA256SUMS'.
-manifest_entry() {
-    printf '%s  %s/SHA256SUMS\n' "$(sha_of "$LOGS/$1/SHA256SUMS")" "${1##*/}"
-}
-
-# Print every entry of the folder DIR with its mode, size and modification time, and the SHA-256
-# of each file in it, so that two calls compare the folder byte for byte.
-tree_of() {
-    (cd "$1" && find . -printf '%p %m %s %T@\n' | LC_ALL=C sort && sha256sum -- *)
-}
-
-# Fail unless the last run exited STATUS, printed nothing on stdout and printed MESSAGE alone on
-# stderr, with no home path in full.
-assert_refused() {
-    if [[ $status -ne $1 || -n $output || $stderr != "$2" || $stderr == *"$HOME"* ]]; then
-        printf 'expected status %s and the message\n%s\ngot status %s and:\n%s\n%s\n' "$1" "$2" \
-            "$status" "$output" "$stderr" >&2
-        return 1
-    fi
 }
 
 # Fail unless the last run was a usage error: exit status 2, MESSAGE as the first line of stderr,
@@ -102,6 +111,51 @@ assert_usage_error() {
         $stderr != *$'\nUsage: tlogger <command> [options]\n'* ]]; then
         printf 'expected the usage error %s, got status %s and:\n%s\n%s\n' "$1" "$status" \
             "$output" "$stderr" >&2
+        return 1
+    fi
+}
+
+# Remove the session folder SESSION, an id or ENGAGEMENT/ID in the log folder, with all its
+# files, as someone deleting it by hand would. It refuses a path outside BATS_TEST_TMPDIR.
+remove_by_hand() {
+    local dir=$LOGS/$1
+    if [[ $dir != "$BATS_TEST_TMPDIR"/* || -z ${1##*/} || $1 == *..* ]]; then
+        printf 'remove_by_hand: %s is not a session of the test\n' "$dir" >&2
+        return 1
+    fi
+    rm -rf -- "$dir"
+}
+
+# Append to FOLDER/PRUNED, created with mode 0600, the line that prune writes for the session ID
+# whose SHA256SUMS had the SHA-256 SUM, taken out with an archive of FOLDER made on 2026-11-20.
+record_pruned() {
+    local folder=$1
+    if [[ ! -e $folder/PRUNED ]]; then
+        (umask 077 && : > "$folder/PRUNED")
+    fi
+    printf '2026-11-20T09:30:00Z  %s  %s  %s-20261120T090000Z.tar.gz  %s  tlogger %s\n' "$2" \
+        "$3" "${folder##*/}" "$ZERO_SUM" "$VERSION_TEXT" >> "$folder/PRUNED"
+}
+
+# Fail unless STDERR_LINE is the missing message for the session ID, gone from the folder that
+# tlogger shows as FOLDER, whose MANIFEST line holds the SHA-256 SUM, with a PRUNED line stamped
+# within the last 10 minutes. Sets HAND_LINE to the PRUNED line it names.
+assert_missing() {
+    local line=$1 id=$2 folder=$3 sum=$4 head stamp when now
+    head="tlogger: $id: its folder is gone from $folder and $folder/PRUNED does not record it;"
+    head+=" if it was removed on purpose, append this line to $folder/PRUNED: "
+    HAND_LINE=${line#"$head"}
+    stamp=${HAND_LINE%%  *}
+    if [[ $line != "$head"* || $HAND_LINE != "$stamp  $id  $sum  -  -  by hand" ||
+        ! $stamp =~ ^$UTC_RE$ ]]; then
+        printf 'expected the missing message for %s in %s with the sum %s; got:\n%s\n' "$id" \
+            "$folder" "$sum" "$line" >&2
+        return 1
+    fi
+    when=$(date -u -d "$stamp" +%s)
+    now=$(date -u +%s)
+    if (( now - when < 0 || now - when > 600 )); then
+        printf 'the PRUNED line names %s, not a time of the last 10 minutes\n' "$stamp" >&2
         return 1
     fi
 }
@@ -516,10 +570,11 @@ assert_usage_error() {
     # Made by hand, with the default mode, and named like an engagement.
     mkdir "$LOGS/Case_2026.x"
     make_session "Case_2026.x/$f"
-    # Not engagement folders: a hidden name, a name with a space, the name MANIFEST and a second
-    # level. A symlink named like an engagement is refused; tests/folder-modes.bats checks that.
+    # Not engagement folders: a hidden name, a name with a space and a second level. A symlink
+    # named like an engagement is refused; tests/folder-modes.bats checks that. A folder named
+    # MANIFEST or PRUNED that holds sessions is refused too; a test below checks that.
     for name in .old/20261112T110000Z-gggggg 'bad name/20261112T120000Z-hhhhhh' \
-        MANIFEST/20261112T130000Z-iiiiii Case_2026.x/sub/20261112T140000Z-jjjjjj; do
+        Case_2026.x/sub/20261112T140000Z-jjjjjj; do
         make_session "$name"
     done
     run_tlogger seal --all
@@ -528,7 +583,6 @@ assert_usage_error() {
     [ "$(stat -c %a "$LOGS/Case_2026.x/$f/output.raw")" = 400 ]
     [ "$(cat "$LOGS/Case_2026.x/MANIFEST")" = "$(manifest_entry "Case_2026.x/$f")" ]
     for dir in "$LOGS/.old/20261112T110000Z-gggggg" "$LOGS/bad name/20261112T120000Z-hhhhhh" \
-        "$LOGS/MANIFEST/20261112T130000Z-iiiiii" \
         "$LOGS/Case_2026.x/sub/20261112T140000Z-jjjjjj"; do
         [ ! -e "$dir/SEAL" ]
         [ "$(stat -c %a "$dir/output.raw")" = 600 ]
@@ -537,6 +591,257 @@ assert_usage_error() {
     run_tlogger verify --all
     [ "$status" -eq 0 ]
     [ "$output" = "$f  ok" ]
+}
+
+@test "verify --all reads each MANIFEST: a session that PRUNED records with its sum is pruned" {
+    local a=20261112T100000Z-aaaaaa b=20261112T110000Z-bbbbbb c=20261112T120000Z-cccccc
+    local sum_a sum_c
+    mkdir -m 700 "$LOGS/acme"
+    make_session "$a"
+    make_session "$b"
+    make_session "acme/$c"
+    run_tlogger seal --all
+    [ "$status" -eq 0 ]
+    sum_a=$(sha_of "$LOGS/$a/SHA256SUMS")
+    sum_c=$(sha_of "$LOGS/acme/$c/SHA256SUMS")
+    # a directly in the log folder, as prune --none leaves it, and c in the engagement acme.
+    remove_by_hand "$a"
+    record_pruned "$LOGS" "$a" "$sum_a"
+    remove_by_hand "acme/$c"
+    record_pruned "$LOGS/acme" "$c" "$sum_c"
+    cp "$LOGS/MANIFEST" "$BATS_TEST_TMPDIR/manifest"
+    cp "$LOGS/PRUNED" "$BATS_TEST_TMPDIR/pruned"
+    run_tlogger verify --all
+    [ "$status" -eq 0 ]
+    [ "$output" = "$a  pruned"$'\n'"$b  ok"$'\n'"$c  pruned" ]
+    [ -z "$stderr" ]
+    # verify reads the MANIFEST and PRUNED, and changes neither.
+    cmp "$LOGS/MANIFEST" "$BATS_TEST_TMPDIR/manifest"
+    cmp "$LOGS/PRUNED" "$BATS_TEST_TMPDIR/pruned"
+    # list shows the session folders, as before.
+    run_tlogger list
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 2 ]
+    [[ ${lines[1]} == "$b "* ]]
+}
+
+@test "a session deleted by hand is missing, exits 1, and its message gives the PRUNED line" {
+    local a=20261112T100000Z-aaaaaa b=20261112T110000Z-bbbbbb c=20261112T120000Z-cccccc
+    local sum_a sum_c
+    mkdir -m 700 "$LOGS/acme"
+    make_session "$a"
+    make_session "$b"
+    make_session "acme/$c"
+    run_tlogger seal --all
+    [ "$status" -eq 0 ]
+    sum_a=$(sha_of "$LOGS/$a/SHA256SUMS")
+    sum_c=$(sha_of "$LOGS/acme/$c/SHA256SUMS")
+    remove_by_hand "$a"
+    remove_by_hand "acme/$c"
+    run_tlogger verify --all
+    [ "$status" -eq 1 ]
+    [ "$output" = "$a  missing"$'\n'"$b  ok"$'\n'"$c  missing" ]
+    [ "${#stderr_lines[@]}" -eq 2 ]
+    assert_missing "${stderr_lines[0]}" "$a" "$SHOWN" "$sum_a"
+    assert_missing "${stderr_lines[1]}" "$c" "$SHOWN/acme" "$sum_c"
+    refute_home_shown
+    [ ! -e "$LOGS/PRUNED" ]
+    [ ! -e "$LOGS/acme/PRUNED" ]
+    # The line the message gives, appended as it is, records the removal: c is pruned now.
+    (umask 077 && printf '%s\n' "$HAND_LINE" >> "$LOGS/acme/PRUNED")
+    run_tlogger verify --all
+    [ "$status" -eq 1 ]
+    [ "$output" = "$a  missing"$'\n'"$b  ok"$'\n'"$c  pruned" ]
+    assert_missing "$stderr" "$a" "$SHOWN" "$sum_a"
+    (umask 077 && printf '%s\n' "$HAND_LINE" >> "$LOGS/PRUNED")
+    run_tlogger verify --all
+    [ "$status" -eq 0 ]
+    [ "$output" = "$a  pruned"$'\n'"$b  ok"$'\n'"$c  pruned" ]
+    [ -z "$stderr" ]
+}
+
+@test "a session moved by hand and sealed again is moved in its old folder and ok in the new" {
+    local a=20261112T100000Z-aaaaaa b=20261112T110000Z-bbbbbb
+    make_session "$a"
+    make_session "$b"
+    run_tlogger seal --all
+    [ "$status" -eq 0 ]
+    mkdir -m 700 "$LOGS/acme"
+    mv "$LOGS/$a" "$LOGS/acme/$a"
+    # In its new folder it lacks a MANIFEST line, so that copy is changed until seal adds it.
+    run_tlogger verify --all
+    [ "$status" -eq 1 ]
+    [ "$output" = "$a  changed"$'\n'"$a  moved"$'\n'"$b  ok" ]
+    [ "$stderr" = "tlogger: $a: no line in the MANIFEST names this session" ]
+    run_tlogger seal "$a"
+    [ "$status" -eq 0 ]
+    run_tlogger verify --all
+    [ "$status" -eq 0 ]
+    [ "$output" = "$a  ok"$'\n'"$a  moved"$'\n'"$b  ok" ]
+    [ -z "$stderr" ]
+}
+
+@test "a copy or a PRUNED line with another sum leaves a session missing" {
+    local a=20261112T100000Z-aaaaaa b=20261112T110000Z-bbbbbb c=20261112T120000Z-cccccc
+    local sum_a sum_b
+    make_session "$a"
+    make_session "$b"
+    run_tlogger seal --all
+    [ "$status" -eq 0 ]
+    sum_a=$(sha_of "$LOGS/$a/SHA256SUMS")
+    sum_b=$(sha_of "$LOGS/$b/SHA256SUMS")
+    # a: deleted, and another session of the same id sealed in the engagement acme.
+    remove_by_hand "$a"
+    mkdir -m 700 "$LOGS/acme"
+    make_session "acme/$a" 3
+    run_tlogger seal "$a"
+    [ "$status" -eq 0 ]
+    [ "$(sha_of "$LOGS/acme/$a/SHA256SUMS")" != "$sum_a" ]
+    # b: deleted, with PRUNED lines of another sum, of another id, and in another folder.
+    remove_by_hand "$b"
+    record_pruned "$LOGS" "$b" "$ZERO_SUM"
+    record_pruned "$LOGS" "$c" "$sum_b"
+    record_pruned "$LOGS/acme" "$b" "$sum_b"
+    run_tlogger verify --all
+    [ "$status" -eq 1 ]
+    # A PRUNED line alone, as for c, gives no line.
+    [ "$output" = "$a  ok"$'\n'"$a  missing"$'\n'"$b  missing" ]
+    [ "${#stderr_lines[@]}" -eq 2 ]
+    assert_missing "${stderr_lines[0]}" "$a" "$SHOWN" "$sum_a"
+    assert_missing "${stderr_lines[1]}" "$b" "$SHOWN" "$sum_b"
+}
+
+@test "a MANIFEST line for a folder sealed by path under another name never counts" {
+    local a=20261112T100000Z-aaaaaa
+    make_session "$LOGS/copy+1"
+    run_tlogger seal "$LOGS/copy+1"
+    [ "$status" -eq 0 ]
+    grep -qF '  copy+1/SHA256SUMS' "$LOGS/MANIFEST"
+    # Neither with its folder there nor with it gone is it a session, or missing.
+    run_tlogger verify --all
+    assert_refused 3 "tlogger: no sessions in $SHOWN"
+    remove_by_hand copy+1
+    run_tlogger verify --all
+    assert_refused 3 "tlogger: no sessions in $SHOWN"
+    make_session "$a"
+    run_tlogger seal "$a"
+    [ "$status" -eq 0 ]
+    run_tlogger verify --all
+    [ "$status" -eq 0 ]
+    [ "$output" = "$a  ok" ]
+    [ -z "$stderr" ]
+}
+
+@test "with every session pruned verify --all exits 0, and 3 only without folders and lines" {
+    local a=20261112T100000Z-aaaaaa b=20261112T110000Z-bbbbbb sum_a sum_b
+    # An empty MANIFEST holds no line.
+    (umask 077 && : > "$LOGS/MANIFEST")
+    run_tlogger verify --all
+    assert_refused 3 "tlogger: no sessions in $SHOWN"
+    mkdir -m 700 "$LOGS/acme"
+    make_session "acme/$a"
+    make_session "acme/$b"
+    run_tlogger seal --all
+    [ "$status" -eq 0 ]
+    sum_a=$(sha_of "$LOGS/acme/$a/SHA256SUMS")
+    sum_b=$(sha_of "$LOGS/acme/$b/SHA256SUMS")
+    remove_by_hand "acme/$a"
+    remove_by_hand "acme/$b"
+    record_pruned "$LOGS/acme" "$a" "$sum_a"
+    record_pruned "$LOGS/acme" "$b" "$sum_b"
+    run_tlogger verify --all
+    [ "$status" -eq 0 ]
+    [ "$output" = "$a  pruned"$'\n'"$b  pruned" ]
+    [ -z "$stderr" ]
+    # list and seal --all walk the session folders alone, and find none, as before.
+    run_tlogger list
+    assert_refused 3 "tlogger: no sessions in $SHOWN"
+    run_tlogger seal --all
+    assert_refused 3 "tlogger: no sessions in $SHOWN"
+    [ -d "$LOGS/acme" ]
+}
+
+@test "verify counts unsealed and unknown sessions apart, and exits 4 for either" {
+    local a=20261112T100000Z-aaaaaa b=20261112T110000Z-bbbbbb c=20261112T120000Z-cccccc
+    local d=20261112T130000Z-dddddd e=20261112T140000Z-eeeeee
+    local unsealed1='tlogger: 1 finished session is not sealed; tlogger seal --all seals it'
+    local unsealed2='tlogger: 2 finished sessions are not sealed; tlogger seal --all seals them'
+    local unknown1='tlogger: 1 session has no recorder file, so tlogger cannot tell whether it'
+    local unknown2='tlogger: 2 sessions have no recorder file, so tlogger cannot tell whether'
+    unknown1+=' ended, and seal refuses it'
+    unknown2+=' they ended, and seal refuses them'
+    # a ended; b and c have no recorder file.
+    make_session "$a"
+    make_session "$b"
+    make_session "$c"
+    rm -- "${LOGS:?}/$b/recorder" "${LOGS:?}/$c/recorder"
+    run_tlogger verify --all
+    [ "$status" -eq 4 ]
+    [ "$output" = "$a  unsealed"$'\n'"$b  unknown"$'\n'"$c  unknown" ]
+    [ "$stderr" = "$unsealed1"$'\n'"$unknown2" ]
+    # Sealed, a no longer counts, and one unknown session is named alone.
+    run_tlogger seal "$a"
+    [ "$status" -eq 0 ]
+    remove_by_hand "$b"
+    run_tlogger verify --all
+    [ "$status" -eq 4 ]
+    [ "$output" = "$a  ok"$'\n'"$c  unknown" ]
+    [ "$stderr" = "$unknown1" ]
+    run_tlogger verify "$c"
+    [ "$status" -eq 4 ]
+    [ "$output" = "$c  unknown" ]
+    [ "$stderr" = "$unknown1" ]
+    # Two ended sessions and the unknown one: the unsealed line comes first.
+    make_session "$d"
+    make_session "$e"
+    run_tlogger verify --all
+    [ "$status" -eq 4 ]
+    [ "$stderr" = "$unsealed2"$'\n'"$unknown1" ]
+    run_tlogger verify "$e"
+    [ "$status" -eq 4 ]
+    [ "$stderr" = "$unsealed1" ]
+}
+
+@test "a folder named MANIFEST or PRUNED that holds sessions is refused by list, seal and verify" {
+    local a=20261112T100000Z-aaaaaa f=20261112T130000Z-ffffff name want
+    make_session "$a"
+    for name in MANIFEST PRUNED; do
+        mkdir -m 700 "$LOGS/$name"
+        # A session folder in MANIFEST; in PRUNED, a plain file named like a session.
+        if [[ $name == MANIFEST ]]; then
+            make_session "$name/$f"
+        else
+            : > "$LOGS/$name/$f"
+        fi
+        want="tlogger: the folder $SHOWN/$name holds sessions, but $name is a reserved name;"
+        want+=' rename it to a valid engagement name'
+        run_tlogger list
+        assert_refused 1 "$want"
+        run_tlogger seal --all
+        assert_refused 1 "$want"
+        run_tlogger verify --all
+        assert_refused 1 "$want"
+        [ ! -e "$LOGS/$a/SEAL" ]
+        [ "$(stat -c %a "$LOGS/$a/output.raw")" = 600 ]
+        remove_by_hand "$name"
+    done
+    # Without a session-named entry, such a folder is passed over, as before.
+    mkdir -m 700 "$LOGS/PRUNED"
+    printf 'notes\n' > "$LOGS/PRUNED/notes.txt"
+    run_tlogger seal --all
+    [ "$status" -eq 0 ]
+    run_tlogger verify --all
+    [ "$status" -eq 0 ]
+    [ "$output" = "$a  ok" ]
+    # A regular file PRUNED in the log folder is prune's record, not a folder to refuse.
+    remove_by_hand PRUNED
+    record_pruned "$LOGS" 20261112T090000Z-gggggg "$ZERO_SUM"
+    run_tlogger list
+    [ "$status" -eq 0 ]
+    run_tlogger verify --all
+    [ "$status" -eq 0 ]
+    [ "$output" = "$a  ok" ]
+    [ -z "$stderr" ]
 }
 
 @test "list, verify and seal exit 3 without sessions, and refuse wrong arguments" {

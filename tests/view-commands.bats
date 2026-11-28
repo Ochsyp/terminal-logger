@@ -26,17 +26,6 @@ run_cmd() {
     stderr=${stderr//$'\r'/}
 }
 
-# Fail unless the last run exited STATUS, printed nothing on stdout and printed MESSAGE alone on
-# stderr, with no home path in full.
-assert_refused() {
-    if [[ $status -ne $1 || -n $output || $stderr != "$2" ]]; then
-        printf 'expected status %s and the message\n%s\ngot status %s and:\n%s\n%s\n' "$1" "$2" \
-            "$status" "$output" "$stderr" >&2
-        return 1
-    fi
-    refute_home_shown
-}
-
 # Fail unless the last run was a usage error: exit status 2, nothing on stdout, MESSAGE as the
 # first line of stderr, then the usage.
 assert_usage_error() {

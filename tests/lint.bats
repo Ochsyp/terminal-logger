@@ -4,8 +4,16 @@
 # legacyblock.awk under each awk, tlogger_view.py compiled, its imports and the way bin/tlogger
 # runs it, and the file modes git stores: executable for scripts and .bats files, not for the files
 # that are sourced or read. The standard's own lint.bats checks the hooks, its tools and ci/.
+# Also that no file in bin, lib or libexec removes anything recursively: outside a line that is a
+# comment, no rm with an option holding r or R, no --recursive, no find ... -delete and no rmtree
+# (shutil.rmtree). prune removes each file by name with unlink and each folder with rmdir.
 
 load helpers
+
+# The forms of a recursive removal, as extended regular expressions for grep -E: rm, as a word,
+# with an option that holds r or R after any other options, and the -delete of find.
+RM_RECURSIVE='(^|[^[:alnum:]_.-])rm([[:space:]]+-[^[:space:]]*)*[[:space:]]+-[[:alpha:]]*[rR]'
+FIND_DELETE='[[:space:]]-delete([^[:alnum:]_-]|$)'
 
 # Python code for python3 -I -c CODE FILE: print each import in FILE of a module that is neither
 # in the standard library nor pyte, and each relative import, one line each.
@@ -37,6 +45,23 @@ shellcheck_repo() {
     (cd "$REPO_ROOT" && shellcheck bin/tlogger tests/stub-bin/zsh \
         tests/stub-bin/tlogger-test-recorder tests/stub-bin/tlogger-test-ip tests/*.bash \
         tests/*.bats)
+}
+
+# Print each line of the files FILE..., paths relative to the folder DIR, that removes
+# recursively, as 'FILE:LINE:TEXT', skipping the lines that are comments: rm with an r or R
+# option, --recursive, find's -delete or rmtree. Fails when grep cannot read a file.
+recursive_removals() {
+    local dir=$1 found rc=0
+    shift
+    found=$(cd "$dir" && grep -nHE -e "$RM_RECURSIVE" -e '--recursive' -e "$FIND_DELETE" \
+        -e rmtree -- "$@") || rc=$?
+    if (( rc > 1 )); then
+        printf 'grep cannot read the files in %s: %s\n' "$dir" "$*" >&2
+        return 1
+    fi
+    if [[ -n $found ]]; then
+        grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' <<< "$found" || true
+    fi
 }
 
 @test "no file that git tracks or would add holds a CR byte" {
@@ -217,6 +242,46 @@ shellcheck_repo() {
         runs+=1
     done < <(grep -F tlogger_view.py "$REPO_ROOT/bin/tlogger")
     (( runs >= 4 ))
+}
+
+@test "bin, lib and libexec remove nothing recursively, outside comments" {
+    local sample="$BATS_TEST_TMPDIR/sample" path
+    local -a files=()
+    # The check finds each form, and passes comments and the removals of one name.
+    cat > "$sample" << 'EOF'
+rm -r "$dir"
+    rm -R -- "$dir"
+rm -rf -- "$dir"
+  command rm -f -fR x
+rm --recursive x
+cp --recursive a b
+find "$dir" -type f -delete
+    shutil.rmtree(path)
+# without rm -r
+    # shutil.rmtree is never used, nor find -delete
+rm -f -- "$file"
+command rm -f "$tmp" "$tmp.part"
+unlink -- "$file"
+rmdir -- "$dir"
+confirm -R
+os.rmdir(path)
+EOF
+    run recursive_removals "$BATS_TEST_TMPDIR" sample
+    [ "$status" -eq 0 ]
+    [ "$(cut -d : -f 2 <<< "$output" | paste -s -d ' ' -)" = '1 2 3 4 5 6 7 8' ]
+    # Every file in bin, lib and libexec.
+    for path in "$REPO_ROOT"/bin/* "$REPO_ROOT"/lib/* "$REPO_ROOT"/libexec/*; do
+        if [[ -f $path ]]; then
+            files+=("${path#"$REPO_ROOT"/}")
+        fi
+    done
+    [[ " ${files[*]} " == *' bin/tlogger '* && " ${files[*]} " == *' lib/tlogger.zsh '* &&
+        " ${files[*]} " == *' libexec/tlogger_view.py '* ]]
+    run recursive_removals "$REPO_ROOT" "${files[@]}"
+    if [[ $status -ne 0 || -n $output ]]; then
+        printf 'a recursive removal outside a comment:\n%s\n' "$output" >&2
+        return 1
+    fi
 }
 
 @test "ShellCheck reports no finding in the scripts, helpers.bash or the .bats files" {

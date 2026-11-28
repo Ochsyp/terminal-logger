@@ -11,7 +11,9 @@
 # - tlogger engagement --none: writes engagement=, with 'tlogger: engagement is now none; new
 #   sessions go into <log folder>', or 'tlogger: engagement is already none'.
 # - A bad name exits 2, with stderr's first line
-#   "tlogger: 'NAME' is not a valid engagement name; $ENGAGEMENT_RULE" (see below).
+#   "tlogger: 'NAME' is not a valid engagement name; $ENGAGEMENT_RULE" (see below). MANIFEST and
+#   PRUNED, the names of the files beside the sessions of a folder, are bad names in this case
+#   only; manifest and pruned are good ones.
 # - read_config's CONFIG_ERROR for an invalid engagement= line:
 #   'has an engagement on line N that is not a valid name'. Every other config error refuses,
 #   exit 1, as tlogger mode does; an invalid engagement only refuses the printing form.
@@ -25,7 +27,7 @@ load helpers
 
 # The rule that the refusal of a bad engagement name gives.
 ENGAGEMENT_RULE='use letters, digits, ., _ and -, at most 64 characters, starting with a letter'
-ENGAGEMENT_RULE+=' or a digit, and not MANIFEST or a session id'
+ENGAGEMENT_RULE+=' or a digit, and not MANIFEST, PRUNED or a session id'
 
 # Run before each test by bats.
 # Gives the test its own HOME with the default zsh and XDG layout, and sets the paths it checks.
@@ -100,13 +102,16 @@ assert_bad_name() {
     run_tlogger engagement test
     [ "$status" -eq 0 ]
     printf '%s' "${before/engagement=acme/engagement=test}" | cmp - "$CONFIG"
-    # Upper and lower case count as different names, and manifest is not MANIFEST.
+    # Upper and lower case count as different names: manifest is not MANIFEST, nor pruned PRUNED.
     run_tlogger engagement TEST
     [ "$status" -eq 0 ]
     grep -Uqx $'engagement=TEST\r' "$CONFIG"
     run_tlogger engagement manifest
     [ "$status" -eq 0 ]
     grep -Uqx $'engagement=manifest\r' "$CONFIG"
+    run_tlogger engagement pruned
+    [ "$status" -eq 0 ]
+    grep -Uqx $'engagement=pruned\r' "$CONFIG"
     refute_temp_left
 }
 
@@ -159,7 +164,7 @@ assert_bad_name() {
     long=$(printf 'a%.0s' {1..65})
     # The $(id) is a name to refuse, never run.
     # shellcheck disable=SC2016
-    for name in '' .hidden _acme 'a b' a/b ../acme 'acme!' 'ab$(id)' MANIFEST \
+    for name in '' .hidden _acme 'a b' a/b ../acme 'acme!' 'ab$(id)' MANIFEST PRUNED \
         20261112T100000Z-a1B2c3 "$long"; do
         run_tlogger engagement "$name"
         assert_bad_name "$name"
@@ -210,7 +215,7 @@ assert_bad_name() {
     [ "$status" -eq 0 ]
     [ "$stderr" = 'tlogger: engagement is now none; new sessions go into /srv/work/evidence' ]
     printf '%s' "${before/engagement=..\/x/engagement=}" | cmp - "$CONFIG"
-    for value in MANIFEST 20261112T100000Z-a1B2c3 'a b' .acme; do
+    for value in MANIFEST PRUNED 20261112T100000Z-a1B2c3 'a b' .acme; do
         write_config $'mode=manual\nengagement='"$value"$'\nlogdir=/srv/work/evidence\n'
         run_tlogger engagement
         [ "$status" -eq 1 ]

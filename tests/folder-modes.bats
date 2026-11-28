@@ -20,7 +20,8 @@ bats_require_minimum_version 1.5.0
 
 load helpers
 
-# The boot id of the fake /proc, and the recorder that each synthetic session names.
+# The boot id of the fake /proc, which make_session in helpers.bash names in each recorder
+# file.
 BOOT=0b1e7c5a-4d2f-4c3b-9a8e-7f6d5c4b3a21
 
 # The log folder as tlogger shows it.
@@ -54,37 +55,11 @@ teardown() {
     fi
 }
 
-# Create the ended session folder DIR, as a recording that ended with exit leaves it: the logs
-# with some output, a journal of one command, and the recorder, started and exited markers.
-make_session() {
-    session_new "$1"
-    session_out 'kali@kali:~$ ls\r\nfile\r\n'
-    session_in 'ls\r'
-    printf 'S\t1794391200\t2026-11-12T10:00:00Z\t4300\t/srv/work\t-\tls\n' >> "$SDIR/commands.tsv"
-    printf 'E\t1794391201\t4300\t0\n' >> "$SDIR/commands.tsv"
-    session_end
-    printf '4242 1000 %s 34817\n' "$BOOT" > "$SDIR/recorder"
-    printf '2026-11-12T10:00:00Z\n' > "$SDIR/started"
-    printf '2026-11-12T10:01:00Z\n' > "$SDIR/exited"
-    chmod 600 "$SDIR/recorder" "$SDIR/started" "$SDIR/exited"
-}
-
 # Print the refusal of the folder FOLDER, as shown, called WHAT, that its group or others may
 # write in.
 open_msg() {
     printf 'tlogger: %s %s is writable by its group or by others; chmod go-w %s fixes it' \
         "$1" "$2" "$2"
-}
-
-# Fail unless the last run exited 1, printed nothing on stdout and printed MESSAGE alone on
-# stderr, with no home path in full.
-assert_refused() {
-    if [[ $status -ne 1 || -n $output || $stderr != "$1" ]]; then
-        printf 'expected status 1 and the message\n%s\ngot status %s and:\n%s\n%s\n' "$1" \
-            "$status" "$output" "$stderr" >&2
-        return 1
-    fi
-    refute_home_shown
 }
 
 # Fail unless every session command, run on the session SESSION (an id or a path) and on all
@@ -97,7 +72,7 @@ assert_every_command_refuses() {
         "replay $session"; do
         # shellcheck disable=SC2086 # Each row is the command and its arguments, split on spaces.
         run_tlogger $args
-        if ! assert_refused "$want"; then
+        if ! assert_refused 1 "$want"; then
             printf 'for: tlogger %s\n' "$args" >&2
             return 1
         fi
@@ -127,7 +102,7 @@ assert_every_command_refuses() {
     mkdir "$LOGS/Case_2026.x"
     chmod 707 "$LOGS/Case_2026.x"
     run_tlogger list
-    assert_refused "$(open_msg 'the engagement folder' "$SHOWN/Case_2026.x")"
+    assert_refused 1 "$(open_msg 'the engagement folder' "$SHOWN/Case_2026.x")"
 }
 
 @test "a symlink named like an engagement that leads to a folder is refused by every command" {
@@ -210,7 +185,7 @@ assert_every_command_refuses() {
     for args in seal verify render show replay; do
         run_tlogger "$args" "$HOME/cases/$A"
         # shellcheck disable=SC2088 # The ~ is the text tlogger prints.
-        assert_refused "$(open_msg 'the folder' '~/cases')"
+        assert_refused 1 "$(open_msg 'the folder' '~/cases')"
     done
     [ ! -e "$HOME/cases/MANIFEST" ]
     [ ! -e "$HOME/cases/$A/SEAL" ]
@@ -230,7 +205,7 @@ assert_every_command_refuses() {
     ln -s "$HOME/cases" "$HOME/link"
     for args in seal verify render show replay; do
         run_tlogger "$args" "$HOME/link/$A"
-        assert_refused 'tlogger: the folder ~/link is a symlink, which tlogger does not follow'
+        assert_refused 1 'tlogger: the folder ~/link is a symlink, which tlogger does not follow'
     done
     [ ! -e "$HOME/cases/MANIFEST" ]
 }
@@ -248,13 +223,13 @@ assert_every_command_refuses() {
     fi
     for args in seal verify render show replay; do
         run_tlogger "$args" "$other/$A"
-        assert_refused "tlogger: the folder $other belongs to another user"
+        assert_refused 1 "tlogger: the folder $other belongs to another user"
     done
     mkdir -p "$HOME/.config/tlogger"
     chmod 700 "$HOME/.config/tlogger"
     printf 'mode=manual\nlogdir=%s\n' "$other" > "$HOME/.config/tlogger/config"
     run_tlogger list
-    assert_refused "tlogger: the log folder $other belongs to another user"
+    assert_refused 1 "tlogger: the log folder $other belongs to another user"
 }
 
 @test "a log folder of root's is refused, as only the folder of a path may be root's" {
@@ -271,7 +246,7 @@ assert_every_command_refuses() {
     for args in list 'seal --all' 'verify --all' show; do
         # shellcheck disable=SC2086 # The command and its arguments, split on spaces.
         run_tlogger $args
-        assert_refused 'tlogger: the log folder /usr belongs to another user'
+        assert_refused 1 'tlogger: the log folder /usr belongs to another user'
     done
 }
 
@@ -287,12 +262,12 @@ assert_every_command_refuses() {
     # session folder itself speaks.
     for args in seal verify render show replay; do
         run_tlogger "$args" "/$A"
-        assert_refused "tlogger: /$A does not exist"
+        assert_refused 1 "tlogger: /$A does not exist"
     done
 }
 
 @test "a path whose parent is a file names the path, not the parent as a folder" {
     : > "$HOME/notes"
     run_tlogger verify "$HOME/notes/$A"
-    assert_refused "tlogger: ~/notes/$A does not exist"
+    assert_refused 1 "tlogger: ~/notes/$A does not exist"
 }
