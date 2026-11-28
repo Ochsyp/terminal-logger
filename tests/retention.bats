@@ -107,9 +107,9 @@
 #   MANIFEST of neither folder that <name> may name: the engagement folder <name> of the log
 #   folder, and the log folder itself, when <name> is the last part of its path, as for --none.
 #   Only a folder with a tie to the archive is compared: its MANIFEST names a session of the
-#   archive, its PRUNED records one, or it holds an entry named like one. There a missing or
-#   emptied MANIFEST is compared as empty, and fails. A folder with no tie, as on another
-#   computer, is not compared.
+#   archive, or its PRUNED records one. There a missing or emptied MANIFEST is compared as
+#   empty, and fails, and so does a PRUNED that is a symlink, not a regular file or unreadable.
+#   A folder with no tie, as on another computer, is not compared.
 # - Without the .sha256 file it says so, and its verdicts stand, with this line alone on stderr:
 #     tlogger: <FILE>.sha256 is missing; compare the archive's SHA-256, <sum>, with the one
 #     archive printed
@@ -1637,6 +1637,7 @@ assert_kept() {
 
 @test "archive --verify compares with a folder tied to the archive, never with an unrelated one" {
     need modes
+    need symlinks
     need python3
     sealed_engagement acme "$A"
     make_archive acme
@@ -1656,6 +1657,15 @@ assert_kept() {
     run_tlogger archive --verify "$ARCHIVE"
     [ "$status" -eq 1 ]
     [ "$output" = "$A  changed" ]
+    # A PRUNED that cannot be read, here a symlink, hides no tie: it fails as well.
+    mv "$LOGS/acme/PRUNED" "$HOME/pruned"
+    ln -s "$HOME/pruned" "$LOGS/acme/PRUNED"
+    run_tlogger archive --verify "$ARCHIVE"
+    [ "$status" -eq 1 ]
+    [ "$output" = "$A  changed" ]
+    [[ $stderr == *"tlogger: ${ARCHIVE##*/}: cannot read $SHOWN/acme/PRUNED: "* ]]
+    rm -f -- "$LOGS/acme/PRUNED"
+    mv "$HOME/pruned" "$LOGS/acme/PRUNED"
     # A folder acme with no tie to the archive, as on another computer, is passed over.
     mv "$LOGS/acme" "$HOME/old-acme"
     sealed_engagement acme "$B"

@@ -877,9 +877,13 @@ types of the members, that nothing follows the end of the archive, and that the 
 `MANIFEST` is the start of the `MANIFEST` of the folder whose name the archive holds: the
 engagement folder of that name, or the log folder itself for an archive made with `--none`. It
 compares with such a folder when the folder has a tie to the archive: its `MANIFEST` names a
-session of the archive, its `PRUNED` records one, or it holds one. There an emptied or missing
-`MANIFEST` fails the check. A folder with no tie, as on another computer, is not compared, so a
-copy checked there is checked by itself, and its SHA-256 is what shows that it is yours.
+session of the archive, or its `PRUNED` records one. There an emptied or missing `MANIFEST`, or
+a `PRUNED` that cannot be read, fails the check. A folder with no tie, as on another computer,
+is not compared, so a copy checked there is checked by itself, and its SHA-256 is what shows
+that it is yours. A session put back by hand belongs in its old folder on the computer that
+made the archive: in another folder of that name, its `MANIFEST` line is missing. The check
+cannot tell a `MANIFEST` and `PRUNED` that were both removed from a folder with no tie; the
+SHA-256 you kept apart can.
 Without the `.sha256` file, it says so and prints the archive's SHA-256 to compare with the one
 that archive printed. A FILE that is missing, not gzip or cut short exits 1.
 

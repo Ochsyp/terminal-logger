@@ -34,44 +34,52 @@ for node in ast.walk(tree):
 
 # A Python script that prints each name that the top level of the file in argv[1] binds more
 # than once, with the lines of each: a function, a class, an assignment or an import, also
-# inside a top-level if, try or with.
+# inside a top-level if, try or with. The branches of an if or a try are alternatives, so a
+# fallback binds its name once, and an augmented assignment binds no new name.
 TWICE_DEFINED='import ast, sys
 with open(sys.argv[1], encoding="utf-8") as source:
     tree = ast.parse(source.read())
-seen = {}
-def bind(name, node):
-    seen.setdefault(name, []).append(node.lineno)
-def targets(target, node):
+def add(into, part):
+    for name, lines in part.items():
+        into.setdefault(name, []).extend(lines)
+def either(*parts):
+    out = {}
+    for part in parts:
+        for name, lines in part.items():
+            if len(lines) > len(out.get(name, [])):
+                out[name] = list(lines)
+    return out
+def targets(target, line, part):
     if isinstance(target, ast.Name):
-        bind(target.id, node)
+        part.setdefault(target.id, []).append(line)
     elif isinstance(target, (ast.Tuple, ast.List)):
         for item in target.elts:
-            targets(item, node)
+            targets(item, line, part)
 def walk(body):
+    seen = {}
     for node in body:
+        part = {}
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            bind(node.name, node)
+            part[node.name] = [node.lineno]
         elif isinstance(node, ast.Assign):
             for target in node.targets:
-                targets(target, node)
-        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and node.value is not None:
-            targets(node.target, node)
+                targets(target, node.lineno, part)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets(node.target, node.lineno, part)
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             for alias in node.names:
-                bind((alias.asname or alias.name).split(".")[0], node)
+                part.setdefault((alias.asname or alias.name).split(".")[0], []).append(node.lineno)
         elif isinstance(node, ast.If):
-            walk(node.body)
-            walk(node.orelse)
+            part = either(walk(node.body), walk(node.orelse))
         elif isinstance(node, ast.Try):
-            walk(node.body)
-            for handler in node.handlers:
-                walk(handler.body)
-            walk(node.orelse)
-            walk(node.finalbody)
+            part = either(walk(node.body), *[walk(h.body) for h in node.handlers])
+            add(part, walk(node.orelse))
+            add(part, walk(node.finalbody))
         elif isinstance(node, ast.With):
-            walk(node.body)
-walk(tree.body)
-for name, lines in sorted(seen.items()):
+            part = walk(node.body)
+        add(seen, part)
+    return seen
+for name, lines in sorted(walk(tree.body).items()):
     if len(lines) > 1:
         print("%s is bound on lines %s" % (name, ", ".join(map(str, lines))))'
 

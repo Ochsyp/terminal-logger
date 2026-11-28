@@ -2361,11 +2361,12 @@ def _read_small(path):
 def _live_problem(folder, result):
     """Return why the MANIFEST bytes of RESULT are not a byte prefix of FOLDER/MANIFEST, read
     without following a symlink, a missing one holding none; None when they are; and False when
-    FOLDER has no tie to RESULT, so that the archive is not of it: it is no folder, or its
-    MANIFEST names none of RESULT's sessions, its PRUNED records none, and it holds none of
-    them. On the computer that made the archive the folder keeps such a tie, as the MANIFEST
-    only grows and prune records what it removes; a MANIFEST emptied or removed there is a
-    fault, not a reason to pass over it."""
+    FOLDER has no tie to RESULT, so that the archive is not of it: it is no folder, or neither
+    its MANIFEST nor its PRUNED names a session of RESULT. On the computer that made the archive
+    the folder keeps such a tie, as the MANIFEST only grows and prune records what it removes; a
+    MANIFEST emptied or removed there is a fault, not a reason to pass over it, and so is a
+    PRUNED that cannot be read. A session folder alone is no tie: one put back into another
+    folder of that name, as on another computer, makes no archive fail."""
     try:
         if not stat.S_ISDIR(os.lstat(folder).st_mode):
             return False
@@ -2382,18 +2383,19 @@ def _live_problem(folder, result):
     ends = tuple(("  %s/SHA256SUMS" % sid).encode() for sid in sids)
     tied = data is not None and any(line.endswith(ends) for line in _lines(data))
     if not tied:
+        record = os.path.join(folder, "PRUNED")
         try:
-            pruned = _read_small(os.path.join(folder, "PRUNED"))
-        except (OSError, ValueError):
-            pruned = None
+            pruned = _read_small(record)
+        except ValueError:
+            return "%s is not a regular file" % _shown(record)
+        except OSError as error:
+            return "cannot read %s: %s" % (_shown(record), error.strerror)
         if pruned is not None:
             for line in _lines(pruned):
                 fields = line.split(b"  ")
                 if len(fields) > 1 and fields[1].decode("ascii", "replace") in sids:
                     tied = True
                     break
-    if not tied:
-        tied = any(os.path.lexists(os.path.join(folder, sid)) for sid in sids)
     if not tied:
         return False
     if not (data or b"").startswith(result.manifest):
