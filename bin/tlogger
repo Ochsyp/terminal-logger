@@ -4276,11 +4276,11 @@ sha256_of() {
 # so that seal and discard never work on one session at once. LOCK_FD holds it until
 # unlock_session closes it; the exit of tlogger closes it too. It waits TLOGGER_LOCK_WAIT
 # seconds, for tests only, else 10. Returns 1, holding nothing, when DIR cannot be opened, and 2
-# when another holds the lock all that time (flock's -E 75), or flock fails in any way but its
-# own error. A lock that cannot be taken at all is not "busy": without flock on PATH (status
-# 127), or when flock fails with its own error status 1, as on NFS, where flock on a read-only fd
-# fails with EBADF, it closes the fd and goes on without a lock, as manifest_add and prune_record
-# do; LOCK_FD is then empty.
+# when another holds the lock all that time (flock's -E 75) or a signal kills flock. A lock that
+# cannot be taken at all is not "busy": without flock on PATH (status 127), or when flock fails
+# in any other way, as on NFS, where flock on a read-only fd fails with EBADF (65) or ENOLCK (71),
+# it closes the fd and goes on without a lock, as manifest_add and prune_record do; LOCK_FD is
+# then empty.
 lock_session() {
     # Byte ranges, so that no locale widens [0-9].
     local LC_ALL=C wait=10 rc=0
@@ -4293,15 +4293,16 @@ lock_session() {
         return 1
     fi
     flock -x -w "$wait" -E 75 "$LOCK_FD" 2> /dev/null || rc=$?
-    # 1 is flock's own error, as for a lock the file system refuses (EBADF on NFS), and 127 no
-    # flock at all: no lock can be had, so go on without one. Every other failure, 75 for a lock
-    # another holds, a flock killed by a signal or one that cannot run as asked, counts as busy,
-    # so that no seal and discard ever work on one session at once.
-    if (( rc == 1 || rc == 127 )); then
-        unlock_session
-    elif (( rc != 0 )); then
+    # 75, which -E sets for a lock another holds all the wait, and a flock killed by a signal
+    # (above 128) count as busy, so that no seal and discard ever work on one session at once.
+    # Every other failure means that no lock can be had: 65 or 71 for a lock the file system
+    # refuses (EBADF or ENOLCK on NFS), 64 for a flock too old for -E, 127 for no flock at all.
+    # Then go on without one.
+    if (( rc == 75 || rc > 128 )); then
         unlock_session
         return 2
+    elif (( rc != 0 )); then
+        unlock_session
     fi
 }
 

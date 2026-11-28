@@ -142,13 +142,14 @@
 #   (one line). It takes an exclusive flock on that folder, through a read-only fd on the folder
 #   itself, the lock that seal takes for its whole run on a session, and holds it through rmdir,
 #   so that seal and discard never work on one session at once. When another holds the lock
-#   for TLOGGER_LOCK_WAIT seconds (default 10), as flock -E 75 reports it, or flock fails in any
-#   way but its own error status 1, as when a signal kills it: exit 1, stdout the 6 lines,
-#   nothing changed, and stderr ends with (one line):
+#   for TLOGGER_LOCK_WAIT seconds (default 10), as flock -E 75 reports it, or a signal kills
+#   flock (a status above 128): exit 1, stdout the 6 lines, nothing changed, and stderr ends
+#   with (one line):
 #     tlogger: another tlogger command works on session <id>; nothing of it was removed; try
 #     again
-#   A lock that cannot be taken at all, flock missing (127) or failing with its own error
-#   status 1, as on NFS, is not waited for: discard goes on without it.
+#   A lock that cannot be taken at all, flock missing (127) or failing with any other status,
+#   as on NFS, where it exits 65 for EBADF or 71 for ENOLCK, is not waited for: discard goes on
+#   without it.
 #   Then the path must still name that folder, with the "changed" line above, and it checks
 #   everything again: any change since, such as a SEAL or a stray file made while the question
 #   waits, exits 1 with the matching refusal and removes nothing; then the path once more. Then
@@ -727,6 +728,7 @@ assert_discard_refused() {
 
 @test "on the real /proc, a process that holds output.raw open to write keeps the session" {
     need modes
+    need proc
     local pid i
     make_session "$A"
     make_stand_ins
@@ -839,8 +841,9 @@ assert_discard_refused() {
     make_session "$A"
     make_stand_ins
     # A flock that logs its arguments and exits at once with the status in flock-status: 75, as
-    # flock -E 75 reports a lock that another holds, or 1, as when the lock cannot be taken at
-    # all, as on NFS, where flock on a read-only fd fails with EBADF.
+    # flock -E 75 reports a lock that another holds, 143 as when a signal kills it, or 65 and
+    # 71, as when the lock cannot be taken at all on NFS, where flock on a read-only fd fails
+    # with EBADF or ENOLCK.
     cat > "$STAND_INS/flock" << 'STAND_IN'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${0%/*}/flock-calls"
@@ -866,12 +869,21 @@ STAND_IN
     [ "$(tree_of "$HOME")" = "$before" ]
     refute_removed
     # A lock that cannot be taken at all is not busy: discard goes on without it.
-    printf '1\n' > "$STAND_INS/flock-status"
+    printf '65\n' > "$STAND_INS/flock-status"
     : > "$CALLS"
     want=$(discard_calls "$SDIR")
     run_watched discard "$A" --confirm "$A"
     [ "$status" -eq 0 ]
     [ "$stderr" = "$(done_msg "$A" "$SHOWN")" ]
+    [ "$(cat "$CALLS")" = "$want" ]
+    [[ ! -e $SDIR && ! -L $SDIR ]]
+    make_session "$B"
+    printf '71\n' > "$STAND_INS/flock-status"
+    : > "$CALLS"
+    want=$(discard_calls "$SDIR")
+    run_watched discard "$B" --confirm "$B"
+    [ "$status" -eq 0 ]
+    [ "$stderr" = "$(done_msg "$B" "$SHOWN")" ]
     [ "$(cat "$CALLS")" = "$want" ]
     [[ ! -e $SDIR && ! -L $SDIR ]]
 }

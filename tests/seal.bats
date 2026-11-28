@@ -67,9 +67,9 @@
 # was, with this line:
 #   tlogger: another tlogger command works on session <id>; try again
 # hold_lock (helpers.bash) holds the lock from the test. A lock that cannot be taken at all,
-# flock missing (127) or failing with its own error status 1, as on NFS, is not waited for:
-# seal goes on without it; any other failure of flock, a signal included, counts as busy. One
-# test puts a flock first on PATH that fails at once.
+# flock missing (127) or failing at once with any status but 75 and those above 128, as on NFS,
+# where it exits 65 for EBADF or 71 for ENOLCK, is not waited for: seal goes on without it. A
+# signal that kills flock counts as busy. One test puts a flock first on PATH that fails at once.
 
 bats_require_minimum_version 1.5.0
 
@@ -266,14 +266,14 @@ assert_missing() {
 @test "seal goes on without the lock when flock fails at once, as on NFS" {
     local id=20261112T100000Z-a1B2c3 dir
     make_session "$id"
-    # A flock first on PATH that logs its arguments and fails at once, as flock on a read-only
-    # fd fails with EBADF on NFS.
+    # A flock first on PATH that logs its arguments and fails at once with 65, as util-linux
+    # flock on a read-only fd fails with EBADF on NFS.
     dir="$BATS_TEST_TMPDIR/stand-ins"
     mkdir -p "$dir"
     cat > "$dir/flock" << 'STAND_IN'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${0%/*}/flock-calls"
-exit 1
+exit 65
 STAND_IN
     chmod 755 "$dir/flock"
     require_test_home
