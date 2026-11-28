@@ -5,11 +5,13 @@
 #
 # The texts of phase 11 that these tests pin:
 # - The uninstall plan names the state folder in the line KEEP_STATE below, and the result in
-#   the line KEPT_STATE: uninstall deletes no log, and tlogger prune is the one command that
-#   removes sessions, only those an archive holds.
+#   the line KEPT_STATE: uninstall deletes no log; tlogger prune removes the sessions an archive
+#   holds, and tlogger discard one session that cannot be sealed.
 # - help has a row for archive and one for prune, each starting '  archive' or '  prune' at the
 #   start of a line, names their options --older-than, --verify, --archive, --delete and
 #   --confirm, says 'archive and prune need python3', and its exit status names prune.
+# - help has a row for discard, starting '  discard' at the start of a line, its usage line
+#   'discard SESSION [--confirm ID]', and its exit status names discard.
 
 bats_require_minimum_version 1.5.0
 
@@ -991,6 +993,16 @@ list_releases() {
     done
     [[ $flat == *'archive and prune need python3'* ]]
     [[ ${flat##*Exit status:} == *prune* ]]
+}
+
+@test "help lists discard, its usage with --confirm, and names discard in the exit status" {
+    local flat
+    run_tlogger help
+    [ "$status" -eq 0 ]
+    grep -qE '^  discard( |$)' <<< "$output"
+    flat=$(tr -s ' \n' '  ' <<< "$output")
+    [[ $flat == *'discard SESSION [--confirm ID]'* ]]
+    [[ ${flat##*Exit status:} == *discard* ]]
 }
 
 @test "install keeps the current release and one older one" {
