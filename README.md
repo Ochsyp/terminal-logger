@@ -8,13 +8,13 @@ The [releases](https://github.com/Ochsyp/terminal-logger/releases) name the curr
 through an engagement from start to end, and [CONTRIBUTING.md](CONTRIBUTING.md) describes the
 workflow.
 
-## What it will do
+## What it does
 
-The finished `tlogger` command:
+`tlogger`:
 
 - records every new terminal with util-linux `script`: keystrokes and screen output, with timing
-  (`--log-in`, `--log-out`, `--log-timing`, advanced format); this version does so in auto mode,
-  and records on request in manual mode, as [Recording](#recording) describes;
+  (`--log-in`, `--log-out`, `--log-timing`, advanced format); in auto mode as each terminal
+  opens, and in manual mode on request, as [Recording](#recording) describes;
 - captures passwords typed at hidden prompts, and everything inside reverse shells, unstable
   shells and subshells, because `script` wraps the outer terminal;
 - keeps a journal of the commands typed in a recorded terminal, with the start time of each in
@@ -23,16 +23,19 @@ The finished `tlogger` command:
 - shows `REC`, `NOREC` or `EXT` in a segment of Kali's own prompt;
 - replays a session with `scriptreplay`, through a filter that drops the escape sequences a
   target could abuse, and renders it as a plain-text transcript offline with `python3-pyte`,
-  with no tmux anywhere; this version does both, as [Viewing a session](#viewing-a-session)
-  describes;
-- seals a finished session with SHA-256 sums, which expose a later change only while a copy of
-  the sums is kept apart from the logs; this version does so as each recording ends, as
+  with no tmux anywhere, as [Viewing a session](#viewing-a-session) describes;
+- seals a session as its recording ends normally, with SHA-256 sums, which expose a later
+  change only while a copy of the sums is kept apart from the logs, as
   [Sealing and verifying](#sealing-and-verifying) describes;
 - keeps its logs under `~/.local/state/tlogger`, with mode 0700 for directories and 0600 for
   files, 0400 once sealed, and in a folder of its own for each engagement that you name, as
   [Engagements](#engagements) describes;
 - checks with `tlogger doctor` that the log folder lies on encrypted, private storage that is
-  mounted, as [Checking the log folder](#checking-the-log-folder) describes.
+  mounted, as [Checking the log folder](#checking-the-log-folder) describes;
+- packs the sealed sessions of an engagement into one checked archive with `tlogger archive`,
+  and removes only sessions that such an archive holds, with `tlogger prune`, when you ask for
+  it and confirm, as [Keeping and removing logs](#keeping-and-removing-logs) describes. It
+  never removes a log that holds data by itself.
 
 ## Install
 
@@ -126,7 +129,7 @@ defaults they are:
 |---|---|---|
 | Code | `~/.local/share/tlogger/releases/<version>/`, and `current`, a symlink to the release in use; the current release and one older one are kept | 0755 folders and `bin/tlogger`, 0644 files |
 | Config | `~/.config/tlogger/config`: `key=value` lines, read as data and never run | 0700 folder, 0600 file |
-| State | `~/.local/state/tlogger/`: `sessions/` for the logs, `rc-backups/` for a copy of the rc before each change, of which install keeps the five newest; `quarantine/` for what a [move from an older logger](#moving-from-an-older-logger) takes out, never pruned | 0700 folders, 0600 files |
+| State | `~/.local/state/tlogger/`: `sessions/`, the log folder, for the logs, with a folder of its own for each engagement, one `MANIFEST` and at most one `PRUNED` in the log folder and in each engagement folder, and `.archive/` for the archives; `rc-backups/` for a copy of the rc before each change, of which install keeps the five newest; `quarantine/` for what a [move from an older logger](#moving-from-an-older-logger) takes out, never pruned | 0700 folders, 0600 files; sealed logs and archives 0400 |
 
 The rc keeps its mode, its hard links and every byte outside the block, CRLF line ends and a
 missing final newline included. A missing rc is created from `/etc/skel/.zshrc`, or empty without
@@ -183,18 +186,20 @@ tlogger uninstall
 
 Outside zsh, run `~/.local/share/tlogger/current/bin/tlogger uninstall`. It removes the block and
 the code. The config stays unless `--purge-config` is given. The state folder, with the logs and
-the rc backups, always stays: delete it by hand when the rules of the engagement allow it.
-`--dry-run` shows the change to the rc and what would be removed.
+the rc backups, always stays: uninstall deletes none of it. To remove sessions when the rules of
+the engagement allow it, run `tlogger prune` before you uninstall, as
+[Keeping and removing logs](#keeping-and-removing-logs) describes. `--dry-run` shows the change
+to the rc and what would be removed.
 
 ### Exit status
 
 | Status | Meaning |
 |---|---|
 | 0 | Done, or nothing to change |
-| 1 | An error or a refusal; a refusal changes nothing. For `status`: installed only in part. For `verify`: a sealed session changed. For `doctor`: at least one check says `warn` or `unknown` |
-| 2 | A usage error, or `--mode` or `--yes` missing outside a terminal |
-| 3 | Not installed, nothing to remove, or no session to view |
-| 4 | For `verify`: nothing changed, but a finished session is not sealed |
+| 1 | An error or a refusal; a refusal changes nothing. For `status`: installed only in part. For `verify`: a sealed session changed, or with `--all` a session is `missing`. For `doctor`: at least one check says `warn` or `unknown`. For `archive --verify`: a session changed, or the file cannot be read as an archive. For `prune`: a session to keep, a wrong folder name, or a removal that failed |
+| 2 | A usage error, `--mode` or `--yes` missing outside a terminal, or `prune --delete` without `--confirm` outside a terminal |
+| 3 | Not installed, nothing to remove, no log folder, or no session to view, archive or prune |
+| 4 | For `verify`: nothing changed, but a finished session is not sealed, or has no recorder file |
 
 ## Recording
 
@@ -316,8 +321,8 @@ terminals and the next `tlogger start` use it, and a terminal that records alrea
 session where it started.
 
 - A name has letters, digits, `.`, `_` and `-`, at most 64 characters, and starts with a letter
-  or a digit. `MANIFEST` and a name shaped like a session id are refused. Upper and lower case
-  count as different, so `Acme` and `acme` are two engagements.
+  or a digit. `MANIFEST`, `PRUNED` and a name shaped like a session id are refused. Upper and
+  lower case count as different, so `Acme` and `acme` are two engagements.
 - A bad name exits 2 with that rule and changes nothing.
 - `tlogger engagement` writes only the `engagement=` line, as `tlogger mode` writes the `mode=`
   line: it keeps every other byte of the config, which it replaces in one rename with mode 0600.
@@ -591,7 +596,9 @@ hang, and so does a slow disk that wakes up; run `tlogger doctor` again then. Do
 ## Viewing a session
 
 `output.raw` with `timing` is the evidence: what the terminal showed, and when. tlogger never
-writes, moves or renames them; sealing only makes them read-only. Three commands read them:
+writes, moves or renames them; sealing only makes them read-only, and only
+`tlogger prune --delete` removes them, once a checked archive holds them. Three commands read
+them:
 
 | Command | What it does |
 |---|---|
@@ -612,13 +619,17 @@ of yours, not a symlink, and neither its group nor other users may write in it u
 bit is set. The folder that holds a session named by its path may also be root's, as the root of
 a mounted disk often is. Otherwise they exit 1 and name the folder, with `chmod go-w` as the fix.
 They do not need to write there, so a folder that you closed to mode 0500 after an engagement
-still lists and verifies.
+still lists and verifies. `archive` and `prune` are stricter: the log folder, the engagement
+folder and each session folder they take must give its group and others no write at all, sticky
+bit or not.
 
 An engagement folder, for these commands and for `list`, `seal` and `verify`, is a folder
 directly in the log folder that is named as an engagement may be. One that fails the check above,
 a symlink to a folder included, is refused rather than skipped, so that no command overlooks its
-sessions. tlogger looks into no other subfolder. Ids start with the time, so one id in two
-folders comes only from a copy by hand; tlogger then refuses, and asks for the path:
+sessions. A folder named `MANIFEST` or `PRUNED` that holds an entry named like a session is
+refused too, with a request to rename it to a valid engagement name. tlogger looks into no other
+subfolder. Ids start with the time, so one id in two folders comes only from a copy by hand;
+tlogger then refuses, and asks for the path:
 
 ```text
 tlogger: session 20261104T101500Z-a1B2c3 is in more than one folder of ~/.local/state/tlogger/sessions; name the one you mean by its path
@@ -627,7 +638,7 @@ tlogger: session 20261104T101500Z-a1B2c3 is in more than one folder of ~/.local/
 `render` and `show` need `python3` and `python3-pyte` (`sudo apt install python3-pyte`), and
 `replay` needs `python3` and `scriptreplay`, which Kali installs by default. tlogger runs
 `/usr/bin/python3 -I`, so that neither the environment, your user site nor the working folder
-changes what runs.
+changes what runs. `archive` and `prune` need `python3`, not `python3-pyte`.
 
 ### The transcript
 
@@ -635,7 +646,7 @@ The transcript is derived, and its first line says so: it names the session, the
 and when it was rendered.
 
 ```text
-# DERIVED transcript of session 20261104T101500Z-a1B2c3; the evidence is output.raw with timing. tlogger 0.1.0-dev, rendered 2026-11-04T11:00:00Z
+# DERIVED transcript of session 20261104T101500Z-a1B2c3; the evidence is output.raw with timing. tlogger X.Y.Z, rendered 2026-11-04T11:00:00Z
 ```
 
 `render` plays the output through `pyte`, a terminal emulator, at the size the recording had,
@@ -751,15 +762,30 @@ still write `transcript.txt`, which is derived and not sealed.
 | Command | What it does |
 |---|---|
 | `tlogger seal [SESSION \| --all]` | Seals a session whose recording has ended, by default the newest; `--all` seals every ended session of the log folder and its engagement folders, and names the ones still recorded |
-| `tlogger verify [SESSION \| --all]` | Prints `<session>  ok`, `changed`, `unsealed` or `recording` for the session, or for every session with `--all`, and names each change on stderr: a log changed, missing or no longer 0400, a file the seal does not cover, or `SHA256SUMS` that matches neither its `SEAL` nor its `MANIFEST` line |
+| `tlogger verify [SESSION \| --all]` | Prints `<session>  <verdict>` for the session, or for every session with `--all`, and names each change on stderr: a log changed, missing or no longer 0400, a file the seal does not cover, or `SHA256SUMS` that matches neither its `SEAL` nor its `MANIFEST` line. The verdicts are below |
 | `tlogger list` | Lists the sessions of the log folder and its engagement folders, oldest first: state (`recording`, `ended`, `sealed`, `changed`, or `unknown` without a recorder file), start in UTC, recorded time, number of commands, whether a transcript exists, and the engagement, or `-` for a session directly in the log folder |
 
 `seal` refuses a session whose recorder still runs, which it tells from the `recorder` file: the
 process, its start time and the boot it ran in. It refuses one without that file, and a folder
 that holds a symlink, another user's file or an entry that no session holds. A recording that
-ended unexpectedly is not sealed by itself; its notice says to run `tlogger seal`. `verify` exits
-0 when nothing changed and every finished session is sealed, 1 when a sealed session changed, and
-4 when a finished session is not sealed yet; a session still recorded does not count.
+ended unexpectedly is not sealed by itself; its notice says to run `tlogger seal`.
+
+| Verdict | Meaning |
+|---|---|
+| `ok` | Sealed, and every file is as sealed |
+| `changed` | Sealed, but a log changed, is missing or is no longer 0400, the folder holds a file the seal does not cover, or the sums disagree; stderr names what |
+| `unsealed` | The recording has ended, but the session is not sealed yet; `tlogger seal --all` seals it |
+| `unknown` | The session has no readable `recorder` file, so tlogger cannot tell whether its recording ended, and `seal` refuses it |
+| `recording` | Its recorder still runs; it does not count for the exit status |
+| `pruned` | Only with `--all`: a `MANIFEST` names the session, its folder is gone, and `PRUNED` beside that `MANIFEST` records it with the same sum |
+| `moved` | Only with `--all`: a `MANIFEST` names the session, its folder is gone, and another folder of the walk holds a session folder of that id with the same sum, which gets its own line |
+| `missing` | Only with `--all`: a `MANIFEST` names the session, its folder is gone, and neither of the two above holds |
+
+`verify` exits 1 when a session is `changed` or `missing`. Otherwise it exits 4 when a session is
+`unsealed` or `unknown`, and names both counts apart on stderr, and 0 when there is none.
+`verify --all` exits 3, with `no sessions in <log folder>`, only when it finds neither a session
+folder nor a `MANIFEST` line that names a session, so a log folder that prune emptied still
+verifies, with exit 0.
 
 `seal --all` and `verify --all` sort the sessions of every folder by id, so by start time. A
 folder that you made by hand in the log folder counts as an engagement folder when it is named
@@ -768,16 +794,240 @@ ended sessions too, makes their logs read-only and adds their lines to its `MANI
 
 The sessions of 0.2.0 and older stay where they are, directly in the log folder, with its
 `MANIFEST` as it was. `list` shows them with the engagement `-`, and `verify` keeps saying `ok`
-for them. tlogger never moves a session and never removes a `MANIFEST` line. If you move a sealed
-session by hand, for example into another engagement folder, `verify` says `changed` for it,
-since no `MANIFEST` line there names it, until you move it back or run `tlogger seal <id>`, which
-adds the missing line to the `MANIFEST` of its new folder as long as `SHA256SUMS` still matches
-its `SEAL`. So set the engagement before the first terminal of the job.
+for them. tlogger never moves a session and never removes a `MANIFEST` line; `tlogger prune`
+removes only the sessions you name, after you archived them, and keeps their `MANIFEST` lines. If
+you move a sealed session by hand, for example into another engagement folder, `verify` says
+`changed` for it, since no `MANIFEST` line there names it, until you move it back or run
+`tlogger seal <id>`, which adds the missing line to the `MANIFEST` of its new folder as long as
+`SHA256SUMS` still matches its `SEAL`; `verify --all` says `moved` for its line in the old folder.
+So set the engagement before the first terminal of the job.
 
 > **Note:** the sums show a later change only against a copy kept apart from the logs. Anyone who
 > can write the log folder can also rewrite `SHA256SUMS`, `SEAL` and `MANIFEST` together. Note the
 > sum that the terminal prints, or keep a copy of the engagement folder's `MANIFEST`, in the
 > engagement's records.
+
+## Keeping and removing logs
+
+tlogger never removes a log that holds data by itself: there is no retention period, no timer
+and nothing that runs as a shell starts. The plugin removes only the folder of a recording that
+failed to start, while its logs are still empty. The contract of the engagement says how long
+you keep the logs, and when and how you destroy them. Three commands help:
+
+| Command | What it does |
+|---|---|
+| `tlogger archive ENGAGEMENT\|--none [--older-than DAYS]` | Packs the sessions of one folder, which must all be sealed and verify `ok`, into a checked `.tar.gz` in `<log folder>/.archive/`, and prints its SHA-256. It removes nothing |
+| `tlogger archive --verify FILE` | Checks an archive without unpacking it, and prints `<session>  ok` or `changed` for each session in it |
+| `tlogger prune ENGAGEMENT\|--none --archive FILE [--older-than DAYS] [--delete [--confirm NAME]]` | Shows which sessions of one folder it would remove, and removes nothing. With `--delete` and the folder's name, it removes them: all of them or none, and only those that FILE, a checked archive of that folder, holds with the same sums. `PRUNED` records each removal first |
+
+`archive` and `prune` take one folder: `ENGAGEMENT`, an engagement folder of the log folder, or
+`--none` for the sessions directly in the log folder, such as those of 0.2.0. They have no default
+folder and never use the engagement in the config. `--older-than DAYS` takes only the sessions
+that started more than DAYS times 24 hours ago, by the UTC time in the session id, never by file
+times. Both need `python3`, not `python3-pyte`. Both refuse, and write nothing, while
+`logdir_mount` is set and its volume is not mounted or does not hold the log folder, so that no
+copy lands on the disk beneath.
+
+### Archiving
+
+Close every terminal that records into the folder first, or run `tlogger stop` there, and run
+`tlogger archive` in a terminal that does not record into it: a session still recorded is
+`recording`, and archive refuses it.
+
+```bash
+tlogger archive acme
+```
+
+It names the number of sessions and the archive it wrote, then ends with:
+
+```text
+tlogger: SHA-256 of the archive: 5e884898…; keep it apart from the logs
+tlogger: the archive lies on the same volume as the logs; copy it to encrypted storage elsewhere
+```
+
+- The archive is `<name>-<UTC time>.tar.gz`, where `<name>` is the engagement, or for `--none`
+  the last part of the log folder's path. Beside it, `<archive>.sha256` holds its sum, so that
+  `sha256sum -c` works in `.archive`. Both are 0400. archive creates `.archive` with mode 0700
+  when it is missing, and never replaces a file.
+- It holds the folder's `MANIFEST` and, for each session, the files its `SHA256SUMS` lists,
+  `SHA256SUMS` and `SEAL`. `transcript.txt`, which `tlogger render` can make again, and `.part`
+  files stay out. The members are regular files only, with their modes and their times. Their
+  owner is 0, with no user name, so that the archive does not name your account.
+- archive reads the archive back through the check of `--verify` before it keeps it, and only
+  then prints its SHA-256. Keep that sum apart from the logs, as you keep the seal's.
+- It refuses, and writes nothing, when a session is not `ok`, naming each one with what to do:
+  `tlogger seal --all` for `unsealed`, or `--older-than` to leave a session out. It also refuses
+  a file to copy that is a symlink, not a regular file, another user's or has a second hard link;
+  a log folder, engagement folder or session folder that its group or others may write in,
+  sticky bit or not; and an `.archive` that is a symlink, not a folder, another user's or not
+  0700. With no session to take, it exits 3.
+
+An archive is a cleartext copy of every password typed in its sessions. tlogger never encrypts,
+uploads or deletes an archive, and cannot follow where a copy goes. `.archive` lies on the same
+volume as the logs, so an archive there guards against mistakes, not against the loss of that
+volume: copy it to other encrypted storage, or hand it over encrypted.
+
+### Checking an archive
+
+`tlogger archive --verify FILE` reads the archive as a stream, unpacks nothing and writes
+nothing. It prints `<session>  ok` or `<session>  changed` for each session, exits 0 when every
+one is `ok` and 1 otherwise, and names each fault on stderr. It applies the rules of
+`tlogger verify` to each session, and also checks the `.sha256` file beside FILE, the names and
+types of the members, that nothing follows the end of the archive, and, when the log folder holds
+a folder of the archive's name, that the archived `MANIFEST` is the start of that folder's
+`MANIFEST`. Without the `.sha256` file, it says so and prints the archive's SHA-256 to compare
+with the one that archive printed. A FILE that is missing, not gzip or cut short exits 1.
+
+`ok` means that the archive is whole and agrees with itself. Its SHA-256, compared with the sum
+you kept apart, shows that it is the archive you made.
+
+### Restoring a session
+
+Unpack an archive as yourself, never with `sudo`, into a new private folder outside the log
+folder, then verify each session:
+
+```bash
+(umask 077 && mkdir restore && tar -xzf acme-20261120T090000Z.tar.gz -C restore)
+tlogger verify restore/acme/20261112T100000Z-a1B2c3
+```
+
+- As root, tar would give the files owner 0, as the archive stores them, and tlogger refuses
+  another user's files.
+- Without `umask 077`, the unpacked folders get the modes of your usual umask.
+- Never unpack into the log folder: the archived `MANIFEST` would replace the live one. To put a
+  session back, move only its session folder into its old folder. Its `MANIFEST` line is still
+  there, so it verifies `ok` again.
+
+### Pruning
+
+`tlogger prune` with `--archive` and no `--delete` is a dry run. It prints its plan, one line per
+session that it takes, then what stays, and changes nothing:
+
+```bash
+tlogger prune acme --archive ~/.local/state/tlogger/sessions/.archive/acme-20261120T090000Z.tar.gz
+```
+
+```text
+20261112T100000Z-a1B2c3  remove
+20261113T090000Z-d4E5f6  remove
+20261114T080000Z-g7H8i9  keep: it holds notes.txt, which the seal does not cover
+```
+
+A last line, `stays:`, names what stays: the folder, its `MANIFEST` and `PRUNED`, every session
+not listed, and `.archive`.
+
+Each session is `remove`, `finish` for a prune cut short (see below), or `keep:` with the first
+reason that holds. prune removes a session only when:
+
+- it is sealed and verifies `ok`, checked when the plan is made and again just before it goes;
+- FILE passes the whole check of `archive --verify`, holds this same folder by name, has a
+  `MANIFEST` that is the start of this folder's `MANIFEST`, and holds the session with the same
+  sum as its `SEAL` and its `MANIFEST` line;
+- its folder holds nothing but the files its `SHA256SUMS` lists, `SHA256SUMS`, `SEAL` and
+  `transcript.txt`: a `.part` file or any other entry keeps it;
+- its folder and files are yours, with no symlink and one hard link each, its folder gives its
+  group and others no write, and you may write in it and search it. prune never runs `chmod`, so
+  a session folder of mode 0500 is kept when the plan is made.
+
+It is all or nothing: when one session is kept, prune refuses the whole run and exits 1. Narrow
+the selection with `--older-than`, or make a new archive. A dry run exits 0 when `--delete` would
+go ahead, and 3 when there is no session to take.
+
+Add `--delete` to remove the sessions. prune prints the plan first, and on a terminal asks you to
+type the folder's name: the engagement, or for `--none` the last part of the log folder's path.
+`--confirm NAME` gives that answer without the question, and outside a terminal `--delete` needs
+it, or prune exits 2. Any other name exits 1, and nothing changes.
+
+Then prune works on one session at a time, oldest first, and holds off HUP, INT, QUIT and TERM
+while it does. For each session, it checks it again, appends its line to `PRUNED`, flushes it to
+the disk and prints it, then removes the files that `SHA256SUMS` lists, `transcript.txt`,
+`SHA256SUMS` and `SEAL` last, each by its own name with `unlink`, and the empty folder with
+`rmdir`. It never uses `rm -r` or a glob, and follows no symlink. When it is done, it names the
+number of sessions it removed and the `PRUNED` file that records them.
+
+prune never removes a `MANIFEST`, `PRUNED`, an engagement folder, even an empty one, the log
+folder, `.archive` or an archive, the rc backups or the quarantine.
+
+### The record: PRUNED
+
+`PRUNED` lies beside the `MANIFEST` of the folder, with mode 0600, and only grows. Each line holds
+the time of the removal in UTC, the session, the SHA-256 of its `SHA256SUMS`, the archive's file
+name, the archive's SHA-256 and the tlogger version, split by two spaces:
+
+```text
+<UTC time>  <session>  <sum of SHA256SUMS>  <archive file name>  <archive sum>  tlogger <version>
+```
+
+prune prints the same lines, so that you can copy them into the record of what you destroyed.
+`PRUNED` holds no log content, but it names the folder and the sessions, so it stays on the
+encrypted volume too.
+
+The `MANIFEST` lines of pruned sessions stay, so a copy of the `MANIFEST` that you kept apart
+still matches the live one byte for byte. Plain `sha256sum -c MANIFEST` reports a pruned session
+as a missing file; use `sha256sum -c --ignore-missing MANIFEST`.
+
+### verify --all after a prune
+
+`tlogger verify --all` also reads the `MANIFEST` of the log folder and of each engagement folder.
+For each session that a `MANIFEST` names and whose folder is gone, it prints `pruned`, `moved` or
+`missing`, as [Sealing and verifying](#sealing-and-verifying) describes. `missing` makes it exit
+1. For each `missing` session, stderr says that its folder is gone and that `PRUNED` does not
+record it, and names the line to append to `PRUNED` if you removed it on purpose, such as:
+
+```text
+2026-11-28T10:00:00Z  20261104T101500Z-a1B2c3  <sum>  -  -  by hand
+```
+
+Append that line to record a session that you deleted by hand, as earlier versions of this README
+said to do, and `verify --all` says `pruned` for it.
+
+### A prune cut short
+
+A power loss, or a removal that fails, as on an immutable file, can stop prune inside a session.
+A failed removal makes prune exit 1 and name the file, and the sessions it had not reached stay.
+Since the `PRUNED` line comes before the first removal and `SEAL` goes last, that session
+verifies `changed`, never `unsealed`, and `verify --all` adds:
+
+```text
+tlogger: 20261112T100000Z-a1B2c3: a prune was cut short; run the same prune again
+```
+
+Run the same prune, with the same archive, once the cause is fixed. Its plan says `finish` for
+that session, and it removes the rest, but only while every file left is a 0400 file of yours
+that the archive holds with the same sum, or `transcript.txt`. A `PRUNED` line of an attempt
+that failed stays, as the record of that attempt. Once the folder is gone, `verify --all` says
+`pruned`.
+
+### What cannot be undone
+
+- A session that `prune --delete` removed. tlogger keeps no other copy: only the archive brings
+  it back.
+- `PRUNED` and `MANIFEST` lines. Both only grow, and tlogger never removes either.
+- An archive, once it exists: it is a cleartext copy of every password typed in its sessions,
+  and tlogger cannot follow where it goes.
+
+### Removing is not destroying
+
+prune removes files from a file system. That is not secure erasure:
+
+- An SSD or NVMe drive remaps writes, and old blocks stay until it reuses them.
+- Copy-on-write file systems, snapshots (btrfs, LVM, VM snapshots, Timeshift) and journals keep
+  older copies.
+- `shred` does not help in these cases, and tlogger never claims to delete securely.
+- On a LUKS volume, removed data stays as ciphertext in free space, which anyone with the key or
+  the unlocked volume can read.
+
+Real destruction means destroying the key or the drive's contents: `cryptsetup luksErase` on a
+volume used only for that engagement, together with every backup of its header, or the drive's
+own crypto erase or secure erase. These need root, are your own act, and tlogger never runs them.
+
+To destroy one engagement's data alone, give the engagement a LUKS volume of its own and mount it
+as the log folder, with `logdir_mount`, for the length of the engagement. Never mount it as an
+engagement folder: `logdir_mount` guards only the log folder, and a recording creates a missing
+engagement folder on whatever lies beneath.
+
+Never delete evidence from a file manager either: its trash keeps the files, in a `.Trash` folder
+on the same volume or in your home folder's trash.
 
 ## Security
 
@@ -787,12 +1037,59 @@ The logs hold everything typed and shown in a recorded terminal, passwords inclu
   `tlogger doctor` checks both, and `logdir_mount` keeps a recording from starting while that
   volume is not mounted.
 - Record only systems and engagements you are authorized to test. Keep and destroy the logs
-  under the engagement's rules.
+  under the engagement's rules, as [Keeping and removing logs](#keeping-and-removing-logs)
+  describes.
 - Treat what a target printed as hostile: view a session with `tlogger show` or
   `tlogger replay`, which filter it, and never with `scriptlive`, which runs the recorded input
   again.
 
-[SECURITY.md](SECURITY.md) describes how to report a vulnerability.
+[SECURITY.md](SECURITY.md) describes how to report a vulnerability, and what counts as one.
+
+### What tlogger does not protect against
+
+- **Root, or your own user.** Anyone who can write the log folder as you, or as root, can edit
+  or delete the logs and seal them again with new sums. The sums show a change only against a
+  copy kept apart from the logs.
+- **The clock.** Every time in the logs, the seals and `PRUNED` comes from the local clock. There
+  is no trusted timestamp.
+- **An operator who does not want to be recorded.** Recording is not enforced: `tlogger stop`,
+  `TLOGGER_DISABLE=1`, the `disable` file and manual mode all exist on purpose. tlogger records
+  your own work as evidence; it is no tool for watching someone else.
+- **Other shells and users.** Only the zsh terminals of the user who installed tlogger are
+  recorded: not bash, not a graphical program, not another user, and not a terminal opened
+  while the recording is paused or refused.
+- **Its own environment.** tlogger trusts the environment it runs in: `PATH`, the config, and
+  the variables that exist for the tests, such as `TLOGGER_PYTHON` and `TLOGGER_PROC`. Whoever
+  can set them in your shell can change what tlogger runs and reads.
+- **Forged stamps.** A stamp line in a transcript comes from the recorded output, which any
+  program in the terminal could imitate; `commands.tsv` is the record of when each command
+  started.
+- **Target output.** What a target printed is hostile. `show` and `replay` filter it; a `cat` of
+  `output.raw` to a terminal does not.
+
+### Authorized use
+
+- Record only under the rules of engagement and with the client's consent.
+- Never record other people's terminals, and never install tlogger on a host that others use.
+- The logs hold personal data of third parties, such as names, mail and passwords seen on the
+  targets, so data-protection law, such as the GDPR, may apply to how you keep and destroy them.
+- tlogger comes "as is", under the MIT licence: there is no promise that its logs are accepted as
+  evidence anywhere.
+
+### Where copies exist
+
+What a session holds can live on outside its session folder. Destroying it means every copy:
+
+- the logs in the session folders, and each `transcript.txt` that `render` or `show` made;
+- the copies of your rc in `rc-backups/`, and what a move from an older logger put into
+  `quarantine/`;
+- every archive, in `.archive/` and wherever you copied it;
+- the copy of `timing` that `tlogger replay` makes in a private temp folder, and removes again
+  when the replay ends;
+- the zsh history file, which holds the commands typed in recorded terminals, with any password
+  given on a command line;
+- the scrollback of your terminals;
+- backups and snapshots of the disk or of the virtual machine.
 
 ## Development
 

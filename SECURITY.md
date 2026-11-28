@@ -10,6 +10,30 @@ Report a vulnerability through GitHub's private vulnerability reporting: the **S
 then **Report a vulnerability**. Do not open a public issue.
 <!-- standard:end reporting -->
 
+## Supported versions
+
+Only the latest release gets security fixes, as a new release. One maintainer runs the project,
+so there is no fixed response time.
+
+## Scope
+
+In scope:
+
+- a way past the replay filter or the transcript's cleaning, so that a target's escape sequences
+  reach your terminal;
+- a way past seal, verify or `archive --verify`, so that a change to a sealed session or an
+  archive goes unreported;
+- a race on files, links or folder modes that lets someone else read, swap or add a log;
+- `archive` copying, or `prune` removing, anything other than what its checks allow;
+- a leak of log content to another user, another file or the network.
+
+Out of scope:
+
+- an attacker who is root, or your own user, on the machine that records;
+- a host that others use, where tlogger is not meant to run;
+- what the README lists under
+  [What tlogger does not protect against](README.md#what-tlogger-does-not-protect-against).
+
 ## Data that stays private
 
 Never attach a real session log to a report, an issue, a pull request or a commit. A log holds

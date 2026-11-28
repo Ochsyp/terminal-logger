@@ -87,6 +87,24 @@ screenshot. Examples use the user `kali@kali`, the home `/home/kali` and address
 documentation ranges `192.0.2.0/24`, `198.51.100.0/24` and `203.0.113.0/24`, such as `tun0`
 `192.0.2.10` and `wg0` `198.51.100.7`.
 
+## Outside contributions
+
+Contributions from outside are welcome, through a fork and a pull request:
+
+1. Open an issue first, with the bug form, so that the change fits the plan before you write it.
+   Report a vulnerability privately instead, as `SECURITY.md` says.
+2. Fork the repository, and branch from an up-to-date `main` with a name as Workflow gives them:
+   `fix/`, `feat/`, `docs/` or `chore/` plus a short slug.
+3. Write commit messages and the pull request title as Conventional Commits.
+4. Add a line under `## [Unreleased]` in `CHANGELOG.md`.
+5. Run the checks below; on a Linux machine with docker, `bash ci/test` runs them as CI does.
+6. Use synthetic data only, as Privacy says: never a real log, rc, host name, address or account,
+   not in the code, the tests, the commits or the pull request.
+7. Your contribution comes under the MIT licence in `LICENSE`, as the rest of the project.
+
+The maintainer reviews the pull request in the browser and through CI, as Workflow describes,
+and merges it or says why not.
+
 ## Checks
 
 Run the suite from the repository root, with bats 1.13.0 or newer, which the standard's
@@ -174,6 +192,25 @@ bats tests/
   the banner and the REC line have come, and finds the shell that zpty started, the parent of
   `script`, through `/proc`. `pty_wait_gone` waits until a closed terminal's shell has ended, and
   `pty_close` ends a terminal so that the next one can start.
+- `tests/seal.bats` checks `seal`, `verify` and `list` on synthetic sessions over the fake
+  `/proc` that `TLOGGER_PROC` names, so that a session counts as still recorded only when a test
+  says so. It also checks the walk of `verify --all` over each `MANIFEST`: `pruned`, `moved` and
+  `missing`, with sessions removed by hand and `PRUNED` lines written in prune's form, so that
+  it does not depend on prune; and the refusal of a folder named `MANIFEST` or `PRUNED` that
+  holds sessions. `tests/folder-modes.bats` checks the folder check of the session commands.
+- `tests/doctor.bats` runs `tlogger doctor` over three trees that the tests fake: the
+  `self/mountinfo` of `TLOGGER_PROC`, the block devices under `TLOGGER_SYSFS`, and
+  `TLOGGER_FSTAB`, the file doctor reads instead of `/etc/fstab`, which exists for the tests
+  only. `tests/engagement.bats` checks `tlogger engagement` and the engagement row of
+  `tlogger status`.
+- `tests/retention.bats` checks `archive`, `archive --verify` and `prune` on synthetic sessions,
+  with a fake mountinfo for `logdir_mount`. `tests/helpers/tartool.py`, run as `python3 -I`,
+  lists the members of the archives that tlogger writes and builds archives that tlogger did not
+  write, whole or tampered. The same tampered sessions go to `verify` and to `archive --verify`,
+  which must give the same verdicts. For prune, stand-ins first on PATH log every `rm` and
+  `unlink` that `bin/tlogger` runs, fail every `rm`, and fail `unlink` on one named file, as on
+  an immutable one, so that a prune cut short can be tested without root; one test answers
+  prune's question in a pseudo-terminal.
 - `tests/view.bats` runs `libexec/tlogger_view.py` as `bin/tlogger` does, `python3 -I` on the
   file, on synthetic sessions that each test builds with the `session_` functions of
   `tests/helpers.bash` and `printf '%b'`: progress lines, an autosuggestion redraw, an erased
@@ -419,3 +456,32 @@ than its `VERSION`, and it refuses to replace a newer release.
 
 After each release, the first pull request sets `VERSION` to `X.Y.(Z+1)-dev`. An install from a
 checkout is named after `VERSION`, so a checkout never passes for a released version.
+
+## Release audit
+
+The maintainer runs this list before each release, and records the dated result of each run in
+private notes, never in this repository. An item that fails holds the release until it is fixed
+or recorded with its reason.
+
+1. Automated checks, recorded as passed:
+   - CI is green on `main`;
+   - a run of `secret-scan` over the whole history, started by hand, passed, with its positive
+     controls;
+   - the hooks are on in the maintainer's clone.
+2. The settings that `SECURITY.md` and the Guard rails promise, on GitHub:
+   - private vulnerability reporting;
+   - secret scanning and push protection;
+   - the ruleset on `main`, with the checks `all-passed` and `scan`;
+   - Dependabot security updates;
+   - immutable releases;
+   - the owner as the only collaborator;
+   - no deploy keys, webhooks, Actions secrets or self-hosted runners.
+3. Alerts: code scanning, Dependabot and secret scanning show none open, or each one is dismissed
+   with its reason.
+4. Content: the README, the guide, `SECURITY.md`, `CHANGELOG.md`, the release notes, the pull
+   request titles and bodies, and the issues name no machine, account, path, host or real data.
+   Examples use only synthetic users and the documentation address ranges.
+5. Private checks: the maintainer's private list ran, and its result is in the private notes.
+6. Licence: `LICENSE` is MIT, with its copyright line.
+7. Not checkable, and stated as such in each run: copies of the repository outside GitHub, and
+   clone traffic older than 14 days.
