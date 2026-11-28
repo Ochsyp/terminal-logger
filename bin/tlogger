@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
 # tlogger: install, remove and report the zsh plugin that records terminal sessions as evidence
-# for penetration tests, set its mode and engagement, check where the logs lie, and render, show
-# and replay the sessions. It manages a 4-line block at the top of the zsh rc, the plugin files,
-# the config and the state folders; the plugin does the recording, on tlogger start or, in auto
-# mode, in every new terminal.
+# for penetration tests, set its mode and engagement, check where the logs lie, render, show,
+# replay, seal and verify the sessions, and archive and prune them. It manages a 4-line block at
+# the top of the zsh rc, the plugin files, the config and the state folders; the plugin does the
+# recording, on tlogger start or, in auto mode, in every new terminal.
 
 # Exit status: 0 done or nothing to change; 1 error or refusal, for status an install in part, for
-# verify a changed session, and for doctor a warning or a check it could not decide; 2 usage
-# error, or --mode or --yes missing where no terminal can answer; 3 not installed, nothing to
-# remove or no session to view; 4 for verify, a finished session left unsealed. Executing the
-# file runs main; sourcing it only sets the globals and defines the functions, for tests.
+# verify a changed or missing session, for archive --verify a changed one, for prune a session to
+# keep or a wrong folder name, and for doctor a warning or a check it could not decide; 2 usage
+# error, or --mode, --yes or prune's --confirm missing where no terminal can answer; 3 not
+# installed, nothing to remove or no session to view, archive or prune; 4 for verify, a finished
+# session left unsealed or without a recorder file. Executing the file runs main; sourcing it
+# only sets the globals and defines the functions, for tests.
 # TLOGGER_SKEL, the file a missing rc is seeded from, exists for tests, as do TLOGGER_PYTHON and
 # TLOGGER_SCRIPTREPLAY, which name the python3 and scriptreplay that render, show and replay run,
 # TLOGGER_PROC, the /proc whose boot id and processes seal's liveness check reads and whose
-# self/mountinfo doctor reads, TLOGGER_SYSFS, the /sys whose block devices doctor follows, and
-# TLOGGER_FSTAB, the file doctor reads instead of /etc/fstab; production never sets them.
+# self/mountinfo doctor, archive and prune read, TLOGGER_SYSFS, the /sys whose block devices
+# doctor follows, and TLOGGER_FSTAB, the file doctor reads instead of /etc/fstab; production
+# never sets them.
 
 # =======================================================
 #                    GLOBAL SETTINGS
@@ -54,7 +57,7 @@ SESSION_NAME_RE='^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9]{6}$'
 
 # The name of an engagement, a folder in the log folder that holds sessions: letters, digits, .,
 # _ and -, at most 64 characters, starting with a letter or a digit. engagement_name_ok also
-# refuses MANIFEST and a name shaped like a session id; upper and lower case differ.
+# refuses MANIFEST, PRUNED and a name shaped like a session id; upper and lower case differ.
 ENGAGEMENT_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
 
 # A positive decimal number as replay's --speed and --maxdelay take it, such as 2, 0.5 or .25;
@@ -190,6 +193,32 @@ LOGDIR=
 ENGAGEMENT_DIRS=()
 SESSIONS=()
 
+# The folder that archive and prune work on, set by resolve_folder: its path and its name in an
+# archive, the engagement's name or the last part of the log folder's path. SELECTED holds the
+# session folders taken from it, set by select_sessions, and CUTOFF the UTC time, as
+# YYYYMMDDTHHMMSS, before which their ids must start, set by set_cutoff; empty takes every
+# session.
+FOLDER=
+FOLDER_NAME=
+SELECTED=()
+CUTOFF=
+
+# What prune knows of its archive, set by prune_archive: ARCH_SUM, the SHA-256 of the archive
+# file, and ARCH_NAME, its file name; by session id, ARCH_SESSION, the SHA-256 of its archived
+# SHA256SUMS, and ARCH_LISTED, the files that lists, in its order and split by spaces; and by
+# '<id>/<file>', ARCH_FILE, the SHA-256 of each archived file, SHA256SUMS and SEAL among them.
+# prune_session sets ACTION, remove, finish or keep, for one session, REASON, why it is kept,
+# VERIFY_OUT, verify's lines about a kept one, and FINISH_LINE, the PRUNED line of a finish.
+# PRUNED_FILE is the PRUNED file of FOLDER.
+ARCH_SUM=
+ARCH_NAME=
+declare -gA ARCH_SESSION=() ARCH_LISTED=() ARCH_FILE=()
+ACTION=
+REASON=
+VERIFY_OUT=
+FINISH_LINE=
+PRUNED_FILE=
+
 # The files a seal covers, in the order SHA256SUMS lists them: the logs that script writes, the
 # journal and the markers the plugin writes. A session holds the ones it has. Beside them a
 # session folder may hold only what render and seal write, and their temp files.
@@ -200,8 +229,11 @@ SEAL_EXTRAS_RE='^(transcript\.txt(\.part)?|(SHA256SUMS|SEAL)(\.part\.[A-Za-z0-9]
 # unknown without a recorder file. Set by seal_session: SEAL_RESULT, sealed, completed (a
 # missing MANIFEST line added), already, live, mismatch or refused, SEAL_SUM, the SHA-256 of
 # SHA256SUMS, and WHY, the reason of a refusal; by manifest_add: MANIFEST_ADDED, 1 when it
-# appended. Set by verify_session: VERDICT, ok, changed, unsealed, recording or unknown. Set by
-# parse_session_args: ARG_SESSION, the SESSION argument, and ARG_ALL, 1 for --all.
+# appended. Set by verify_session: VERDICT, ok, changed, unsealed, recording or unknown, and by
+# gone_verdict pruned, moved or missing. Set by manifest_sums: MANIFEST_SUMS, the sum of the last
+# MANIFEST line of each session id. Set by parse_session_args: ARG_SESSION, the SESSION argument,
+# and ARG_ALL, 1 for --all.
+declare -gA MANIFEST_SUMS=()
 LIVE=
 MANIFEST_ADDED=0
 ARG_SESSION=
@@ -336,6 +368,10 @@ Commands:
   verify     Check that a sealed session is unchanged: its sums, its modes and its files.
   list       List the sessions of the log folder and its engagement folders with their state,
              start, duration, number of commands and engagement.
+  archive    Pack the sealed sessions of one folder into a checked .tar.gz in the folder
+             .archive of the log folder, and print its SHA-256. It removes nothing.
+  prune      Remove the sessions of one folder that a checked archive holds: a dry run unless
+             --delete is given and the folder's name confirmed. PRUNED records each removal.
   version    Print the version.
   help       Show this help; -h and --help do the same.
 
@@ -354,8 +390,24 @@ replay python3 and scriptreplay.
 During a replay, Space pauses, Up and Down change the speed, Ctrl+C stops and Ctrl+Z suspends it.
 seal and verify take one SESSION in the same way, or --all for every session of the log folder
 or an engagement folder in it.
-  verify               Print '<session>  ok', changed, unsealed or recording for each; keep the
-                       SHA-256 that seal prints, or the MANIFEST, apart from the logs.
+  verify               Print '<session>  ok', changed, unsealed, unknown (no recorder file) or
+                       recording for each; keep the SHA-256 that seal prints, or the MANIFEST,
+                       apart from the logs.
+  verify --all         Also print pruned, moved or missing for each session that a MANIFEST
+                       names and whose folder is gone; missing counts as changed.
+
+archive and prune take one folder, never the engagement in the config: ENGAGEMENT, an
+engagement folder of the log folder, or --none for the sessions directly in the log folder.
+archive and prune need python3, not python3-pyte.
+  archive ENGAGEMENT|--none [--older-than DAYS]
+                       Archive every session of the folder, which must be sealed and verify
+                       ok; with --older-than, only those started more than DAYS days ago.
+  archive --verify FILE
+                       Check an archive without unpacking it: '<session>  ok' or changed.
+  prune ENGAGEMENT|--none --archive FILE [--older-than DAYS] [--delete [--confirm NAME]]
+                       Show which sessions would go; all or none, only sessions that FILE, an
+                       archive of that folder, holds with the same sums. --delete removes them
+                       once you type the folder's name, or give it as --confirm NAME.
 
 Install options:
   --mode auto|manual  Record every new terminal (auto) or only on request, with tlogger start
@@ -380,9 +432,11 @@ Uninstall options:
   --purge-config      Remove the config as well.
 
 Exit status: 0 done or nothing to change; 1 error or refusal (status: installed only in part;
-verify: a session changed; doctor: a warning, or a check it could not decide); 2 usage error, or
---mode or --yes missing outside a terminal; 3 not installed, nothing to remove or no session to
-view; 4 verify: a finished session is not sealed.
+verify: a session changed or missing; doctor: a warning, or a check it could not decide; archive
+--verify: a session changed; prune: a session to keep, or a wrong folder name); 2 usage error, or
+--mode, --yes or prune's --confirm missing outside a terminal; 3 not installed, nothing to
+remove, or no session to view, archive or prune; 4 verify: a finished session is not sealed, or
+has no recorder file.
 EOF
 }
 
@@ -1862,12 +1916,20 @@ read_config() {
     fi
 }
 
-# Succeed when NAME is a valid engagement name: ENGAGEMENT_RE, and neither MANIFEST nor a name
-# shaped like a session id, which would mix with the sessions of the log folder.
+# Succeed when NAME is a valid engagement name: ENGAGEMENT_RE, and neither MANIFEST, PRUNED nor
+# a name shaped like a session id, which would mix with the files and sessions of the log folder.
 engagement_name_ok() {
     # Byte ranges, as the plugin checks them: in some locales [A-Za-z] matches more letters.
     local LC_ALL=C
-    [[ $1 =~ $ENGAGEMENT_RE && $1 != MANIFEST && ! $1 =~ $SESSION_NAME_RE ]]
+    [[ $1 =~ $ENGAGEMENT_RE && $1 != MANIFEST && $1 != PRUNED && ! $1 =~ $SESSION_NAME_RE ]]
+}
+
+# Exit 2: NAME, given to tlogger engagement, archive or prune, is not a valid engagement name.
+# Never returns.
+refuse_engagement_name() {
+    die 2 "'$1' is not a valid engagement name; use letters, digits, ., _ and -," \
+        "at most 64 characters, starting with a letter or a digit, and not" \
+        "MANIFEST, PRUNED or a session id"
 }
 
 # Write the config CONTENT read from stdin to a temp file in the config folder, mode 0600, and
@@ -2551,7 +2613,8 @@ print_uninstall_plan() {
     if (( ! OPT_PURGE_CONFIG )) && [[ -e $CONFIG_FILE ]]; then
         printf '  %-8s %s\n' keep: "$(shown "$CONFIG_FILE") (pass --purge-config to remove it)"
     fi
-    printf '  %-8s %s\n' keep: "$(shown "$STATE_DIR") (logs and rc backups; tlogger never deletes them)"
+    printf '  %-8s %s\n' keep: \
+        "$(shown "$STATE_DIR") (logs and rc backups; uninstall deletes none of them)"
     if (( SCAN_START )); then
         show_diff strip "$(shown "$RC")" "$(shown "$RC") (new)"
     fi
@@ -2629,7 +2692,8 @@ cmd_uninstall() {
     if (( ! OPT_PURGE_CONFIG )) && [[ -e $CONFIG_FILE ]]; then
         printf '  %-8s %s\n' kept: "$(shown "$CONFIG_FILE")"
     fi
-    printf '  %-8s %s\n' kept: "$(shown "$STATE_DIR") (logs and rc backups; delete them by hand when the engagement rules allow it)"
+    printf '  %-8s %s (logs and rc backups; tlogger prune removes the sessions that an %s\n' \
+        kept: "$(shown "$STATE_DIR")" 'archive holds, when the engagement rules allow it)'
 }
 
 # =======================================================
@@ -2735,9 +2799,7 @@ cmd_engagement() {
             -?*) usage_error "unknown option for engagement: $1" ;;
             *)
                 if ! engagement_name_ok "$1"; then
-                    die 2 "'$1' is not a valid engagement name; use letters, digits, ., _ and -," \
-                        "at most 64 characters, starting with a letter or a digit, and not" \
-                        "MANIFEST or a session id"
+                    refuse_engagement_name "$1"
                 fi
                 want=$1
                 ;;
@@ -3717,16 +3779,35 @@ resolve_logdir() {
 # name that are folders, whether the config names them or they were made by hand. Nothing deeper
 # counts. Each one must pass check_holder_dir, so a symlink to a folder, another user's folder or
 # one that its group or others may write in exits 1 instead of being skipped, and no command
-# overlooks its sessions; a symlink to a file or to nothing is no engagement folder.
+# overlooks its sessions; a symlink to a file or to nothing is no engagement folder. A real
+# folder named MANIFEST or PRUNED, the files beside the sessions of a folder, that holds an entry
+# named like a session exits 1 too, with a message to rename it, rather than drop out of sight.
 find_engagement_dirs() {
-    local LC_ALL=C entry
+    local LC_ALL=C entry name
     ENGAGEMENT_DIRS=()
     for entry in "$LOGDIR"/*; do
-        if engagement_name_ok "${entry##*/}" && [[ -d $entry ]]; then
+        name=${entry##*/}
+        if [[ ( $name == MANIFEST || $name == PRUNED ) && -d $entry && ! -L $entry ]] &&
+            holds_session_names "$entry"; then
+            die 1 "the folder $(shown "$entry") holds sessions, but $name is a reserved name;" \
+                "rename it to a valid engagement name"
+        fi
+        if engagement_name_ok "$name" && [[ -d $entry ]]; then
             check_holder_dir "$entry" 'the engagement folder'
             ENGAGEMENT_DIRS+=("$entry")
         fi
     done
+}
+
+# Succeed when the folder DIR holds an entry of any type named like a session.
+holds_session_names() {
+    local LC_ALL=C entry
+    for entry in "$1"/*; do
+        if [[ ${entry##*/} =~ $SESSION_NAME_RE ]]; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 # Set SESSIONS to the session folders of LOGDIR and of its engagement folders, the real folders
@@ -4598,38 +4679,159 @@ cmd_seal() {
     return "$status"
 }
 
+# Set MANIFEST_SUMS to the session ids that the MANIFEST of the folder DIR names, each with the
+# sum of its last line '<sum>  <id>/SHA256SUMS'. Only ids named like a session count: a seal by
+# path may add a line for a folder of any name. A MANIFEST that is a symlink, not a regular file
+# or unreadable names none.
+manifest_sums() {
+    local LC_ALL=C manifest=$1/MANIFEST id sum
+    MANIFEST_SUMS=()
+    if [[ -L $manifest || ! -f $manifest || ! -r $manifest ]]; then
+        return 0
+    fi
+    # A session id has 23 characters; awk without interval expressions, as mawk has none.
+    while IFS=$'\t' read -r id sum; do
+        if [[ $id =~ $SESSION_NAME_RE ]]; then
+            MANIFEST_SUMS[$id]=$sum
+        fi
+    done < <(awk 'length($0) == 100 && substr($0, 1, 66) ~ /^[0-9a-f]+  $/ &&
+        substr($0, 90) == "/SHA256SUMS" { s[substr($0, 67, 23)] = substr($0, 1, 64) }
+        END { for (id in s) print id "\t" s[id] }' "$manifest" 2> /dev/null)
+}
+
+# Print, for the session ID whose folder is gone from the folder DIR and whose last MANIFEST line
+# there holds SUM, '<id>  pruned' when DIR/PRUNED records it with that sum, '<id>  moved' when
+# another folder of FOLDERS holds a session folder ID whose SHA256SUMS has that sum, or else
+# '<id>  missing' with the line to append to DIR/PRUNED, stamped NOW, if it was removed on
+# purpose. Sets VERDICT.
+gone_verdict() {
+    local id=$1 sum=$2 dir=$3 now=$4 other copy got
+    shift 4
+    VERDICT=missing
+    if [[ -n $(pruned_line "$dir/PRUNED" "$id  $sum  ") ]]; then
+        VERDICT=pruned
+    else
+        for other in "$@"; do
+            copy=$other/$id
+            if [[ $other != "$dir" && -d $copy && ! -L $copy && -f $copy/SHA256SUMS &&
+                ! -L $copy/SHA256SUMS ]]; then
+                got=$(sha256_of "$copy/SHA256SUMS" 2> /dev/null) || got=
+                if [[ $got == "$sum" ]]; then
+                    VERDICT=moved
+                    break
+                fi
+            fi
+        done
+    fi
+    printf '%s  %s\n' "$id" "$VERDICT"
+    if [[ $VERDICT == missing ]]; then
+        msg "$id: its folder is gone from $(shown "$dir") and $(shown "$dir/PRUNED") does not" \
+            "record it; if it was removed on purpose, append this line to" \
+            "$(shown "$dir/PRUNED"): $now  $id  $sum  -  -  by hand"
+    fi
+}
+
+# Say, for the session folder DIR that verify found not ok and not recording, that a prune was
+# cut short in it, and succeed, when the PRUNED file beside it records its id with the sum of its
+# MANIFEST line, or else of its SHA256SUMS: prune writes that line before it removes the first
+# file, so the folder may hold only some of its files, or none. Fail when PRUNED does not.
+cut_short_hint() {
+    local dir=$1 id=${1##*/} sum pruned=${1%/*}/PRUNED
+    if [[ -L $pruned || ! -f $pruned ]]; then
+        return 1
+    fi
+    sum=$(manifest_line "${dir%/*}/MANIFEST" "$id")
+    sum=${sum%% *}
+    if [[ -z $sum && -f $dir/SHA256SUMS && ! -L $dir/SHA256SUMS ]]; then
+        sum=$(sha256_of "$dir/SHA256SUMS" 2> /dev/null) || sum=
+    fi
+    if [[ -n $sum && -n $(pruned_line "$pruned" "$id  $sum  ") ]]; then
+        msg "$id: a prune was cut short; run the same prune again"
+        return 0
+    fi
+    return 1
+}
+
 # tlogger verify [SESSION | --all]: check one session, by default the newest, or every session of
-# the log folder and its engagement folders with --all, by id, and print '<id>  <verdict>' for
-# each (see verify_session). Exits 0 when no sealed session changed and every finished one is
-# sealed, 1 when a sealed session changed, 4 when none changed but a finished session is
-# unsealed or has no recorder file, 3 without sessions. A session still recorded does not count.
+# the log folder and its engagement folders with --all, and print '<id>  <verdict>' for each (see
+# verify_session). --all also reads the MANIFEST of each of these folders and gives each id it
+# names whose folder is gone a line of its own (see gone_verdict): by id, the session folders'
+# lines first, then those of the MANIFESTs, the log folder's first. A session that is not ok and
+# that PRUNED records is a prune cut short, and verify says so; it counts as changed.
+# Exits 0 when no sealed session changed or is missing and every finished one is sealed; 1 when
+# one changed or is missing; 4 when none did but a finished session is unsealed or has no
+# recorder file, naming both counts apart; 3 when there is neither a session nor a MANIFEST line
+# for a gone one. A session still recorded does not count.
 cmd_verify() {
-    local dir changed=0
-    local -i open=0
+    local dir id kind rest sum folder now changed=0
+    local -i unsealed=0 unknown=0
+    local -a rows=()
     parse_session_args verify "$@"
     refuse_foreign_root
     if (( ARG_ALL )); then
         resolve_logdir
-        list_sessions
+        collect_sessions
+        for dir in "${SESSIONS[@]}"; do
+            rows+=("${dir##*/}"$'\t'0$'\t'"$dir")
+        done
+        for folder in "$LOGDIR" "${ENGAGEMENT_DIRS[@]}"; do
+            manifest_sums "$folder"
+            for id in "${!MANIFEST_SUMS[@]}"; do
+                if [[ ! -e $folder/$id && ! -L $folder/$id ]]; then
+                    rows+=("$id"$'\t'1$'\t'"${MANIFEST_SUMS[$id]}"$'\t'"$folder")
+                fi
+            done
+        done
+        if (( ${#rows[@]} == 0 )); then
+            die 3 "no sessions in $(shown "$LOGDIR")"
+        fi
+        # By id in byte order; sort -s keeps the order of the folders for one id and kind.
+        mapfile -t rows < <(printf '%s\n' "${rows[@]}" |
+            LC_ALL=C sort -s -t $'\t' -k 1,1 -k 2,2)
+        now=$(date -u +%Y-%m-%dT%H:%M:%SZ) || die 1 "cannot read the clock"
     else
         resolve_session "$ARG_SESSION"
-        SESSIONS=("$SESSION_DIR")
+        rows=("$SESSION_ID"$'\t'0$'\t'"$SESSION_DIR")
     fi
-    for dir in "${SESSIONS[@]}"; do
-        verify_session "$dir"
+    for rest in "${rows[@]}"; do
+        id=${rest%%$'\t'*}
+        rest=${rest#*$'\t'}
+        kind=${rest%%$'\t'*}
+        rest=${rest#*$'\t'}
+        if [[ $kind == 1 ]]; then
+            sum=${rest%%$'\t'*}
+            gone_verdict "$id" "$sum" "${rest#*$'\t'}" "$now" "$LOGDIR" "${ENGAGEMENT_DIRS[@]}"
+        else
+            verify_session "$rest"
+            # A prune cut short counts as changed, whatever its files say now. A whole session
+            # that PRUNED records is ok and gets no hint: it may have been put back on purpose.
+            if [[ $VERDICT == changed || $VERDICT == unsealed || $VERDICT == unknown ]] &&
+                cut_short_hint "$rest"; then
+                VERDICT=changed
+            fi
+        fi
         case $VERDICT in
-            changed) changed=1 ;;
-            unsealed | unknown) open+=1 ;;
+            changed | missing) changed=1 ;;
+            unsealed) unsealed+=1 ;;
+            unknown) unknown+=1 ;;
         esac
     done
     if (( changed )); then
         return 1
     fi
-    if (( open == 1 )); then
+    if (( unsealed == 1 )); then
         msg "1 finished session is not sealed; tlogger seal --all seals it"
-        return 4
-    elif (( open > 1 )); then
-        msg "$open finished sessions are not sealed; tlogger seal --all seals them"
+    elif (( unsealed > 1 )); then
+        msg "$unsealed finished sessions are not sealed; tlogger seal --all seals them"
+    fi
+    if (( unknown == 1 )); then
+        msg "1 session has no recorder file, so tlogger cannot tell whether it ended, and seal" \
+            "refuses it"
+    elif (( unknown > 1 )); then
+        msg "$unknown sessions have no recorder file, so tlogger cannot tell whether they ended," \
+            "and seal refuses them"
+    fi
+    if (( unsealed || unknown )); then
         return 4
     fi
 }
@@ -4673,6 +4875,787 @@ cmd_list() {
 }
 
 # =======================================================
+#                         ARCHIVE
+# =======================================================
+
+# Exit 1 unless the volume that logdir_mount names, when the config sets it, is mounted and holds
+# the log folder LOGDIR as written: the bash form of the plugin's _tlogger_mount_ok, so that no
+# copy of the logs lands on the disk beneath a volume that is not mounted. The last row of
+# TLOGGER_PROC/self/mountinfo (default /proc) for that mount point counts; an automount point not
+# mounted yet counts as not mounted, and so does a mountinfo that cannot be read. Reads mountinfo
+# alone and looks at nothing under the mount point, so that it never mounts an automount.
+check_logdir_mount() {
+    local mount=$CONFIG_LOGDIR_MOUNT type='' i
+    local -i mounted=0
+    if [[ -z $mount ]]; then
+        return 0
+    fi
+    read_mountinfo || true
+    for i in "${!MI_POINT[@]}"; do
+        if [[ ${MI_POINT[i]} == "$mount" ]]; then
+            mounted=1 type=${MI_TYPE[i]}
+        fi
+    done
+    if (( ! mounted )); then
+        die 1 "the volume $(shown "$mount") of the log folder is not mounted"
+    fi
+    if [[ $type == autofs ]]; then
+        die 1 "the volume $(shown "$mount") of the log folder is not mounted yet (automount);" \
+            "open it, then run this command again"
+    fi
+    # The root file system holds every absolute path.
+    if [[ $mount != / && $LOGDIR != "$mount" && $LOGDIR != "$mount"/* ]]; then
+        die 1 "the log folder $(shown "$LOGDIR") does not lie on the volume $(shown "$mount")" \
+            "that logdir_mount names"
+    fi
+}
+
+# Exit 1 unless the folder DIR, called WHAT in the messages, passes check_holder_dir and neither
+# its group nor others may write in it, sticky bit or not: archive copies the logs out of these
+# folders, and a sticky bit still lets others add entries to them.
+check_closed_dir() {
+    local dir=$1 what=$2 mode
+    check_holder_dir "$dir" "$what"
+    mode=$(stat -c %a -- "$dir" 2> /dev/null) || mode=
+    if [[ ! $mode =~ ^[0-7]{3,4}$ ]]; then
+        die 1 "cannot read the mode of $what $(shown "$dir")"
+    fi
+    if (( (8#$mode & 8#022) != 0 )); then
+        die 1 "$what $(shown "$dir") is writable by its group or by others;" \
+            "chmod go-w $(shown "$dir") fixes it"
+    fi
+}
+
+# Exit 2 unless DAYS, the value of --older-than, is a whole number of 0 or more.
+check_days() {
+    # Byte ranges, so that no locale widens [0-9].
+    local LC_ALL=C
+    if [[ ! $1 =~ ^[0-9]+$ ]]; then
+        usage_error "--older-than takes a whole number of days, not '$1'"
+    fi
+}
+
+# Set CUTOFF to the UTC time DAYS x 24 hours before now, as YYYYMMDDTHHMMSS, the form a session
+# id starts with: a session started more than DAYS days ago when its id sorts before it. A DAYS
+# that reaches back before 1970 sets it to 0, before which no id sorts.
+set_cutoff() {
+    local days=$1 now
+    # Without its leading zeros, so that bash does not read it as octal.
+    days=${days#"${days%%[!0]*}"}
+    days=${days:-0}
+    now=$(date -u +%s) || die 1 "cannot read the clock"
+    if (( ${#days} > 7 || days * 86400 >= now )); then
+        CUTOFF=0
+        return 0
+    fi
+    CUTOFF=$(date -u -d "@$(( now - days * 86400 ))" +%Y%m%dT%H%M%S) ||
+        die 1 "cannot read the clock"
+}
+
+# Set FOLDER and FOLDER_NAME to the engagement folder ENGAGEMENT of the log folder and its name,
+# or, with ENGAGEMENT empty, to the log folder and the last part of its path. Checks, in this
+# order, the log folder as resolve_logdir does, the volume of logdir_mount, then that the log
+# folder and the engagement folder exist and that neither lets its group or others write in it.
+# Exits 3 without a log folder, else 1.
+resolve_folder() {
+    local engagement=$1
+    resolve_logdir
+    check_logdir_mount
+    check_closed_dir "$LOGDIR" 'the log folder'
+    if [[ -z $engagement ]]; then
+        FOLDER=$LOGDIR FOLDER_NAME=${LOGDIR##*/}
+        case $FOLDER_NAME in
+            '' | . | ..)
+                die 1 "the log folder $(shown "$LOGDIR") has no name to give an archive; use an" \
+                    "engagement folder"
+                ;;
+        esac
+        # The name goes into the archive's file name, which PRUNED lines hold.
+        if [[ $FOLDER_NAME == *' '* || $FOLDER_NAME == *[[:cntrl:]]* ]]; then
+            die 1 "the name of the log folder $(shown "$LOGDIR") holds a space or a control" \
+                "character, which an archive's name cannot hold; use an engagement folder"
+        fi
+        return 0
+    fi
+    FOLDER=${LOGDIR%/}/$engagement FOLDER_NAME=$engagement
+    if [[ ! -e $FOLDER && ! -L $FOLDER ]]; then
+        die 1 "there is no engagement folder $engagement in $(shown "$LOGDIR")"
+    fi
+    check_closed_dir "$FOLDER" 'the engagement folder'
+}
+
+# Set SELECTED to the session folders of FOLDER as collect_sessions counts them, the real folders
+# named like sessions, by name, which is time order; with CUTOFF set, only those whose id names a
+# UTC start before it. File times never count. With LINKS set to links, a symlink named like a
+# session counts too, wherever it points, so that prune names it rather than pass over it.
+select_sessions() {
+    # Byte order, so that the locale cannot reorder the names or the times.
+    local LC_ALL=C links=${1-} entry id
+    SELECTED=()
+    for entry in "$FOLDER"/*; do
+        id=${entry##*/}
+        # shellcheck disable=SC2071 # Both are times as text, which sort as the times do.
+        if [[ $id =~ $SESSION_NAME_RE ]] &&
+            [[ ( -d $entry && ! -L $entry ) || ( $links == links && -L $entry ) ]] &&
+            [[ -z $CUTOFF || ${id:0:15} < "$CUTOFF" ]]; then
+            SELECTED+=("$entry")
+        fi
+    done
+}
+
+# Print the line with which archive refuses the session ID of FOLDER, whose verdict VERDICT is
+# not ok, and what to do about it.
+archive_refusal() {
+    local narrower='leave it out with a narrower --older-than'
+    case $2 in
+        recording)
+            msg "session $1 is recording; close the terminals recorded into $(shown "$FOLDER")," \
+                "or leave it out with --older-than"
+            ;;
+        unsealed) msg "session $1 is unsealed; tlogger seal --all seals it" ;;
+        unknown)
+            msg "session $1 is unknown, as it has no recorder file and seal refuses it; $narrower"
+            ;;
+        *) msg "session $1 is changed; tlogger verify $1 names what changed, or $narrower" ;;
+    esac
+}
+
+# Exit 1 unless each file that archive takes from FOLDER, its MANIFEST and, for each session of
+# SELECTED, the files its SHA256SUMS lists, SHA256SUMS and SEAL, is a regular file of this
+# user's, not a symlink, with one hard link: a second name for a log could change it behind the
+# seal.
+check_archive_files() {
+    local dir line f
+    local -i i
+    local -a files=("$FOLDER/MANIFEST") links=()
+    for dir in "${SELECTED[@]}"; do
+        while IFS= read -r line || [[ -n $line ]]; do
+            if [[ $line =~ ^[0-9a-f]{64}\ [\ *](.+)$ ]]; then
+                files+=("$dir/${BASH_REMATCH[1]}")
+            fi
+        done < "$dir/SHA256SUMS"
+        files+=("$dir/SHA256SUMS" "$dir/SEAL")
+    done
+    for f in "${files[@]}"; do
+        if [[ -L $f ]]; then
+            die 1 "$(shown "$f") is a symlink, which tlogger does not follow"
+        fi
+        if [[ ! -e $f ]]; then
+            die 1 "$(shown "$f") does not exist"
+        fi
+        if [[ ! -f $f ]]; then
+            die 1 "$(shown "$f") is not a regular file"
+        fi
+        if [[ ! -O $f ]]; then
+            die 1 "$(shown "$f") belongs to another user"
+        fi
+    done
+    mapfile -t links < <(stat -c %h -- "${files[@]}" 2> /dev/null)
+    if (( ${#links[@]} != ${#files[@]} )); then
+        die 1 "cannot read the files of $(shown "$FOLDER")"
+    fi
+    for i in "${!files[@]}"; do
+        if [[ ${links[i]} != 1 ]]; then
+            die 1 "$(shown "${files[i]}") has more than one hard link"
+        fi
+    done
+}
+
+# Exit 1 when the folder ARCHIVES exists and is a symlink, not a folder, another user's, or of a
+# mode other than 0700: archives are cleartext copies of the logs. A missing one passes.
+check_archive_dir() {
+    local dir=$1 mode
+    if [[ -L $dir ]]; then
+        die 1 "$(shown "$dir") is a symlink, which tlogger does not follow"
+    fi
+    if [[ ! -e $dir ]]; then
+        return 0
+    fi
+    if [[ ! -d $dir ]]; then
+        die 1 "$(shown "$dir") is not a folder"
+    fi
+    if [[ ! -O $dir ]]; then
+        die 1 "$(shown "$dir") belongs to another user"
+    fi
+    mode=$(stat -c %a -- "$dir" 2> /dev/null) || mode=
+    if [[ $mode != 700 ]]; then
+        die 1 "$(shown "$dir") has mode $mode, not 700; chmod 700 $(shown "$dir") fixes it"
+    fi
+}
+
+# tlogger archive --verify FILE: check the archive FILE as a stream through
+# libexec/tlogger_view.py archive-check, which prints '<id>  ok' or '<id>  changed' for each
+# session it holds, by the rules of verify, with the reasons on stderr; an archive named after an
+# engagement folder of the log folder must hold a MANIFEST that starts that folder's. Unpacks and
+# writes nothing. Exits as archive-check does: 0 when every session is ok, else 1.
+archive_verify() {
+    local file=$1
+    refuse_foreign_root
+    resolve_paths
+    read_config
+    if [[ -n $CONFIG_ERROR ]]; then
+        die 1 "the config $(shown "$CONFIG_FILE") $CONFIG_ERROR; fix it by hand"
+    fi
+    require_python archive
+    "$PYTHON" -I "$SRC_ROOT/libexec/tlogger_view.py" archive-check \
+        --logdir "${CONFIG_LOGDIR:-$SESSIONS_DIR}" -- "$file" < /dev/null || exit "$?"
+}
+
+# tlogger archive (ENGAGEMENT | --none) [--older-than DAYS] | --verify FILE: pack the sealed
+# sessions of one folder, the engagement folder ENGAGEMENT or with --none the log folder itself,
+# into <log folder>/.archive/<name>-<UTC time>.tar.gz with a .sha256 file beside it, both 0400,
+# through libexec/tlogger_view.py archive-write, which checks the archive before it keeps it; or
+# check an archive with --verify (see archive_verify). With --older-than DAYS it takes only the
+# sessions whose id names a start more than DAYS x 24 hours ago. It never takes the config's
+# engagement, and changes, moves and removes nothing. It checks, in this order, and refuses with
+# nothing written: the log folder, logdir_mount, the folders, a session to take, the verdict of
+# each one, which must be ok, the files it would copy, .archive, python3 and the archive's name.
+# Exits 0 when done, 1 for a refusal, 2 for a usage error, 3 without a log folder or a session.
+cmd_archive() {
+    local engagement='' file='' days='' dir out stamp sum word archives
+    local -i none=0 verify=0 count=0 days_set=0 refused=0
+    local -a ids=()
+    while (( $# )); do
+        case $1 in
+            -h | --help) usage; exit 0 ;;
+            --none) none=1 ;;
+            --verify)
+                (( $# > 1 )) || usage_error "--verify needs a file"
+                verify=1 file=$2
+                shift
+                ;;
+            --older-than)
+                (( $# > 1 )) || usage_error "--older-than needs a value: a whole number of days"
+                days=$2 days_set=1
+                check_days "$days"
+                shift
+                ;;
+            --older-than=*)
+                days=${1#*=} days_set=1
+                check_days "$days"
+                ;;
+            --)
+                shift
+                count+=$#
+                engagement=${1-}
+                break
+                ;;
+            -?*) usage_error "unknown option for archive: $1" ;;
+            *) engagement=$1; count+=1 ;;
+        esac
+        shift
+    done
+    if (( verify )); then
+        if (( none || count || days_set )); then
+            usage_error "archive --verify takes a file and nothing else"
+        fi
+        if [[ -z $file ]]; then
+            usage_error "--verify needs a file"
+        fi
+        archive_verify "$file"
+        return 0
+    fi
+    if (( none && count )); then
+        usage_error "archive takes an engagement or --none, not both"
+    fi
+    if (( count > 1 )); then
+        usage_error "archive takes one engagement at most"
+    fi
+    if (( ! none && ! count )); then
+        usage_error "archive needs an engagement or --none"
+    fi
+    if (( count )) && ! engagement_name_ok "$engagement"; then
+        refuse_engagement_name "$engagement"
+    fi
+    refuse_foreign_root
+    if (( days_set )); then
+        set_cutoff "$days"
+    fi
+    resolve_folder "$engagement"
+    select_sessions
+    for dir in "${SELECTED[@]}"; do
+        check_closed_dir "$dir" 'the session folder'
+    done
+    if (( ${#SELECTED[@]} == 0 )); then
+        die 3 "no session to archive in $(shown "$FOLDER")"
+    fi
+    for dir in "${SELECTED[@]}"; do
+        # verify's own lines about a changed session go to stderr; the verdict line is not needed.
+        verify_session "$dir" > /dev/null
+        if [[ $VERDICT != ok ]]; then
+            archive_refusal "${dir##*/}" "$VERDICT"
+            refused=1
+        fi
+    done
+    if (( refused )); then
+        exit 1
+    fi
+    check_archive_files
+    archives=${LOGDIR%/}/.archive
+    check_archive_dir "$archives"
+    require_python archive
+    stamp=$(date -u +%Y%m%dT%H%M%SZ) || die 1 "cannot read the clock"
+    out=$archives/$FOLDER_NAME-$stamp.tar.gz
+    for file in "$out" "$out.sha256"; do
+        if [[ -e $file || -L $file ]]; then
+            die 1 "$(shown "$file") exists already; archive never replaces a file"
+        fi
+    done
+    if [[ ! -e $archives ]]; then
+        mkdir -m 700 -- "$archives" 2> /dev/null || die 1 "cannot create $(shown "$archives")"
+    fi
+    for dir in "${SELECTED[@]}"; do
+        ids+=("${dir##*/}")
+    done
+    sum=$("$PYTHON" -I "$SRC_ROOT/libexec/tlogger_view.py" archive-write --name "$FOLDER_NAME" \
+        --out "$out" -- "$FOLDER" "${ids[@]}" < /dev/null) || exit "$?"
+    if [[ ! $sum =~ ^[0-9a-f]{64}$ ]]; then
+        die 1 "archive-write gave no SHA-256 for $(shown "$out"); check it with tlogger archive" \
+            "--verify"
+    fi
+    word=sessions
+    if (( ${#ids[@]} == 1 )); then
+        word=session
+    fi
+    msg "archived ${#ids[@]} $word of $(shown "$FOLDER") into $(shown "$out")"
+    msg "SHA-256 of the archive: $sum; keep it apart from the logs"
+    msg "the archive lies on the same volume as the logs; copy it to encrypted storage elsewhere"
+}
+
+# =======================================================
+#                          PRUNE
+# =======================================================
+
+# Print the last line of the file PRUNED whose fields after the UTC time start with WANT, such as
+# '<id>  <sum>  ', or nothing. A PRUNED that is a symlink, not a regular file or unreadable
+# holds no line. prune reads it to finish a prune cut short; verify --all can read it for the
+# sessions whose folders are gone.
+pruned_line() {
+    # Byte ranges, so that no locale widens [0-9].
+    local LC_ALL=C file=$1 want=$2 line last=''
+    if [[ -L $file || ! -f $file || ! -r $file ]]; then
+        return 0
+    fi
+    while IFS= read -r line || [[ -n $line ]]; do
+        if [[ ${line%%  *} =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ &&
+            ${line#*  } == "$want"* ]]; then
+            last=$line
+        fi
+    done < "$file" 2> /dev/null || true
+    if [[ -n $last ]]; then
+        printf '%s\n' "$last"
+    fi
+}
+
+# Exit 1 when PRUNED_FILE exists and is a symlink or not a regular file: prune only ever appends
+# to a regular file there.
+check_pruned_file() {
+    if [[ -L $PRUNED_FILE ]]; then
+        die 1 "$(shown "$PRUNED_FILE") is a symlink, which tlogger does not follow"
+    fi
+    if [[ -e $PRUNED_FILE && ! -f $PRUNED_FILE ]]; then
+        die 1 "$(shown "$PRUNED_FILE") is not a regular file"
+    fi
+}
+
+# Check the archive FILE for prune through libexec/tlogger_view.py prune-check: the whole check
+# of archive --verify, then that it holds the folder FOLDER_NAME and a MANIFEST that starts
+# FOLDER's. Sets ARCH_SUM, ARCH_NAME, ARCH_SESSION, ARCH_LISTED and ARCH_FILE from what it
+# prints. Exits as prune-check does, with its one line, when the archive fails; writes nothing.
+prune_archive() {
+    local file=$1 out kind a b c
+    # The file name goes into PRUNED lines, whose fields two spaces split, and which a line break
+    # or a tab would break; archive's own names hold neither.
+    if [[ ${file##*/} == *[[:cntrl:]]* || ${file##*/} == *' '* ]]; then
+        die 1 "the file name of the archive $(shown "$file") holds a space or a control" \
+            "character; rename it"
+    fi
+    out=$("$PYTHON" -I "$SRC_ROOT/libexec/tlogger_view.py" prune-check --name "$FOLDER_NAME" \
+        --folder "$FOLDER" --logdir "$LOGDIR" -- "$file" < /dev/null) || exit "$?"
+    ARCH_SUM='' ARCH_NAME=${file##*/}
+    ARCH_SESSION=() ARCH_LISTED=() ARCH_FILE=()
+    while IFS=$'\t' read -r kind a b c; do
+        case $kind in
+            archive) ARCH_SUM=$a ;;
+            session) ARCH_SESSION[$a]=$b ;;
+            file)
+                ARCH_FILE[$a/$b]=$c
+                if [[ $b != SHA256SUMS && $b != SEAL ]]; then
+                    ARCH_LISTED[$a]+="${ARCH_LISTED[$a]:+ }$b"
+                fi
+                ;;
+        esac
+    done < <(printf '%s\n' "$out")
+    if [[ ! $ARCH_SUM =~ ^[0-9a-f]{64}$ ]]; then
+        die 1 "cannot read the sums of the archive $(shown "$file")"
+    fi
+}
+
+# Set REASON to why the entry E of a session folder keeps its session, or empty: it must be a
+# regular file of this user's, not a symlink, with one hard link, so that its removal removes
+# the data, and nothing outside the folder.
+prune_entry_reason() {
+    local e=$1 name=${1##*/} links
+    REASON=
+    if [[ -L $e ]]; then
+        REASON="$name is a symlink, which tlogger does not follow"
+    elif [[ ! -f $e ]]; then
+        REASON="$name is not a regular file"
+    elif [[ ! -O $e ]]; then
+        REASON="$name belongs to another user"
+    else
+        links=$(stat -c %h -- "$e" 2> /dev/null) || links=
+        if [[ $links != 1 ]]; then
+            REASON="$name has more than one hard link"
+        fi
+    fi
+}
+
+# Succeed when the session folder DIR, not ok for verify, is a prune cut short that prune may
+# finish with the archive: PRUNED_FILE holds a line for its id with the SHA-256 of its archived
+# SHA256SUMS, the archive's file name and SHA-256, and every entry left in it is a regular file
+# of this user's with one link that is either transcript.txt, or 0400 and archived with the same
+# sum: a file its archived SHA256SUMS lists, SHA256SUMS or SEAL. Sets FINISH_LINE to that line.
+prune_finish_ok() {
+    local dir=$1 id=${1##*/} e name want mode got
+    FINISH_LINE=
+    if [[ -z ${ARCH_SESSION[$id]-} ]]; then
+        return 1
+    fi
+    want="$id  ${ARCH_SESSION[$id]}  $ARCH_NAME  $ARCH_SUM  tlogger "
+    FINISH_LINE=$(pruned_line "$PRUNED_FILE" "$want")
+    if [[ -z $FINISH_LINE ]]; then
+        return 1
+    fi
+    while IFS= read -r e; do
+        name=${e##*/}
+        prune_entry_reason "$e"
+        if [[ -n $REASON ]]; then
+            REASON=
+            return 1
+        fi
+        if [[ $name == transcript.txt ]]; then
+            continue
+        fi
+        want=${ARCH_FILE[$id/$name]-}
+        mode=$(stat -c %a -- "$e" 2> /dev/null) || mode=
+        got=$(sha256_of "$e" 2> /dev/null) || got=
+        if [[ -z $want || $mode != 400 || $got != "$want" ]]; then
+            return 1
+        fi
+    done < <(dir_entries "$dir")
+    return 0
+}
+
+# Set ACTION for the session folder DIR of FOLDER, as the plan of prune shows it: remove, finish
+# (see prune_finish_ok), or keep with REASON, the first that holds of: its folder, which must be
+# this user's, no symlink, closed to its group and others, and open to this user; its verdict,
+# which must be ok; the archive, which must hold it with the sum of its SEAL and MANIFEST line;
+# its entries, which may only be the files its SHA256SUMS lists, SHA256SUMS, SEAL and
+# transcript.txt; and each entry (see prune_entry_reason). A whole session is remove even when
+# PRUNED holds a line for it, as after a restore, or a prune stopped before its first removal:
+# each removal gets its own line. VERIFY_OUT holds verify's lines about a session kept for its
+# verdict. Reads and changes nothing else.
+prune_session() {
+    local dir=$1 id=${1##*/} mode out verdict sealed mline e name a ok
+    local -a allowed
+    ACTION=keep REASON='' VERIFY_OUT=''
+    if [[ -L $dir ]]; then
+        REASON='its folder is a symlink, which tlogger does not follow'
+        return 0
+    fi
+    if [[ ! -d $dir ]]; then
+        REASON='its folder is not a folder'
+        return 0
+    fi
+    if [[ ! -O $dir ]]; then
+        REASON='its folder belongs to another user'
+        return 0
+    fi
+    mode=$(stat -c %a -- "$dir" 2> /dev/null) || mode=
+    if [[ ! $mode =~ ^[0-7]{3,4}$ ]]; then
+        REASON='cannot read the mode of its folder'
+        return 0
+    fi
+    if (( (8#$mode & 8#022) != 0 )); then
+        REASON='its folder is writable by its group or by others'
+        return 0
+    fi
+    if [[ ! -r $dir || ! -w $dir || ! -x $dir ]]; then
+        REASON="its folder has mode $mode, so you cannot remove its files"
+        return 0
+    fi
+    # verify's lines go to stderr before its verdict line, the last one on stdout.
+    out=$(verify_session "$dir" 2>&1) || out=
+    verdict=${out##*$'\n'}
+    if [[ $out == *$'\n'* ]]; then
+        VERIFY_OUT=${out%$'\n'*}
+    fi
+    verdict=${verdict#"$id  "}
+    case $verdict in
+        ok) VERIFY_OUT= ;;
+        changed | unsealed | unknown)
+            if prune_finish_ok "$dir"; then
+                ACTION=finish VERIFY_OUT=
+                return 0
+            fi
+            REASON=$verdict
+            return 0
+            ;;
+        recording)
+            REASON=recording
+            return 0
+            ;;
+        *)
+            REASON=changed
+            return 0
+            ;;
+    esac
+    if [[ -z ${ARCH_SESSION[$id]-} ]]; then
+        REASON='not in the archive'
+        return 0
+    fi
+    sealed=$(seal_sum "$dir")
+    mline=$(manifest_line "$FOLDER/MANIFEST" "$id")
+    if [[ ${ARCH_SESSION[$id]} != "$sealed" || ${mline%% *} != "$sealed" ]]; then
+        REASON='the archive holds it with another sum'
+        return 0
+    fi
+    read -r -a allowed <<< "${ARCH_LISTED[$id]-}"
+    allowed+=(SHA256SUMS SEAL transcript.txt)
+    while IFS= read -r e; do
+        name=${e##*/} ok=0
+        for a in "${allowed[@]}"; do
+            if [[ $name == "$a" ]]; then
+                ok=1
+            fi
+        done
+        if (( ! ok )); then
+            REASON="it holds $name, which the seal does not cover"
+            return 0
+        fi
+    done < <(dir_entries "$dir")
+    while IFS= read -r e; do
+        prune_entry_reason "$e"
+        if [[ -n $REASON ]]; then
+            return 0
+        fi
+    done < <(dir_entries "$dir")
+    ACTION=remove
+}
+
+# Append LINE to PRUNED_FILE under flock, creating it with mode 0600 (the umask of main), after a
+# newline when the file does not end with one, and flush it to the disk. Returns 1, having
+# appended nothing, when PRUNED_FILE is a symlink or not a regular file, or cannot be written;
+# 2 when the line is appended but cannot be flushed to the disk.
+prune_record() {
+    local line=$1 rc=0
+    if [[ -L $PRUNED_FILE || ( -e $PRUNED_FILE && ! -f $PRUNED_FILE ) ]]; then
+        return 1
+    fi
+    # As in manifest_add: only the || form sees a failed redirection, and stderr is closed
+    # before it, so that bash's own message, which names the full path, does not show.
+    # shellcheck disable=SC2094 # The read comes before the appends, which go through fd 9.
+    (
+        flock -x 9 2> /dev/null || true
+        if [[ -s $PRUNED_FILE && -n $(tail -c 1 "$PRUNED_FILE") ]]; then
+            printf '\n' >&9 || exit 1
+        fi
+        printf '%s\n' "$line" >&9 || exit 1
+    ) 2> /dev/null 9>> "$PRUNED_FILE" || rc=$?
+    if (( rc != 0 )); then
+        return 1
+    fi
+    # No fallback to a plain sync, which succeeds even when this file could not be flushed: the
+    # line must be on the disk before anything goes. An older sync that ignores the file still
+    # exits 0 after syncing everything.
+    sync -- "$PRUNED_FILE" 2> /dev/null || return 2
+}
+
+# Remove the session folder DIR of FOLDER, which the plan marked WANT, remove or finish. Checks
+# it again first and exits 1, removing nothing, when its mark changed. For remove, it appends its
+# PRUNED line, synced, before any removal; for finish, the line PRUNED holds stands. Prints that
+# line on stdout. Then it removes each file by its own name with unlink, the files its archived
+# SHA256SUMS lists, in that order, then transcript.txt, SHA256SUMS and SEAL, and the folder with
+# rmdir; for finish, only the files still there. The first removal that fails exits 1.
+prune_one() {
+    local dir=$1 want=$2 id=${1##*/} line stamp name f
+    local -a names
+    prune_session "$dir"
+    if [[ $ACTION != "$want" ]]; then
+        die 1 "session $id is no longer marked $want (${REASON:-now $ACTION}); nothing of it" \
+            "was removed, and the sessions after it stay; run the same prune again"
+    fi
+    if [[ $want == remove ]]; then
+        stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ) || die 1 "cannot read the clock"
+        line="$stamp  $id  ${ARCH_SESSION[$id]}  $ARCH_NAME  $ARCH_SUM  tlogger $VERSION_STR"
+        prune_record "$line" || case $? in
+            2)
+                die 1 "cannot flush $(shown "$PRUNED_FILE") to the disk; it holds the line of" \
+                    "session $id, but nothing of it was removed; run the same prune again"
+                ;;
+            *) die 1 "cannot write $(shown "$PRUNED_FILE"); nothing of session $id was removed" ;;
+        esac
+    else
+        line=$FINISH_LINE
+    fi
+    printf '%s\n' "$line"
+    read -r -a names <<< "${ARCH_LISTED[$id]-}"
+    names+=(transcript.txt SHA256SUMS SEAL)
+    for name in "${names[@]}"; do
+        f=$dir/$name
+        if [[ ( $want == finish || $name == transcript.txt ) && ! -e $f && ! -L $f ]]; then
+            continue
+        fi
+        unlink -- "$f" 2> /dev/null ||
+            die 1 "cannot remove $(shown "$f"); session $id is cut short and the sessions after" \
+                "it stay; run the same prune again once that is fixed"
+    done
+    rmdir -- "$dir" 2> /dev/null ||
+        die 1 "cannot remove $(shown "$dir"); session $id is cut short and the sessions after it" \
+            "stay; run the same prune again once that is fixed"
+}
+
+# tlogger prune (ENGAGEMENT | --none) --archive FILE [--older-than DAYS] [--delete [--confirm
+# NAME]]: remove the sessions of one folder, the engagement folder ENGAGEMENT or with --none the
+# log folder itself, that the archive FILE holds, checked whole and made of that same folder.
+# It prints the plan, one line per session of the selection, remove, finish or keep with a
+# reason, and what stays; without --delete it writes nothing. It is all or nothing: one kept
+# session keeps them all. With --delete and the folder's name, from --confirm or typed at the
+# question on a terminal, it works session by session, oldest first, with HUP, INT, QUIT and
+# TERM ignored (see prune_one), and writes a line in the folder's PRUNED before it removes a
+# session. It never runs rm, chmod or a glob to remove, and never touches the MANIFEST, PRUNED's
+# lines, the folders above the sessions, .archive or an archive. Exits 0 when done or for a dry
+# run that --delete would carry out, 1 for a refusal, a failure or a wrong name, 2 for a usage
+# error or a missing --confirm off a terminal, 3 without a log folder or a session.
+cmd_prune() {
+    local engagement='' file='' days='' confirm='' dir answer word stays
+    local -i none=0 count=0 days_set=0 delete=0 confirm_set=0 file_set=0 held=0 i
+    local -a actions=()
+    while (( $# )); do
+        case $1 in
+            -h | --help) usage; exit 0 ;;
+            --none) none=1 ;;
+            --archive)
+                (( $# > 1 )) || usage_error "--archive needs a file"
+                file=$2 file_set=1
+                shift
+                ;;
+            --archive=*) file=${1#*=} file_set=1 ;;
+            --delete) delete=1 ;;
+            --confirm)
+                (( $# > 1 )) || usage_error "--confirm needs a value: the folder's name"
+                confirm=$2 confirm_set=1
+                shift
+                ;;
+            --confirm=*) confirm=${1#*=} confirm_set=1 ;;
+            --older-than)
+                (( $# > 1 )) || usage_error "--older-than needs a value: a whole number of days"
+                days=$2 days_set=1
+                check_days "$days"
+                shift
+                ;;
+            --older-than=*)
+                days=${1#*=} days_set=1
+                check_days "$days"
+                ;;
+            --)
+                shift
+                count+=$#
+                engagement=${1-}
+                break
+                ;;
+            -?*) usage_error "unknown option for prune: $1" ;;
+            *) engagement=$1; count+=1 ;;
+        esac
+        shift
+    done
+    if (( none && count )); then
+        usage_error "prune takes an engagement or --none, not both"
+    fi
+    if (( count > 1 )); then
+        usage_error "prune takes one engagement at most"
+    fi
+    if (( ! none && ! count )); then
+        usage_error "prune needs an engagement or --none"
+    fi
+    if (( count )) && ! engagement_name_ok "$engagement"; then
+        refuse_engagement_name "$engagement"
+    fi
+    if (( ! file_set )); then
+        usage_error "prune needs --archive FILE"
+    fi
+    if [[ -z $file ]]; then
+        usage_error "--archive needs a file"
+    fi
+    if (( confirm_set && ! delete )); then
+        usage_error "--confirm needs --delete"
+    fi
+    if (( delete && ! confirm_set )) && ! on_tty; then
+        die 2 "--confirm is required with --delete when not run from a terminal"
+    fi
+    refuse_foreign_root
+    if (( days_set )); then
+        set_cutoff "$days"
+    fi
+    resolve_folder "$engagement"
+    select_sessions links
+    if (( ${#SELECTED[@]} == 0 )); then
+        die 3 "no session to prune in $(shown "$FOLDER")"
+    fi
+    PRUNED_FILE=${FOLDER%/}/PRUNED
+    check_pruned_file
+    require_python prune
+    read_version
+    prune_archive "$file"
+    for dir in "${SELECTED[@]}"; do
+        prune_session "$dir"
+        actions+=("$ACTION")
+        if [[ $ACTION == keep ]]; then
+            held+=1
+            printf '%s  keep: %s\n' "${dir##*/}" "$REASON"
+            if [[ -n $VERIFY_OUT ]]; then
+                printf '%s\n' "$VERIFY_OUT" >&2
+            fi
+        else
+            printf '%s  %s\n' "${dir##*/}" "$ACTION"
+        fi
+    done
+    stays="stays: $(shown "$FOLDER"), its MANIFEST and PRUNED, every session not listed above,"
+    printf '%s and %s\n' "$stays" "$(shown "${LOGDIR%/}/.archive")"
+    if (( held )); then
+        die 1 "nothing changed: prune removes all the selected sessions or none; narrow the" \
+            "selection with --older-than, or make a new archive"
+    fi
+    if (( ! delete )); then
+        msg "nothing changed: this was a dry run; --delete removes the sessions marked remove" \
+            "or finish"
+        return 0
+    fi
+    if (( confirm_set )); then
+        answer=$confirm
+    else
+        printf "tlogger: this cannot be undone; type the folder's name, %s, to go ahead: " \
+            "$FOLDER_NAME" >&2
+        IFS= read -r answer || answer=
+    fi
+    if [[ $answer != "$FOLDER_NAME" ]]; then
+        die 1 "nothing changed"
+    fi
+    for i in "${!SELECTED[@]}"; do
+        trap '' HUP INT QUIT TERM
+        prune_one "${SELECTED[i]}" "${actions[i]}"
+        set_signal_traps
+        trap - QUIT
+    done
+    word=sessions
+    if (( ${#SELECTED[@]} == 1 )); then
+        word=session
+    fi
+    msg "removed ${#SELECTED[@]} $word of $(shown "$FOLDER"), as $(shown "$PRUNED_FILE") records"
+}
+
+# =======================================================
 #                           MAIN
 # =======================================================
 
@@ -4704,6 +5687,8 @@ main() {
         seal) cmd_seal "$@" ;;
         verify) cmd_verify "$@" ;;
         list) cmd_list "$@" ;;
+        archive) cmd_archive "$@" ;;
+        prune) cmd_prune "$@" ;;
         version | --version) cmd_version "$@" ;;
         help | -h | --help) usage ;;
         start | stop)

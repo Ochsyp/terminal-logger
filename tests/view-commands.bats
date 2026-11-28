@@ -26,17 +26,6 @@ run_cmd() {
     stderr=${stderr//$'\r'/}
 }
 
-# Fail unless the last run exited STATUS, printed nothing on stdout and printed MESSAGE alone on
-# stderr, with no home path in full.
-assert_refused() {
-    if [[ $status -ne $1 || -n $output || $stderr != "$2" ]]; then
-        printf 'expected status %s and the message\n%s\ngot status %s and:\n%s\n%s\n' "$1" "$2" \
-            "$status" "$output" "$stderr" >&2
-        return 1
-    fi
-    refute_home_shown
-}
-
 # Fail unless the last run was a usage error: exit status 2, nothing on stdout, MESSAGE as the
 # first line of stderr, then the usage.
 assert_usage_error() {
@@ -281,9 +270,10 @@ crafted_transcript() {
         fresh_transcript "transcript of ${name##*/}"
     done
     # Newer sessions where no lookup goes: in folders whose names are no engagement's, and two
-    # levels down.
+    # levels down. A folder MANIFEST or PRUNED that holds sessions is refused instead (see
+    # seal.bats).
     for name in .old/20261112T235959Z-zzzzz1 'x y/20261112T235959Z-zzzzz2' \
-        acme/sub/20261112T235959Z-zzzzz3 MANIFEST/20261112T235959Z-zzzzz4; do
+        acme/sub/20261112T235959Z-zzzzz3; do
         session_new "$LOGS/$name"
         fresh_transcript "transcript of ${name##*/}"
     done
@@ -298,7 +288,7 @@ crafted_transcript() {
     run_tlogger show 20261110T090000Z-aaaaaa
     [ "$status" -eq 0 ]
     [ "${output##*$'\n'}" = 'transcript of 20261110T090000Z-aaaaaa' ]
-    for id in zzzzz1 zzzzz2 zzzzz3 zzzzz4; do
+    for id in zzzzz1 zzzzz2 zzzzz3; do
         run_tlogger show "20261112T235959Z-$id"
         want="tlogger: there is no session 20261112T235959Z-$id"
         assert_refused 1 "$want in ~/.local/state/tlogger/sessions"

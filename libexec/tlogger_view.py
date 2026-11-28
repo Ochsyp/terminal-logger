@@ -1,25 +1,37 @@
 # tlogger_view.py: the Python part of tlogger render, show and replay. render turns a session's
 # output.raw and timing into a plain-text transcript through a pyte screen; for replay, filter
 # keeps only an allow-list of terminal output and replay-timing cleans the timing for scriptreplay.
-# bin/tlogger runs it as '/usr/bin/python3 -I tlogger_view.py <command>'; stdlib and pyte only.
+# For tlogger archive, archive-write packs sealed sessions into a .tar.gz and archive-check checks
+# one; prune-check checks one for tlogger prune and lists the sums of its sessions. bin/tlogger
+# runs it as '/usr/bin/python3 -I tlogger_view.py <command>'; stdlib and pyte only.
 
 import bisect
 import codecs
 import copy
+import errno
+import gzip
+import hashlib
+import io
 import os
 import re
+import secrets
 import select
 import signal
 import stat
 import sys
+import tarfile
 import time
 import unicodedata
+import zlib
 
 USAGE = """\
 usage: tlogger_view.py probe [--pyte]
        tlogger_view.py render --version VERSION [--stdout] [--] SESSION_FOLDER
        tlogger_view.py replay-timing < TIMING
        tlogger_view.py filter [--suspend SETTINGS]
+       tlogger_view.py archive-write --name NAME --out FILE [--] FOLDER ID...
+       tlogger_view.py archive-check [--logdir LOGDIR] [--] FILE
+       tlogger_view.py prune-check --name NAME --folder FOLDER [--logdir LOGDIR] [--] FILE
 """
 
 # A tlogger version, as bin/tlogger's VERSION_RE takes it.
@@ -1891,6 +1903,963 @@ def cmd_probe(args):
     return 0
 
 
+# ---------------------------------------------------------------------------------------------
+# Archives
+# ---------------------------------------------------------------------------------------------
+
+# An archive of tlogger archive is one gzip stream of a tar whose members are regular files
+# only, with no folder entries and no links: <name>/MANIFEST first, the whole MANIFEST of the
+# folder, then for each session <name>/<id>/<file> for each file its SHA256SUMS lists, in that
+# order, <name>/<id>/SHA256SUMS and <name>/<id>/SEAL. Each member keeps the mode of its file and
+# its time in whole seconds, with owner and group 0 and no user or group name.
+
+# The files a seal covers, as bin/tlogger's SEAL_FILES lists them.
+SEAL_FILES = ("output.raw", "timing", "input.raw", "commands.tsv", "recorder", "started",
+              "exited", "stop-requested")
+
+# A session id, as bin/tlogger's SESSION_NAME_RE takes it, and an engagement name, as its
+# ENGAGEMENT_RE does; the names of the files beside the sessions and a session id are none.
+_SESSION_ID = re.compile(r"[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9]{6}")
+_ENGAGEMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+_RESERVED = ("MANIFEST", "PRUNED")
+
+# A line of SHA256SUMS as verify reads it, and the start of a MANIFEST line: a sum, two spaces.
+_SUM_LINE = re.compile(rb"([0-9a-f]{64}) [ *](.+)")
+_MANIFEST_SUM = re.compile(rb"[0-9a-f]{64}  ")
+
+_GZIP_MAGIC = b"\x1f\x8b"
+_CHUNK = 1 << 16
+
+# The largest MANIFEST, SHA256SUMS or SEAL, and .sha256 file read whole: a MANIFEST line takes
+# about 90 bytes, a SHA256SUMS of all the SEAL_FILES about 700.
+_MANIFEST_MAX = 16 << 20
+_SMALL_MAX = 1 << 16
+_SIDECAR_MAX = 4096
+
+# The member types that are regular files.
+_REGULAR = (tarfile.REGTYPE, tarfile.AREGTYPE)
+
+# Open flags that a system may lack: Windows has neither O_NOFOLLOW nor O_NONBLOCK, and reads
+# a file without O_BINARY as text.
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_O_BINARY = getattr(os, "O_BINARY", 0)
+_O_READ = os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK | _O_CLOEXEC | _O_BINARY
+
+# The characters of the random part of a temp name.
+_TOKEN = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+
+def _shown(path):
+    """Return PATH with a leading HOME replaced by ~, as bin/tlogger's shown does."""
+    home = os.environ.get("HOME", "")
+    while home.endswith("/") and home != "/":
+        home = home[:-1]
+    if home and home != "/" and (path == home or path.startswith(home + "/")):
+        return "~" + path[len(home):]
+    return path
+
+
+def _engagement_ok(name):
+    """Return True when NAME is a valid engagement name, as bin/tlogger's engagement_name_ok."""
+    return (bool(_ENGAGEMENT.fullmatch(name)) and name not in _RESERVED
+            and not _SESSION_ID.fullmatch(name))
+
+
+def _lines(data):
+    """Return the lines of DATA as a bash read loop gives them: split at each LF, with no empty
+    last line after a final LF."""
+    lines = data.split(b"\n")
+    if lines[-1] == b"":
+        lines.pop()
+    return lines
+
+
+def _seal_sum(data):
+    """Return the sum that the last 'sha256 ' line of the SEAL DATA names, or None."""
+    sealed = None
+    for line in _lines(data):
+        if line.startswith(b"sha256 "):
+            sealed = line[7:]
+    return sealed
+
+
+def _manifest_sum(manifest, sid):
+    """Return the sum of the last line '<sum>  SID/SHA256SUMS' of the MANIFEST bytes, as
+    bin/tlogger's manifest_line finds it, or None."""
+    want = (sid + "/SHA256SUMS").encode()
+    found = None
+    for line in _lines(manifest or b""):
+        if _MANIFEST_SUM.fullmatch(line[:66]) and line[66:] == want:
+            found = line[:64]
+    return found
+
+
+def _read_upto(fd, size):
+    """Return the first SIZE bytes of the file FD, or all of it when it is shorter."""
+    data = bytearray()
+    while len(data) < size:
+        chunk = os.read(fd, min(_CHUNK, size - len(data)))
+        if not chunk:
+            break
+        data += chunk
+    return bytes(data)
+
+
+def _write_all(fd, data):
+    """Write all of DATA to the file FD."""
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
+
+
+class _Gunzip:
+    """Read the open file FD as tar reads a .tar.gz: its gzip members one after another, as one
+    stream of bytes.
+
+    It hashes the bytes of the file as they come, and keeps the offset of the last byte of the
+    stream that is not 0. A file that does not start as gzip, a member cut short or damaged, and
+    bytes after a member that start no other one raise Failure, its message after SHOWN; error
+    keeps it, should tarfile wrap it in an error of its own.
+    """
+
+    def __init__(self, fd, shown):
+        self.fd = fd
+        self.shown = shown
+        self.digest = hashlib.sha256()
+        self.unzip = None
+        self.members = 0
+        self.pending = b""
+        self.out = bytearray()
+        self.offset = 0
+        self.last_data = -1
+        self.ended = False
+        self.error = None
+
+    def _fail(self, what):
+        """Raise Failure: SHOWN, then WHAT."""
+        self.error = Failure("%s %s" % (self.shown, what))
+        raise self.error
+
+    def _raw(self):
+        """Return the next bytes of the file, b'' at its end, and hash them."""
+        data = os.read(self.fd, _CHUNK)
+        self.digest.update(data)
+        return data
+
+    def _produce(self):
+        """Add the next piece of the stream to out, or set ended at the end of the file."""
+        while not self.ended:
+            if self.unzip is None:
+                while len(self.pending) < 2:
+                    data = self._raw()
+                    if not data:
+                        break
+                    self.pending += data
+                if not self.pending:
+                    if not self.members:
+                        self._fail("is not a gzip file")
+                    self.ended = True
+                    return
+                if self.pending[:2] != _GZIP_MAGIC:
+                    if not self.members:
+                        self._fail("is not a gzip file")
+                    self._fail("holds bytes after its gzip data that are no gzip stream")
+                self.unzip = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                self.members += 1
+            data, self.pending = self.pending, b""
+            if not data:
+                data = self._raw()
+            try:
+                chunk = self.unzip.decompress(data, _CHUNK) if data else self.unzip.flush()
+            except zlib.error:
+                self._fail("is damaged: its gzip data does not decode")
+            if self.unzip.eof:
+                self.pending = self.unzip.unused_data
+                self.unzip = None
+            elif data:
+                self.pending = self.unzip.unconsumed_tail
+            elif not chunk:
+                self._fail("is cut short")
+            if chunk:
+                kept = len(chunk.rstrip(b"\0"))
+                if kept:
+                    self.last_data = self.offset + kept - 1
+                self.offset += len(chunk)
+                self.out += chunk
+                return
+
+    def read(self, size=-1):
+        """Return the next SIZE bytes of the stream, fewer at its end; all with a negative SIZE."""
+        while (size < 0 or len(self.out) < size) and not self.ended:
+            self._produce()
+        if size < 0:
+            size = len(self.out)
+        data = bytes(self.out[:size])
+        del self.out[:size]
+        return data
+
+    def drain(self):
+        """Read the stream to the end of the file."""
+        while self.read(_CHUNK):
+            pass
+
+
+class _Member:
+    """A regular member of an archived session: its mode, the SHA-256 of its data, and the data
+    itself for SHA256SUMS and SEAL, None when it is not kept."""
+
+    def __init__(self, mode, digest, data):
+        self.mode = mode
+        self.digest = digest
+        self.data = data
+
+
+class _Session:
+    """An archived session: its regular members by entry name, every entry name it holds, and
+    what is wrong with its members."""
+
+    def __init__(self):
+        self.files = {}
+        self.names = set()
+        self.problems = []
+
+
+class ArchiveCheck:
+    """What check_archive found in an archive: its <name>, the bytes of its MANIFEST (None
+    without one), its sessions by id, the faults that belong to no session, the findings of each
+    session, which make it changed, and the SHA-256 of the file."""
+
+    def __init__(self):
+        self.name = None
+        self.manifest = None
+        self.manifest_seen = False
+        self.sessions = {}
+        self.faults = []
+        self.findings = {}
+        self.digest = ""
+
+    def ok(self):
+        """Return True when the archive has no fault and every session is ok."""
+        return not self.faults and not any(self.findings.values())
+
+    def verdict(self, sid):
+        """Return the verdict of the session SID: ok or changed."""
+        return "changed" if self.faults or self.findings[sid] else "ok"
+
+
+def _member_data(tar, info, keep):
+    """Return the SHA-256 of the regular member INFO of TAR and, when KEEP, its data, else None."""
+    digest = hashlib.sha256()
+    data = bytearray()
+    source = tar.extractfile(info)
+    while True:
+        chunk = source.read(_CHUNK)
+        if not chunk:
+            break
+        digest.update(chunk)
+        if keep:
+            data += chunk
+    return digest.hexdigest(), (bytes(data) if keep else None)
+
+
+def _take(tar, info, result):
+    """Sort the member INFO of TAR into RESULT, reading the data of a regular member."""
+    name = info.name
+    parts = name.split("/")
+    if result.name is None:
+        result.name = parts[0]
+    regular = info.type in _REGULAR
+    if (name.startswith("/") or parts[0] != result.name or len(parts) < 2
+            or any(part in ("", ".", "..") for part in parts)):
+        result.faults.append("it holds %s, which is no file in the folder %s"
+                             % (name, result.name))
+        return
+    if len(parts) == 2 and parts[1] == "MANIFEST":
+        if result.manifest_seen:
+            result.faults.append("it holds %s twice" % name)
+        elif not regular:
+            result.faults.append("its MANIFEST is not a regular file")
+        elif info.size > _MANIFEST_MAX:
+            result.faults.append("its MANIFEST is larger than %d bytes" % _MANIFEST_MAX)
+        else:
+            result.manifest = _member_data(tar, info, True)[1]
+        result.manifest_seen = True
+        return
+    sid = parts[1]
+    if not _SESSION_ID.fullmatch(sid):
+        result.faults.append("it holds %s, which is neither its MANIFEST nor in a session folder"
+                             % name)
+        return
+    session = result.sessions.setdefault(sid, _Session())
+    if len(parts) == 2:
+        session.problems.append("the archive holds an entry for its folder")
+        return
+    entry = "/".join(parts[2:])
+    if entry in session.names:
+        session.problems.append("%s is in the archive twice" % entry)
+        return
+    session.names.add(entry)
+    mode = info.mode & 0o7777
+    if len(parts) > 3:
+        session.problems.append("%s is not covered by the seal" % entry)
+    elif info.issym():
+        session.problems.append("%s is a symlink" % entry)
+    elif info.islnk():
+        session.problems.append("%s is a hard link" % entry)
+    elif not regular:
+        session.problems.append("%s is not a regular file" % entry)
+    elif entry in ("SHA256SUMS", "SEAL") and info.size > _SMALL_MAX:
+        session.problems.append("%s is larger than %d bytes" % (entry, _SMALL_MAX))
+        session.files[entry] = _Member(mode, "", None)
+    else:
+        digest, data = _member_data(tar, info, entry in ("SHA256SUMS", "SEAL"))
+        session.files[entry] = _Member(mode, digest, data)
+
+
+def _findings(sid, session, manifest):
+    """Return what makes the archived session SID changed by the rules of tlogger verify, one
+    message each, without the id; none when it is ok. MANIFEST is the archived one."""
+    found = list(session.problems)
+    sums = session.files.get("SHA256SUMS")
+    seal = session.files.get("SEAL")
+    listed = set()
+    if sums is None:
+        if "SHA256SUMS" not in session.names:
+            found.append("SHA256SUMS is missing")
+    elif sums.data is not None:
+        for line in _lines(sums.data):
+            match = _SUM_LINE.fullmatch(line)
+            if not match:
+                found.append("SHA256SUMS holds a line that is not a sum")
+                continue
+            entry = match.group(2).decode("utf-8", "surrogateescape")
+            if entry not in SEAL_FILES:
+                found.append("SHA256SUMS names %s, which no session holds" % entry)
+                continue
+            listed.add(entry)
+            member = session.files.get(entry)
+            if member is None:
+                if entry not in session.names:
+                    found.append("%s is missing" % entry)
+                continue
+            if member.mode != 0o400:
+                found.append("%s has mode %o, not 400" % (entry, member.mode))
+            if member.digest != match.group(1).decode("ascii"):
+                found.append("%s changed" % entry)
+    for entry in ("SHA256SUMS", "SEAL"):
+        member = session.files.get(entry)
+        if member is not None and member.mode != 0o400:
+            found.append("%s has mode %o, not 400" % (entry, member.mode))
+    if seal is None and "SEAL" not in session.names:
+        found.append("SEAL is missing")
+    for entry in sorted(session.files):
+        if entry not in listed and entry not in ("SHA256SUMS", "SEAL"):
+            found.append("%s is not covered by the seal" % entry)
+    if sums is not None and sums.data is not None and seal is not None and seal.data is not None:
+        line = _manifest_sum(manifest, sid)
+        if _seal_sum(seal.data) != sums.digest.encode("ascii"):
+            found.append("SHA256SUMS does not match its SEAL")
+        elif line is None:
+            found.append("no line in the archived MANIFEST names this session")
+        elif line != sums.digest.encode("ascii"):
+            found.append("SHA256SUMS does not match its line in the archived MANIFEST")
+    return found
+
+
+def check_archive(fd, shown):
+    """Read the archive in the open file FD, which messages call SHOWN, as a stream, and return
+    an ArchiveCheck of it. Writes nothing.
+
+    A file that is not gzip, is cut short, holds no tar or no session raises Failure. A byte
+    other than 0 after the end of the tar, in the same gzip stream or in one appended to it, is
+    a fault; so is every member that belongs to no session and is not the one MANIFEST.
+    """
+    result = ArchiveCheck()
+    reader = _Gunzip(fd, shown)
+    try:
+        with tarfile.open(fileobj=reader, mode="r|") as tar:
+            for info in tar:
+                _take(tar, info, result)
+            end = tar.offset
+        reader.drain()
+    except Failure:
+        raise
+    except (tarfile.TarError, EOFError):
+        if reader.error is not None:
+            raise reader.error
+        raise Failure("%s holds no tar data that tlogger can read" % shown)
+    if reader.error is not None:
+        raise reader.error
+    if reader.last_data >= end:
+        result.faults.append("bytes other than 0 follow the end of its tar data")
+    if not result.sessions:
+        raise Failure("%s holds no session" % shown)
+    result.digest = reader.digest.hexdigest()
+    for sid, session in result.sessions.items():
+        result.findings[sid] = _findings(sid, session, result.manifest)
+    return result
+
+
+def _open_archive(path, shown):
+    """Open the archive PATH, shown as SHOWN, for reading and return its fd: a regular file."""
+    try:
+        fd = os.open(path, os.O_RDONLY | _O_NONBLOCK | _O_CLOEXEC | _O_BINARY)
+    except FileNotFoundError:
+        raise Failure("%s does not exist" % shown)
+    except OSError as error:
+        raise Failure("cannot read %s: %s" % (shown, error.strerror))
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise Failure("%s is not a regular file" % shown)
+    if _O_NONBLOCK:
+        os.set_blocking(fd, True)
+    return fd
+
+
+def _check_sidecar(path, shown, result):
+    """Check the .sha256 file beside the archive PATH, shown as SHOWN, against RESULT: it must
+    hold the one line '<SHA-256>  <file name>', else that is a fault of RESULT. Returns the note
+    for a missing one, else None."""
+    want = ("%s  %s\n" % (result.digest, os.path.basename(path))).encode()
+    try:
+        fd = os.open(path + ".sha256", _O_READ)
+    except FileNotFoundError:
+        return ("%s.sha256 is missing; compare the archive's SHA-256, %s, with the one archive"
+                " printed" % (shown, result.digest))
+    except OSError as error:
+        result.faults.append("its .sha256 file cannot be read: %s" % error.strerror)
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            result.faults.append("its .sha256 file is not a regular file")
+        elif _read_upto(fd, _SIDECAR_MAX) != want:
+            result.faults.append("its .sha256 file does not hold '%s'" % want.decode().rstrip())
+    finally:
+        os.close(fd)
+    return None
+
+
+def _read_small(path):
+    """Return the bytes of the regular file PATH, read without following a symlink, at most
+    _MANIFEST_MAX of them; None when it is missing; raise OSError when it cannot be read, and
+    ValueError when it is not a regular file."""
+    try:
+        fd = os.open(path, _O_READ)
+    except FileNotFoundError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(path)
+        return _read_upto(fd, _MANIFEST_MAX)
+    finally:
+        os.close(fd)
+
+
+def _live_problem(folder, result):
+    """Return why the MANIFEST bytes of RESULT are not a byte prefix of FOLDER/MANIFEST, read
+    without following a symlink, a missing one holding none; None when they are; and False when
+    FOLDER has no tie to RESULT, so that the archive is not of it: it is no folder, or neither
+    its MANIFEST nor its PRUNED names a session of RESULT. On the computer that made the archive
+    the folder keeps such a tie, as the MANIFEST only grows and prune records what it removes; a
+    MANIFEST emptied or removed there is a fault, not a reason to pass over it, and so is a
+    PRUNED that cannot be read. A session folder alone is no tie: one put back into another
+    folder of that name, as on another computer, makes no archive fail."""
+    try:
+        if not stat.S_ISDIR(os.lstat(folder).st_mode):
+            return False
+    except OSError:
+        return False
+    live = os.path.join(folder, "MANIFEST")
+    try:
+        data = _read_small(live)
+    except ValueError:
+        return "%s is not a regular file" % _shown(live)
+    except OSError as error:
+        return "cannot read %s: %s" % (_shown(live), error.strerror)
+    sids = set(result.sessions)
+    ends = tuple(("  %s/SHA256SUMS" % sid).encode() for sid in sids)
+    tied = data is not None and any(line.endswith(ends) for line in _lines(data))
+    if not tied:
+        record = os.path.join(folder, "PRUNED")
+        try:
+            pruned = _read_small(record)
+        except ValueError:
+            return "%s is not a regular file" % _shown(record)
+        except OSError as error:
+            return "cannot read %s: %s" % (_shown(record), error.strerror)
+        if pruned is not None:
+            for line in _lines(pruned):
+                fields = line.split(b"  ")
+                if len(fields) > 1 and fields[1].decode("ascii", "replace") in sids:
+                    tied = True
+                    break
+    if not tied:
+        return False
+    if not (data or b"").startswith(result.manifest):
+        return "its MANIFEST is not the start of %s" % _shown(live)
+    return None
+
+
+def _check_live(logdir, result):
+    """Make it a fault of RESULT that its archived MANIFEST starts the MANIFEST of none of the
+    folders of LOGDIR that its <name> may name: the engagement folder <name>, and LOGDIR itself
+    when <name> is the last part of its path, as archive --none names its archives. A folder
+    with no tie to the archive (see _live_problem), as on another computer, is not compared."""
+    name = result.name
+    if logdir is None or result.manifest is None or not name:
+        return
+    folders = []
+    if _engagement_ok(name):
+        folders.append(os.path.join(logdir, name))
+    if os.path.basename(logdir.rstrip("/")) == name:
+        folders.append(logdir)
+    problems = [p for p in (_live_problem(f, result) for f in folders) if p is not False]
+    if problems and None not in problems:
+        result.faults.extend(problems)
+
+
+def report_check(result, label):
+    """Print the faults of RESULT after LABEL, then the findings of each session after its id,
+    on stderr, as 'tlogger: ...' lines."""
+    for fault in result.faults:
+        _say("%s: %s" % (label, fault))
+    for sid in sorted(result.findings):
+        for finding in result.findings[sid]:
+            _say("%s: %s" % (sid, finding))
+
+
+def cmd_archive_check(args):
+    """tlogger_view.py archive-check [--logdir LOGDIR] [--] FILE: check the archive FILE.
+
+    Prints '<id>  ok' or '<id>  changed' for each session it holds, by id, and the reasons on
+    stderr. With LOGDIR, an archive named after an engagement folder there must hold a MANIFEST
+    that is the start of that folder's. Returns 0 when every session is ok, else 1.
+    """
+    logdir = None
+    files = []
+    rest = list(args)
+    while rest:
+        arg = rest.pop(0)
+        if arg == "--logdir":
+            if not rest:
+                raise UsageError("--logdir needs a folder")
+            logdir = rest.pop(0)
+        elif arg == "--":
+            files.extend(rest)
+            rest = []
+        elif arg.startswith("-"):
+            raise UsageError("unknown option for archive-check: %s" % arg)
+        else:
+            files.append(arg)
+    if len(files) != 1:
+        raise UsageError("archive-check takes one file")
+    path = files[0]
+    shown = _shown(path)
+    fd = _open_archive(path, shown)
+    try:
+        result = check_archive(fd, shown)
+    finally:
+        os.close(fd)
+    note = _check_sidecar(path, shown, result)
+    _check_live(logdir, result)
+    report_check(result, os.path.basename(path) or path)
+    if note:
+        _say(note)
+    sink = Sink(1)
+    for sid in sorted(result.sessions):
+        sink.write(("%s  %s\n" % (sid, result.verdict(sid))).encode())
+    sink.flush()
+    return 0 if result.ok() else 1
+
+
+def _starts_live(folder, manifest):
+    """Return True when the bytes MANIFEST are a byte prefix of FOLDER/MANIFEST, which is read
+    without following a symlink; a missing one has no bytes. Raises Failure when it cannot be
+    read."""
+    live = os.path.join(folder, "MANIFEST")
+    try:
+        fd = os.open(live, _O_READ)
+    except FileNotFoundError:
+        return not manifest
+    except OSError as error:
+        raise Failure("cannot read %s: %s" % (_shown(live), error.strerror))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return False
+        return _read_upto(fd, len(manifest)) == manifest
+    finally:
+        os.close(fd)
+
+
+def cmd_prune_check(args):
+    """tlogger_view.py prune-check --name NAME --folder FOLDER [--logdir LOGDIR] [--] FILE:
+    check the archive FILE for tlogger prune of the folder FOLDER, whose name is NAME.
+
+    It runs the whole check of archive-check, LOGDIR as there, then asks that the archive holds
+    the folder NAME and a MANIFEST that is a byte prefix of FOLDER/MANIFEST. A failure prints one
+    line on stderr and returns 1. Else it prints, tab-separated, 'archive <SHA-256 of FILE>',
+    then for each session by id 'session <id> <SHA-256 of its SHA256SUMS>' and 'file <id>
+    <entry> <SHA-256>' for each file its SHA256SUMS lists, in that order, then for SHA256SUMS
+    and SEAL; the note about a missing .sha256 file goes to stderr, and it returns 0. Writes
+    nothing.
+    """
+    name = folder = logdir = None
+    files = []
+    rest = list(args)
+    while rest:
+        arg = rest.pop(0)
+        if arg in ("--name", "--folder", "--logdir"):
+            if not rest:
+                raise UsageError("%s needs a value" % arg)
+            value = rest.pop(0)
+            if arg == "--name":
+                name = value
+            elif arg == "--folder":
+                folder = value
+            else:
+                logdir = value
+        elif arg == "--":
+            files.extend(rest)
+            rest = []
+        elif arg.startswith("-"):
+            raise UsageError("unknown option for prune-check: %s" % arg)
+        else:
+            files.append(arg)
+    if not name or not folder:
+        raise UsageError("prune-check needs --name and --folder")
+    if len(files) != 1:
+        raise UsageError("prune-check takes one file")
+    path = files[0]
+    shown = _shown(path)
+    fd = _open_archive(path, shown)
+    try:
+        result = check_archive(fd, shown)
+    finally:
+        os.close(fd)
+    note = _check_sidecar(path, shown, result)
+    _check_live(logdir, result)
+    if not result.ok():
+        raise Failure("the archive %s fails its check; tlogger archive --verify %s says why"
+                      % (shown, shown))
+    if result.name != name:
+        raise Failure("the archive %s is not of %s: it holds the folder %s"
+                      % (shown, _shown(folder), result.name))
+    if result.manifest is None or not _starts_live(folder, result.manifest):
+        raise Failure("the archive %s is not of %s: its MANIFEST is not the start of %s"
+                      % (shown, _shown(folder), _shown(os.path.join(folder, "MANIFEST"))))
+    if note:
+        _say(note)
+    sink = Sink(1)
+    sink.write(("archive\t%s\n" % result.digest).encode())
+    for sid in sorted(result.sessions):
+        members = result.sessions[sid].files
+        sums = members["SHA256SUMS"]
+        sink.write(("session\t%s\t%s\n" % (sid, sums.digest)).encode())
+        entries = []
+        for line in _lines(sums.data):
+            entries.append(_SUM_LINE.fullmatch(line).group(2).decode("ascii"))
+        for entry in entries + ["SHA256SUMS", "SEAL"]:
+            sink.write(("file\t%s\t%s\t%s\n" % (sid, entry, members[entry].digest)).encode())
+    sink.flush()
+    return 0
+
+
+class _HashingWriter:
+    """Write to the file FD, hashing every byte written."""
+
+    def __init__(self, fd):
+        self.fd = fd
+        self.digest = hashlib.sha256()
+
+    def write(self, data):
+        """Write all of DATA and return its length."""
+        self.digest.update(data)
+        _write_all(self.fd, data)
+        return len(data)
+
+    def flush(self):
+        """Nothing to flush: write leaves nothing behind."""
+
+
+def _open_folder(path, private=False):
+    """Open the folder PATH, a real folder of this user's, not through a symlink, and return its
+    fd; with PRIVATE its mode must be 0700."""
+    shown = _shown(path)
+    try:
+        fd = os.open(path, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC)
+    except OSError as error:
+        raise Failure("cannot open %s: %s" % (shown, error.strerror))
+    info = os.fstat(fd)
+    problem = None
+    if not stat.S_ISDIR(info.st_mode):
+        problem = "is not a folder"
+    elif info.st_uid != os.geteuid():
+        problem = "belongs to another user"
+    elif private and stat.S_IMODE(info.st_mode) != 0o700:
+        problem = "has mode %o, not 700" % stat.S_IMODE(info.st_mode)
+    if problem:
+        os.close(fd)
+        raise Failure("%s %s" % (shown, problem))
+    return fd
+
+
+def _open_at(dfd, name, path, folder=False):
+    """Open NAME in the folder DFD for reading, never through a symlink, and return its fd and
+    stat. PATH names it in messages. It must be this user's, and with FOLDER a folder, else a
+    regular file with one link."""
+    shown = _shown(path)
+    flags = _O_READ | (_O_DIRECTORY if folder else 0)
+    try:
+        fd = os.open(name, flags, dir_fd=dfd)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise Failure("%s is a symlink, which tlogger does not follow" % shown)
+        raise Failure("cannot read %s: %s" % (shown, error.strerror))
+    info = os.fstat(fd)
+    problem = None
+    if not (stat.S_ISDIR if folder else stat.S_ISREG)(info.st_mode):
+        problem = "is not a folder" if folder else "is not a regular file"
+    elif info.st_uid != os.geteuid():
+        problem = "belongs to another user"
+    elif not folder and info.st_nlink != 1:
+        problem = "has more than one hard link"
+    if problem:
+        os.close(fd)
+        raise Failure("%s %s" % (shown, problem))
+    if _O_NONBLOCK:
+        os.set_blocking(fd, True)
+    return fd, info
+
+
+def _member_info(name, info, size):
+    """Return the TarInfo of a regular member NAME of SIZE bytes with the mode and the time in
+    whole seconds of the stat INFO, owner and group 0 and no user or group name."""
+    member = tarfile.TarInfo(name)
+    member.type = tarfile.REGTYPE
+    member.size = size
+    member.mode = stat.S_IMODE(info.st_mode)
+    member.mtime = info.st_mtime_ns // 1000000000
+    member.uid = member.gid = 0
+    member.uname = member.gname = ""
+    return member
+
+
+def _add_small(tar, dfd, entry, path, member, limit):
+    """Add the file ENTRY of the folder DFD, at PATH, to TAR as the member MEMBER, and return its
+    bytes; it must be no larger than LIMIT."""
+    fd, info = _open_at(dfd, entry, path)
+    try:
+        data = _read_upto(fd, limit + 1)
+    finally:
+        os.close(fd)
+    if len(data) > limit:
+        raise Failure("%s is larger than %d bytes" % (_shown(path), limit))
+    tar.addfile(_member_info(member, info, len(data)), io.BytesIO(data))
+    return data
+
+
+def _add_session(tar, fdfd, folder, name, sid):
+    """Add the session SID of the folder FDFD, at FOLDER, to TAR under NAME: the files its
+    SHA256SUMS lists, in that order, then SHA256SUMS and SEAL."""
+    path = os.path.join(folder, sid)
+    sfd, _ = _open_at(fdfd, sid, path, folder=True)
+    try:
+        fd, info = _open_at(sfd, "SHA256SUMS", os.path.join(path, "SHA256SUMS"))
+        try:
+            sums = _read_upto(fd, _SMALL_MAX + 1)
+        finally:
+            os.close(fd)
+        if len(sums) > _SMALL_MAX:
+            raise Failure("session %s: its SHA256SUMS is larger than %d bytes" % (sid, _SMALL_MAX))
+        for line in _lines(sums):
+            match = _SUM_LINE.fullmatch(line)
+            entry = match.group(2).decode("utf-8", "surrogateescape") if match else None
+            if entry not in SEAL_FILES:
+                raise Failure("session %s: its SHA256SUMS holds a line that names no log" % sid)
+            entry_path = os.path.join(path, entry)
+            fd, entry_info = _open_at(sfd, entry, entry_path)
+            try:
+                with os.fdopen(fd, "rb", closefd=False) as source:
+                    tar.addfile(_member_info("%s/%s/%s" % (name, sid, entry), entry_info,
+                                             entry_info.st_size), source)
+            except OSError as error:
+                raise Failure("cannot read %s: %s" % (_shown(entry_path), error.strerror
+                                                      or "it changed while archive read it"))
+            finally:
+                os.close(fd)
+        tar.addfile(_member_info("%s/%s/SHA256SUMS" % (name, sid), info, len(sums)),
+                    io.BytesIO(sums))
+        _add_small(tar, sfd, "SEAL", os.path.join(path, "SEAL"), "%s/%s/SEAL" % (name, sid),
+                   _SMALL_MAX)
+    finally:
+        os.close(sfd)
+
+
+def _write_tar(sink, fdfd, folder, name, ids):
+    """Write the archive of the sessions IDS of the folder FDFD, at FOLDER, under NAME to SINK,
+    as one gzip stream, and return the bytes of the MANIFEST it holds."""
+    gz = gzip.GzipFile(filename="", mode="wb", compresslevel=6, fileobj=sink, mtime=0)
+    try:
+        tar = tarfile.open(fileobj=gz, mode="w", format=tarfile.PAX_FORMAT)
+        try:
+            manifest = _add_small(tar, fdfd, "MANIFEST", os.path.join(folder, "MANIFEST"),
+                                  name + "/MANIFEST", _MANIFEST_MAX)
+            for sid in ids:
+                _add_session(tar, fdfd, folder, name, sid)
+        finally:
+            tar.close()
+    finally:
+        gz.close()
+    return manifest
+
+
+def _create_temp(dfd, base, made):
+    """Create a new temp file for the file BASE in the folder DFD, mode 0600, add its name to
+    MADE and return the name and an fd that writes it. The signals of _STOP_SIGNALS wait while it
+    is created, so that none comes between its creation and its name in MADE."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC | _O_BINARY
+    for _ in range(100):
+        part = ".%s.part.%s" % (base, "".join(secrets.choice(_TOKEN) for _ in range(6)))
+        signal.pthread_sigmask(signal.SIG_BLOCK, _STOP_SIGNALS)
+        try:
+            fd = os.open(part, flags, 0o600, dir_fd=dfd)
+            made.append(part)
+        except FileExistsError:
+            continue
+        finally:
+            # A signal that came meanwhile raises Stop here, once the name is in MADE.
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, _STOP_SIGNALS)
+        return part, fd
+    raise Failure("cannot create a temp file for %s" % base)
+
+
+def _finish_part(fd, fds):
+    """Sync the temp file FD to the disk, set its mode to 0400 and close it, taking it out of
+    FDS."""
+    os.fsync(fd)
+    os.fchmod(fd, 0o400)
+    fds.remove(fd)
+    os.close(fd)
+
+
+def _link(dfd, part, base, path, made):
+    """Give the file PART of the folder DFD its name BASE, at PATH, by a link, which never
+    replaces a file, and add BASE to MADE."""
+    try:
+        os.link(part, base, src_dir_fd=dfd, dst_dir_fd=dfd)
+    except FileExistsError:
+        raise Failure("%s exists already; archive never replaces a file" % _shown(path))
+    made.append(base)
+
+
+def _check_written(dfd, part, out, name, ids, manifest, digest):
+    """Check the archive just written to the file PART of the folder DFD, for OUT: whole, every
+    session of IDS ok and no other, named NAME, with the MANIFEST bytes MANIFEST and the SHA-256
+    DIGEST. Raises Failure, after the reasons, when it is not."""
+    shown = _shown(out)
+    fd = os.open(part, os.O_RDONLY | _O_NOFOLLOW | _O_CLOEXEC, dir_fd=dfd)
+    try:
+        result = check_archive(fd, shown)
+    finally:
+        os.close(fd)
+    if (result.ok() and result.name == name and result.manifest == manifest
+            and result.digest == digest and sorted(result.sessions) == sorted(ids)):
+        return
+    report_check(result, os.path.basename(out))
+    raise Failure("the archive written for %s fails its check, so archive keeps nothing; a log"
+                  " may have changed meanwhile: tlogger verify --all names it" % shown)
+
+
+def archive_write(name, out, folder, ids):
+    """Write the archive OUT of the sessions IDS of FOLDER, under NAME, and OUT.sha256, both
+    mode 0400, and return the archive's SHA-256.
+
+    The folder of OUT must be a real folder of this user's with mode 0700. Each file is written
+    to a new temp name there, synced and set to 0400; the archive is read back through
+    check_archive before it gets its name by a link, which never replaces a file, and the temp
+    names are removed. On any failure or signal, every name this run made goes again. The logs
+    are only read, never through a symlink, and must be regular files with one link.
+    """
+    folder_of_out, base = os.path.split(out)
+    side = base + ".sha256"
+    adfd = _open_folder(folder_of_out or ".", private=True)
+    fds = [adfd]
+    made = []
+    try:
+        fdfd = _open_folder(folder)
+        fds.append(fdfd)
+        part, fd = _create_temp(adfd, base, made)
+        fds.append(fd)
+        sink = _HashingWriter(fd)
+        manifest = _write_tar(sink, fdfd, folder, name, ids)
+        _finish_part(fd, fds)
+        digest = sink.digest.hexdigest()
+        _check_written(adfd, part, out, name, ids, manifest, digest)
+        side_part, fd = _create_temp(adfd, side, made)
+        fds.append(fd)
+        _write_all(fd, ("%s  %s\n" % (digest, base)).encode())
+        _finish_part(fd, fds)
+        _link(adfd, part, base, out, made)
+        _link(adfd, side_part, side, out + ".sha256", made)
+        for entry in (part, side_part):
+            os.unlink(entry, dir_fd=adfd)
+            made.remove(entry)
+        os.fsync(adfd)
+        made = []
+    except BaseException:
+        _ignore_signals()
+        for entry in reversed(made):
+            try:
+                os.unlink(entry, dir_fd=adfd)
+            except OSError:
+                pass
+        raise
+    finally:
+        for fd in fds:
+            os.close(fd)
+    return digest
+
+
+def cmd_archive_write(args):
+    """tlogger_view.py archive-write --name NAME --out FILE [--] FOLDER ID...: write the archive
+    FILE of the sessions IDS of FOLDER under NAME, and FILE.sha256, and print its SHA-256."""
+    options = {"--name": None, "--out": None}
+    positional = []
+    rest = list(args)
+    while rest:
+        arg = rest.pop(0)
+        if arg in options:
+            if not rest:
+                raise UsageError("%s needs a value" % arg)
+            options[arg] = rest.pop(0)
+        elif arg == "--":
+            positional.extend(rest)
+            rest = []
+        elif arg.startswith("-"):
+            raise UsageError("unknown option for archive-write: %s" % arg)
+        else:
+            positional.append(arg)
+    name, out = options["--name"], options["--out"]
+    if not name or name in (".", "..") or "/" in name:
+        raise UsageError("archive-write needs --name and a name without a /")
+    if not out:
+        raise UsageError("archive-write needs --out")
+    if len(positional) < 2:
+        raise UsageError("archive-write takes a folder and one session id or more")
+    folder, ids = positional[0], positional[1:]
+    for sid in ids:
+        if not _SESSION_ID.fullmatch(sid):
+            raise UsageError("'%s' is not a session id" % sid)
+    if len(set(ids)) != len(ids):
+        raise UsageError("archive-write takes each session once")
+    digest = archive_write(name, out, folder, ids)
+    _write_all(1, (digest + "\n").encode())
+    return 0
+
+
 def _where(error):
     """Return where ERROR happened: 'FILE line N' of the innermost frame of its traceback.
 
@@ -1924,6 +2893,12 @@ def main(argv):
             return cmd_replay_timing(args)
         if command == "filter":
             return cmd_filter(args)
+        if command == "archive-write":
+            return cmd_archive_write(args)
+        if command == "archive-check":
+            return cmd_archive_check(args)
+        if command == "prune-check":
+            return cmd_prune_check(args)
         raise UsageError("unknown command: %s" % command)
     except UsageError as error:
         _say(str(error))

@@ -322,6 +322,9 @@ EOF
 @test "an invalid engagement gives the red notice, a usable NOREC shell and no folder" {
     assert_auto_refused 'engagement in the config is not a valid name' TLOGGER_ENGAGEMENT=MANIFEST
     [ ! -e "$SESSIONS/MANIFEST" ]
+    # PRUNED, the record that prune keeps beside the MANIFEST, is no engagement name either.
+    assert_auto_refused 'engagement in the config is not a valid name' TLOGGER_ENGAGEMENT=PRUNED
+    [ ! -e "$SESSIONS/PRUNED" ]
 }
 
 @test "with an engagement, a new terminal records itself into the engagement folder and says so" {

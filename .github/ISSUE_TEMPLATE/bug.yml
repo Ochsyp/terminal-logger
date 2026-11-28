@@ -1,0 +1,81 @@
+name: Bug report
+description: tlogger does not do what the README says. Synthetic data only.
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue is public. Never paste log content, passwords, keys, tokens, host names,
+        addresses, client names or any other target data here, not even in part, and never
+        attach a real session or a screenshot of one. Reproduce the problem with synthetic data
+        instead: the user `kali`, a session id such as `20261112T100000Z-a1B2c3`, and addresses
+        from `192.0.2.0/24`.
+
+        To report a vulnerability, do not open an issue: use the **Security** tab, then
+        **Report a vulnerability**.
+  - type: checkboxes
+    id: synthetic
+    attributes:
+      label: Data
+      options:
+        - label: This report holds no real logs and no real data, only synthetic data.
+          required: true
+  - type: input
+    id: tlogger
+    attributes:
+      label: tlogger version
+      description: What `tlogger version` prints.
+    validations:
+      required: true
+  - type: input
+    id: kali
+    attributes:
+      label: Kali version
+      description: The `VERSION` line of `/etc/os-release`.
+    validations:
+      required: true
+  - type: input
+    id: zsh
+    attributes:
+      label: zsh version
+      description: What `zsh --version` prints.
+    validations:
+      required: true
+  - type: input
+    id: script
+    attributes:
+      label: script version
+      description: What `script --version` prints.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: tlogger doctor
+      description: >-
+        Only the word of each check, ok, warn or unknown, such as "volume ok, folder ok,
+        permissions ok, encryption warn". Leave out every path, mount point and device: the
+        rest of doctor's output names them.
+  - type: textarea
+    id: steps
+    attributes:
+      label: What you did
+      description: The commands, step by step, with synthetic data.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: >-
+        The messages tlogger printed, with every path, user and host replaced by a placeholder
+        such as <log folder>, and nothing from a log.
+    validations:
+      required: true

@@ -14,6 +14,18 @@ Each version is the GitHub release `vX.Y.Z`.
   `tlogger engagement NAME` keeps each engagement's sessions in their own folder of the log
   folder, with their own `MANIFEST`, and `tlogger engagement --none` clears it. Two new settings:
   `engagement`, and `logdir_mount`, the mount point of the volume that holds the log folder.
+- `tlogger archive` packs the sealed, unchanged sessions of one folder into a checked `.tar.gz`
+  in the log folder's `.archive`, and `tlogger archive --verify FILE` checks one. `tlogger prune`
+  removes only sessions that such an archive holds: it shows its plan, removes after
+  `--delete` and the folder's name, and records each session in the folder's `PRUNED` first.
+  `verify --all` also reads each `MANIFEST`, so a session removed outside prune shows as
+  `missing`. `PRUNED` is no longer a valid engagement name, and a folder named `PRUNED` or
+  `MANIFEST` that holds sessions is refused with a request to rename it. `verify` counts
+  unsealed sessions and sessions without a recorder file apart.
+- The README says what tlogger does not protect against, what authorized use means, where copies of
+  the logs exist, and how to keep and remove logs. `SECURITY.md` names the supported versions
+  and the scope, `CONTRIBUTING.md` has a section for outside contributors and a release audit,
+  and a bug form asks for synthetic data only.
 
 ### Changed
 

@@ -2,6 +2,14 @@
 # Tests for bin/tlogger install, uninstall, status, version and help, run as a subprocess in the
 # test's own HOME on synthetic rc files. Without a real zsh, tests/stub-bin/zsh answers what
 # bin/tlogger asks zsh. Tests that need symlinks, POSIX modes, hard links or root say so.
+#
+# The texts of phase 11 that these tests pin:
+# - The uninstall plan names the state folder in the line KEEP_STATE below, and the result in
+#   the line KEPT_STATE: uninstall deletes no log, and tlogger prune is the one command that
+#   removes sessions, only those an archive holds.
+# - help has a row for archive and one for prune, each starting '  archive' or '  prune' at the
+#   start of a line, names their options --older-than, --verify, --archive, --delete and
+#   --confirm, says 'archive and prune need python3', and its exit status names prune.
 
 bats_require_minimum_version 1.5.0
 
@@ -9,6 +17,11 @@ load helpers
 
 # The synthetic rc that a missing rc is seeded from.
 SKEL_FIXTURE="$REPO_ROOT/tests/fixtures/skel-zshrc"
+
+# The line of the uninstall plan, and of its result, that names the state folder.
+KEEP_STATE='  keep:    ~/.local/state/tlogger (logs and rc backups; uninstall deletes none of them)'
+KEPT_STATE='  kept:    ~/.local/state/tlogger (logs and rc backups; tlogger prune removes'
+KEPT_STATE+=' the sessions that an archive holds, when the engagement rules allow it)'
 
 # Run before each test by bats.
 # Gives the test its own HOME with the default zsh and XDG layout, and sets the paths it checks.
@@ -740,7 +753,7 @@ list_releases() {
     [ -f "$STATE/sessions/demo/output.raw" ]
     [ "$(count_backups)" -eq 2 ]
     [[ $output == *"tlogger is uninstalled."* ]]
-    grep -q '^  kept: *~/.local/state/tlogger ' <<< "$output"
+    grep -qxF "$KEPT_STATE" <<< "$output"
     refute_home_shown
     refute_temp_left
 }
@@ -782,6 +795,7 @@ list_releases() {
     [[ $output == "tlogger uninstall plan"* ]]
     grep -qxF "  ~/.local/share/tlogger/releases/$VERSION_TEXT/bin/tlogger" <<< "$output"
     grep -qxF -- '-# >>> tlogger >>>' <<< "$output"
+    grep -qxF "$KEEP_STATE" <<< "$output"
     [ "$(sha_of "$RC")" = "$before" ]
     [ -L "$DATA/current" ]
     [ -f "$RELEASE/bin/tlogger" ]
@@ -960,6 +974,23 @@ list_releases() {
     [[ $flat == *"or --all for every session of $folders"* ]]
     # The exit status names what doctor's 1 means.
     [[ ${flat##*Exit status:} == *doctor* ]]
+}
+
+@test "help lists archive and prune, their options, that they need python3, and prune's exits" {
+    local flat option
+    run_tlogger help
+    [ "$status" -eq 0 ]
+    grep -qE '^  archive( |$)' <<< "$output"
+    grep -qE '^  prune( |$)' <<< "$output"
+    flat=$(tr -s ' \n' '  ' <<< "$output")
+    for option in --older-than --verify --archive --delete --confirm; do
+        if [[ ! $flat =~ (^|[^a-z-])"$option"($|[^a-z-]) ]]; then
+            printf 'help does not name %s\n' "$option" >&2
+            return 1
+        fi
+    done
+    [[ $flat == *'archive and prune need python3'* ]]
+    [[ ${flat##*Exit status:} == *prune* ]]
 }
 
 @test "install keeps the current release and one older one" {

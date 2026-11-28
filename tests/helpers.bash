@@ -4,7 +4,8 @@
 # redefine. Each test gets its own home, so that neither the developer's git settings nor zsh
 # files can reach it. Also: need() for tests that only some machines can run, a zsh stub first on
 # PATH where zsh is missing, a fake sysfs, journal line checks, synthetic session logs for render,
-# show and replay, and drive, which runs every e2e driver.
+# show and replay, ended sessions and a fake /proc process for seal, verify, list, archive and
+# prune, folder snapshots, the shared refusal check, and drive, which runs every e2e driver.
 # shellcheck source=.github/standard/tests/lib.bash
 source "${BASH_SOURCE[0]%/*}/../.github/standard/tests/lib.bash"
 
@@ -383,6 +384,72 @@ session_timing() {
 session_end() {
     printf '\nScript done on 2026-11-12 10:01:00+00:00 [COMMAND_EXIT_CODE="0"]\n' >> "$SDIR/output.raw"
     printf 'H 0.000000 %s\n' 'DURATION 60.000000' 'EXIT_CODE 0' >> "$SDIR/timing"
+}
+
+# Create the ended session SESSION, as a recording that ended with exit leaves it: the logs with
+# some output, a journal of COMMANDS S and E lines (default 2), and the recorder, started and
+# exited markers, each 0600, in a folder of mode 0700. SESSION is an id, for a session in the log
+# folder LOGS; ENGAGEMENT/ID, for one in that engagement folder of LOGS; or an absolute path. The
+# recorder line names the pid REC_PID (default 4242), started at REC_START (default 1000), in the
+# boot BOOT, which the test file sets. Sets SDIR to the session folder.
+make_session() {
+    local id=$1 count=${2:-2} i dir
+    dir=$LOGS/$id
+    if [[ $id == /* ]]; then
+        dir=$id
+    fi
+    session_new "$dir"
+    session_out 'kali@kali:~$ ls\r\nfile\r\n'
+    session_in 'ls\r'
+    for (( i = 0; i < count; i++ )); do
+        printf 'S\t%s\t2026-11-12T10:00:%02dZ\t4300\t/srv/work\t-\tls\n' \
+            $(( 1794391200 + i )) "$i" >> "$SDIR/commands.tsv"
+        printf 'E\t%s\t4300\t0\n' $(( 1794391201 + i )) >> "$SDIR/commands.tsv"
+    done
+    session_end
+    printf '%s %s %s 34817\n' "${REC_PID:-4242}" "${REC_START:-1000}" "$BOOT" > "$SDIR/recorder"
+    printf '2026-11-12T10:00:00Z\n' > "$SDIR/started"
+    printf '2026-11-12T10:01:00Z\n' > "$SDIR/exited"
+    chmod 600 "$SDIR/recorder" "$SDIR/started" "$SDIR/exited"
+}
+
+# Make the fake /proc PROC hold process PID with STARTTIME as field 22 of its stat, as Linux
+# writes it.
+fake_process() {
+    mkdir -p "$PROC/$1"
+    printf '%s (script) S 1 %s %s 34816 -1 4194560 100 0 0 0 0 0 0 0 20 0 1 0 %s 9887744 1024\n' \
+        "$1" "$1" "$1" "$2" > "$PROC/$1/stat"
+}
+
+# Print the files of the session folder DIR with their modes, 'NAME MODE' per line, sorted.
+modes_of() {
+    find "$1" -mindepth 1 -printf '%f %m\n' | LC_ALL=C sort
+}
+
+# Print the MANIFEST line of the session SESSION, an id or ENGAGEMENT/ID in the log folder LOGS,
+# as seal writes it into the MANIFEST of the folder that holds it: '<sum>  <id>/SHA256SUMS'.
+manifest_entry() {
+    printf '%s  %s/SHA256SUMS\n' "$(sha_of "$LOGS/$1/SHA256SUMS")" "${1##*/}"
+}
+
+# Print every entry below the folder DIR, at any depth, with its type, mode, size, modification
+# time and symlink target, and the SHA-256 of each regular file, so that two calls compare the
+# folder byte for byte. A file or folder written and then removed shows in its folder's time.
+tree_of() {
+    (cd "$1" && find . -printf '%p %y %m %s %T@ %l\n' | LC_ALL=C sort &&
+        find . -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum --)
+}
+
+# Fail unless the last run exited STATUS, printed nothing on stdout and printed MESSAGE alone on
+# stderr, with no home path in full.
+assert_refused() {
+    # shellcheck disable=SC2154 # bats run sets status.
+    if [[ $status -ne $1 || -n $output || $stderr != "$2" ]]; then
+        printf 'expected status %s and the message\n%s\ngot status %s and:\n%s\n%s\n' "$1" "$2" \
+            "$status" "$output" "$stderr" >&2
+        return 1
+    fi
+    refute_home_shown
 }
 
 # Fail unless the first line of the transcript FILE is the header that render writes for the

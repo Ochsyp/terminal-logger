@@ -93,23 +93,61 @@ engagement folder. Leave it out to use the newest session.
   change the speed, Ctrl+C stops and Ctrl+Z suspends it until `fg`. `--speed 2` plays it twice
   as fast, and `--maxdelay 1` shortens every pause to at most a second.
 
+**Close the engagement.** Do these in this order:
+
+1. Run `tlogger engagement --none`, so that the next sessions go into the log folder again, or
+   `tlogger engagement` with the next job's name, for that job's folder.
+2. Close every terminal that records into acme, or run `tlogger stop` in each.
+3. Open a new terminal. It records into the log folder, or into the next job's folder, not into
+   acme.
+
 **Check the seals.** Each session was sealed as its recording ended, and the terminal printed
-its sum. `tlogger list` shows every session and its state. `tlogger seal --all` seals the ones
-that ended unexpectedly, and `tlogger verify --all` checks every sealed session; it must print
-`ok` for each. Keep a copy of `MANIFEST` from the engagement folder, or the sums the terminal
-printed, with the engagement's records, apart from the logs: only that copy shows a later change.
-Sessions recorded without an engagement have their lines in the `MANIFEST` of the log folder.
+its sum. `tlogger list` shows every session and its state. In the new terminal,
+`tlogger seal --all` seals the ones that ended unexpectedly, and `tlogger verify --all` checks
+every sealed session; it must print `ok` for each. Keep a copy of `MANIFEST` from the engagement
+folder, or the sums the terminal printed, with the engagement's records, apart from the logs:
+only that copy shows a later change. Sessions recorded without an engagement have their lines in
+the `MANIFEST` of the log folder.
 
 **Keep the evidence.** `output.raw` with `timing` and `input.raw`, and `commands.tsv`, are the
 evidence. The transcript is derived from them, and its first line says so. Do not edit the
-logs; once sealed, they are read-only. Copy the engagement folder as a whole, with its
-`MANIFEST`, to the engagement's encrypted archive. Do not move a session into another folder:
-`verify` then says `changed` for it, since no `MANIFEST` line there names it, until you move it
-back or run `tlogger seal <id>`, which adds the line while its seal still matches. Never put a log
-into a repository, a ticket or an unencrypted report: it holds every password typed.
+logs; once sealed, they are read-only. Do not move a session into another folder: `verify` then
+says `changed` for it, since no `MANIFEST` line there names it, until you move it back or run
+`tlogger seal <id>`, which adds the line while its seal still matches. Never put a log into a
+repository, a ticket or an unencrypted report: it holds every password typed.
 
-**Close the engagement.** `tlogger engagement --none` sends the next sessions to the log folder
-again, or `tlogger engagement` with the next job's name to that job's folder.
+Pack the engagement into one archive, from the new terminal:
+
+```bash
+tlogger archive acme
+```
+
+It writes a `.tar.gz` and its `.sha256` file into `.archive` in the log folder, checks the
+archive, and prints its SHA-256. Keep that sum with the engagement's records, apart from the
+logs. archive refuses while a session of acme is still recorded, or is not sealed or not `ok`,
+and says what to do. `tlogger archive --verify FILE` checks the archive again at any time,
+without unpacking it.
+
+The archive holds every password typed, in cleartext, and lies on the same volume as the logs.
+Copy it to the engagement's encrypted storage, or hand it over encrypted, as the contract says.
+
+**When the retention period ends.** The contract says how long you keep the logs. tlogger
+removes none by itself. When the time comes:
+
+1. Run `tlogger prune acme --archive FILE`, with the archive you made. It removes nothing yet:
+   it prints one line per session, `remove` or `keep:` with the reason, and what stays.
+2. Read the plan. prune removes all the sessions or none, and only those that the archive holds
+   unchanged. Narrow the selection with `--older-than`, or make a new archive, if it keeps one.
+3. Run the same command with `--delete` added, and type `acme` when it asks. It writes a line
+   into `PRUNED` in the engagement folder before it removes each session, and prints the same
+   lines: copy them into the record of what you destroyed.
+4. Deal with the other copies: the archives, the transcripts you exported, backups and snapshots.
+   Removing a file does not erase its data from the disk; only destroying the volume's key or the
+   drive's contents does, as the README's
+   [Keeping and removing logs](../README.md#keeping-and-removing-logs) describes.
+
+The `MANIFEST` keeps the lines of the removed sessions, and `tlogger verify --all` then prints
+`pruned` for each of them.
 
 **Remove the recorder when you are done.** `tlogger uninstall` takes the block out of your
 `.zshrc` and removes the plugin. Your logs and the backups of your `.zshrc` stay.

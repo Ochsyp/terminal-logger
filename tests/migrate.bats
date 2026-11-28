@@ -95,7 +95,7 @@ refute_markers_shown() {
 
 # Fail unless the last run exited STATUS, left the rc byte-identical to BEFORE, created no tlogger
 # folder or temp file, and kept the marker text and the home path out of its messages.
-assert_refused() {
+assert_rc_kept() {
     [ "$status" -eq "$1" ]
     [[ $stderr != *"unknown option"* ]]
     [ "$(sha_of "$RC")" = "$BEFORE" ]
@@ -202,38 +202,38 @@ undo_commands() {
     for bad in '' '   ' $'\t' $'# BEGIN\texample' $'# BEGIN example\r' $'# BEGIN\nexample' \
         $'# BEGIN \e[31m'; do
         run_tlogger install --mode manual --dry-run --remove-block "$bad" "$OLD_END"
-        assert_refused 2
+        assert_rc_kept 2
         run_tlogger install --mode manual --dry-run --remove-block "$OLD_START" "$bad"
-        assert_refused 2
+        assert_rc_kept 2
     done
 }
 
 @test "two equal markers, or one equal to tlogger's own, exit 2" {
     simple_rc
     run_tlogger install --mode manual --dry-run --remove-block "$OLD_START" "$OLD_START"
-    assert_refused 2
+    assert_rc_kept 2
     run_tlogger install --mode manual --dry-run --remove-block '# >>> tlogger >>>' "$OLD_END"
-    assert_refused 2
+    assert_rc_kept 2
     run_tlogger install --mode manual --dry-run --remove-block "$OLD_START" '# <<< tlogger <<<'
-    assert_refused 2
+    assert_rc_kept 2
     run_tlogger install --mode manual --dry-run --remove-block '# <<< tlogger <<<' "$OLD_END"
-    assert_refused 2
+    assert_rc_kept 2
     run_tlogger install --mode manual --dry-run --remove-block "$OLD_START" '# >>> tlogger >>>'
-    assert_refused 2
+    assert_rc_kept 2
 }
 
 @test "--remove-block without two values exits 2" {
     simple_rc
     run_tlogger install --mode manual --dry-run --remove-block "$OLD_START"
-    assert_refused 2
+    assert_rc_kept 2
     run_tlogger install --mode manual --dry-run --remove-block
-    assert_refused 2
+    assert_rc_kept 2
 }
 
 @test "--yes with --remove-block and no fingerprint exits 2 outside a dry run" {
     simple_rc
     run_tlogger install --mode manual --yes --remove-block "$OLD_START" "$OLD_END"
-    assert_refused 2
+    assert_rc_kept 2
     [[ $stderr == *"--block-sha256"* ]]
 }
 
@@ -244,25 +244,25 @@ undo_commands() {
         "$(printf 'a%.0s' {1..65})"; do
         run_tlogger install --mode manual --yes --remove-block "$OLD_START" "$OLD_END" \
             --block-sha256 "$bad"
-        assert_refused 2
+        assert_rc_kept 2
     done
 }
 
 @test "--block-sha256 without --remove-block exits 2" {
     simple_rc
     run_tlogger install --mode manual --yes --block-sha256 "$(printf 'a%.0s' {1..64})"
-    assert_refused 2
+    assert_rc_kept 2
 }
 
 @test "--print-only with any of the new options exits 2" {
     simple_rc
     stale_file
     run_tlogger install --print-only --remove-block "$OLD_START" "$OLD_END"
-    assert_refused 2
+    assert_rc_kept 2
     run_tlogger install --print-only --quarantine "$STALE"
-    assert_refused 2
+    assert_rc_kept 2
     run_tlogger install --print-only --block-sha256 "$(printf 'a%.0s' {1..64})"
-    assert_refused 2
+    assert_rc_kept 2
 }
 
 @test "a repeated new option exits 2" {
@@ -270,20 +270,20 @@ undo_commands() {
     stale_file
     run_tlogger install --mode manual --dry-run --remove-block "$OLD_START" "$OLD_END" \
         --remove-block "$OLD_START" "$OLD_END"
-    assert_refused 2
+    assert_rc_kept 2
     run_tlogger install --mode manual --dry-run --quarantine "$STALE" --quarantine "$STALE"
-    assert_refused 2
+    assert_rc_kept 2
     run_tlogger install --mode manual --dry-run --remove-block "$OLD_START" "$OLD_END" \
         --block-sha256 "$(printf 'a%.0s' {1..64})" --block-sha256 "$(printf 'a%.0s' {1..64})"
-    assert_refused 2
+    assert_rc_kept 2
 }
 
 @test "--quarantine without a file exits 2" {
     simple_rc
     run_tlogger install --mode manual --dry-run --quarantine
-    assert_refused 2
+    assert_rc_kept 2
     run_tlogger install --mode manual --dry-run --quarantine ''
-    assert_refused 2
+    assert_rc_kept 2
 }
 
 @test "--remove-block takes the next two arguments literally" {
@@ -318,7 +318,7 @@ undo_commands() {
     stale_file
     run_tlogger install --mode manual --dry-run --remove-block "$OLD_START" "$OLD_END" \
         --quarantine "$STALE"
-    assert_refused 3
+    assert_rc_kept 3
     [ -f "$STALE" ]
     [[ $stderr == *"not moved"* ]]
     [[ $stderr == *"check both marker lines"* ]]
@@ -330,7 +330,7 @@ undo_commands() {
     stale_file
     run_tlogger install --mode manual --yes --remove-block '# BEGIN mistyped' '# END mistyped' \
         --block-sha256 "$(printf 'a%.0s' {1..64})" --quarantine "$STALE"
-    assert_refused 3
+    assert_rc_kept 3
     [ -f "$STALE" ]
     [[ $stderr == *"check both marker lines"* ]]
     [[ $stderr != *"install --quarantine"* ]]
@@ -340,7 +340,7 @@ undo_commands() {
     printf 'alias a=1\n' > "$RC"
     BEFORE=$(sha_of "$RC")
     run_tlogger install --mode manual --dry-run --remove-block "$OLD_START" "$OLD_END"
-    assert_refused 3
+    assert_rc_kept 3
     [[ $stderr != *"--quarantine"* ]]
     [[ $stderr != *"check both marker lines"* ]]
 }
@@ -362,11 +362,11 @@ undo_commands() {
 @test "an empty --quarantine= or --block-sha256= exits 2" {
     simple_rc
     run_tlogger install --mode manual --dry-run --quarantine=
-    assert_refused 2
+    assert_rc_kept 2
     [[ $stderr == *"--quarantine needs a file"* ]]
     run_tlogger install --mode manual --dry-run --remove-block "$OLD_START" "$OLD_END" \
         --block-sha256=
-    assert_refused 2
+    assert_rc_kept 2
     [[ $stderr == *"64 hex characters"* ]]
 }
 
@@ -398,7 +398,7 @@ undo_commands() {
         stale_file "$HOME/$name"
         run_tlogger install --mode manual --yes --remove-block "$OLD_START" "$OLD_END" \
             --block-sha256 "$FP" --quarantine "$HOME/$name"
-        assert_refused 1
+        assert_rc_kept 1
         [[ $stderr == *"file name is too long"* ]]
         [ -f "$HOME/$name" ]
     done
@@ -415,7 +415,7 @@ undo_commands() {
     stale_file "$HOME/$name"
     PATH="$HOME/bin:$PATH" run_tlogger install --mode manual --dry-run \
         --remove-block "$OLD_START" "$OLD_END" --quarantine "$HOME/$name"
-    assert_refused 1
+    assert_rc_kept 1
     [[ $stderr == *"file name is too long"* ]]
 }
 
@@ -437,27 +437,27 @@ undo_commands() {
     printf 'alias a=1\n%s\n' "$OLD_START" > "$RC"
     BEFORE=$(sha_of "$RC")
     run_plan
-    assert_refused 1
+    assert_rc_kept 1
     [[ $stderr == *"line 2: unpaired"* ]]
     printf 'alias a=1\n%s\n' "$OLD_END" > "$RC"
     BEFORE=$(sha_of "$RC")
     run_plan
-    assert_refused 1
+    assert_rc_kept 1
     [[ $stderr == *"line 2: unpaired"* ]]
     printf '%s\n%s\n%s\n' "$OLD_START" "$OLD_END" "$OLD_END" > "$RC"
     BEFORE=$(sha_of "$RC")
     run_plan
-    assert_refused 1
+    assert_rc_kept 1
     [[ $stderr == *"line 3: duplicate"* ]]
     printf '%s\nalias a=1\n%s\n' "$OLD_END" "$OLD_START" > "$RC"
     BEFORE=$(sha_of "$RC")
     run_plan
-    assert_refused 1
+    assert_rc_kept 1
     [[ $stderr == *"line 1: reversed"* ]]
     printf '%s v2\nalias a=1\n%s\n' "$OLD_START" "$OLD_END" > "$RC"
     BEFORE=$(sha_of "$RC")
     run_plan
-    assert_refused 1
+    assert_rc_kept 1
     [[ $stderr == *"line 1: altered"* ]]
 }
 
@@ -556,7 +556,7 @@ undo_commands() {
     { printf 'alias a=1\n'; old_block; printf 'alias b=2\nscript -q /tmp/other.log\n'; } > "$RC"
     BEFORE=$(sha_of "$RC")
     run_plan
-    assert_refused 1
+    assert_rc_kept 1
     [[ $stderr == *"at line 6"* ]]
     { printf 'alias a=1\n'; old_block; printf 'alias b=2\n'; } > "$RC"
     run_plan
@@ -567,7 +567,7 @@ undo_commands() {
     printf 'script -q /tmp/other.log\n' > "$RC"
     BEFORE=$(sha_of "$RC")
     RCBLOCK_SKIP_FROM=1 RCBLOCK_SKIP_TO=9 run_tlogger install --mode manual --dry-run
-    assert_refused 1
+    assert_rc_kept 1
     [[ $stderr == *"at line 1"* ]]
 }
 
@@ -575,7 +575,7 @@ undo_commands() {
     { printf '%s\n' "$OLD_START"; cat "$GOLDEN_BLOCK"; printf '%s\n' "$OLD_END"; } > "$RC"
     BEFORE=$(sha_of "$RC")
     run_plan
-    assert_refused 1
+    assert_rc_kept 1
     [[ $stderr == *"lines 2-5"* ]]
 }
 
@@ -583,7 +583,7 @@ undo_commands() {
     { head -n 3 "$GOLDEN_BLOCK"; old_block; tail -n 1 "$GOLDEN_BLOCK"; } > "$RC"
     BEFORE=$(sha_of "$RC")
     run_plan
-    assert_refused 1
+    assert_rc_kept 1
 }
 
 @test "a tlogger block that crosses the start of the old block is refused" {
@@ -591,7 +591,7 @@ undo_commands() {
         printf '%s\n%s\n' "$OLD_BODY" "$OLD_END"; } > "$RC"
     BEFORE=$(sha_of "$RC")
     run_plan
-    assert_refused 1
+    assert_rc_kept 1
 }
 
 @test "a tlogger block that crosses the end of the old block is refused" {
@@ -599,7 +599,7 @@ undo_commands() {
         printf '%s\n' "$OLD_END"; tail -n 1 "$GOLDEN_BLOCK"; } > "$RC"
     BEFORE=$(sha_of "$RC")
     run_plan
-    assert_refused 1
+    assert_rc_kept 1
 }
 
 @test "a cut that would break the rc's syntax is refused" {
@@ -607,7 +607,7 @@ undo_commands() {
     printf 'if true; then\n%s\nfi\n%s\n' "$OLD_START" "$OLD_END" > "$RC"
     BEFORE=$(sha_of "$RC")
     run_plan
-    assert_refused 1
+    assert_rc_kept 1
     [[ $stderr == *"zsh -n"* ]]
 }
 
@@ -625,7 +625,7 @@ undo_commands() {
     grep -qxF -- "-$OLD_END" <<< "$output"
     grep -qxF -- '+# >>> tlogger >>>' <<< "$output"
     [[ $stderr == *"dry run: nothing was written"* ]]
-    assert_refused 0
+    assert_rc_kept 0
 }
 
 @test "a dry run works with --yes and no fingerprint, and needs no temp folder" {
@@ -634,13 +634,13 @@ undo_commands() {
         --remove-block "$OLD_START" "$OLD_END"
     [ "$status" -eq 0 ]
     [ ! -e "$HOME/no-such-tmp" ]
-    assert_refused 0
+    assert_rc_kept 0
 }
 
 @test "a dry run checks a fingerprint when one is given" {
     simple_rc
     run_plan --block-sha256 "$(printf 'a%.0s' {1..64})"
-    assert_refused 1
+    assert_rc_kept 1
 }
 
 @test "a dry run refuses when the rc changes while the diff is shown" {
@@ -694,7 +694,7 @@ undo_commands() {
     BEFORE=$(sha_of "$RC")
     run_tlogger install --mode manual --yes --remove-block "$OLD_START" "$OLD_END" \
         --block-sha256 "$FP"
-    assert_refused 1
+    assert_rc_kept 1
     [[ $stderr == *"fingerprint"* ]]
 }
 
@@ -1066,22 +1066,22 @@ undo_commands() {
     need hardlinks
     simple_rc
     run_plan --quarantine "$STALE"
-    assert_refused 1
+    assert_rc_kept 1
     [[ $stderr == *"~/.zshrc.example-backup"* ]]
     printf 'x\n' > "$HOME/target"
     ln -s target "$STALE"
     run_plan --quarantine "$STALE"
-    assert_refused 1
+    assert_rc_kept 1
     [[ $stderr == *"symlink"* ]]
     rm "$STALE"
     mkdir "$STALE"
     run_plan --quarantine "$STALE"
-    assert_refused 1
+    assert_rc_kept 1
     rmdir "$STALE"
     printf 'x\n' > "$STALE"
     ln "$STALE" "$HOME/second-name"
     run_plan --quarantine "$STALE"
-    assert_refused 1
+    assert_rc_kept 1
     [[ $stderr == *"hard link"* ]]
     [ -f "$STALE" ]
 }
@@ -1103,7 +1103,7 @@ undo_commands() {
     local bad=$HOME/bad$'\e'name
     stale_file "$bad"
     run_plan --quarantine "$bad"
-    assert_refused 1
+    assert_rc_kept 1
     [[ $stderr != *$'\e'* ]]
     [ -f "$bad" ]
 }
@@ -1278,19 +1278,19 @@ undo_commands() {
     chmod 000 "$STALE"
     run_plan --quarantine "$STALE"
     chmod 600 "$STALE"
-    assert_refused 1
+    assert_rc_kept 1
     [[ $stderr == *"cannot be read"* ]]
     mkdir "$HOME/locked"
     stale_file "$HOME/locked/example"
     chmod 500 "$HOME/locked"
     run_plan --quarantine "$HOME/locked/example"
     chmod 700 "$HOME/locked"
-    assert_refused 1
+    assert_rc_kept 1
     [[ $stderr == *"its folder"* ]]
     chmod 600 "$HOME/locked"
     run_plan --quarantine "$HOME/locked/example"
     chmod 700 "$HOME/locked"
-    assert_refused 1
+    assert_rc_kept 1
     [ -f "$HOME/locked/example" ]
 }
 
@@ -1342,7 +1342,7 @@ undo_commands() {
     simple_rc
     run_tlogger install --mode manual --dry-run --remove-block '#' BEGIN example-recorder \
         '#' END example-recorder
-    assert_refused 2
+    assert_rc_kept 2
     [[ $stderr == *"quote"* ]]
 }
 

@@ -5,7 +5,8 @@
 # The keys engagement and logdir_mount are empty by default in _tlogger_cfg. lib/config.zsh keeps
 # an invalid value of either one as it is, without a warning, so that the plugin refuses to
 # record; bin/tlogger's read_config sets CONFIG_ERROR for it, and otherwise always sets
-# CONFIG_ENGAGEMENT and CONFIG_LOGDIR_MOUNT, empty when the config lacks the key.
+# CONFIG_ENGAGEMENT and CONFIG_LOGDIR_MOUNT, empty when the config lacks the key. MANIFEST and
+# PRUNED, in that case only, and names shaped like a session id are no engagement names.
 
 bats_require_minimum_version 1.5.0
 
@@ -318,7 +319,8 @@ bash_config_error() {
     [ -z "$stderr" ]
     # Letters, digits, . _ and -, at most 64 characters, starting with a letter or a digit; the
     # case is kept, and read_config takes the same names.
-    for value in a Acme 9lives acme.2026_q4-x manifest "$(printf 'a%.0s' {1..64})"; do
+    for value in a Acme 9lives acme.2026_q4-x manifest pruned Pruned \
+        "$(printf 'a%.0s' {1..64})"; do
         printf 'engagement=%s\n' "$value" > "$CONFIG"
         load_places
         [ "$output" = "$value|" ]
@@ -331,9 +333,9 @@ bash_config_error() {
 @test "a bad engagement or logdir_mount stays for the plugin to refuse; read_config refuses it" {
     local value err
     # Names that are not engagement names: a path, a leading - or ., a space, /, a glob, the
-    # MANIFEST, a session id, 65 characters and code, which must stay text.
+    # MANIFEST, PRUNED, a session id, 65 characters and code, which must stay text.
     # shellcheck disable=SC2016
-    local -a names=('../acme' -acme .acme 'acme corp' acme/x 'ac*me' MANIFEST
+    local -a names=('../acme' -acme .acme 'acme corp' acme/x 'ac*me' MANIFEST PRUNED
         20261104T101500Z-a1B2c3 "$(printf 'a%.0s' {1..65})" '$(touch pwned-engagement)')
     # shellcheck disable=SC2016
     local -a mounts=(relative/evidence evidence $'/srv/a\tb' '$(touch pwned-mount)')
@@ -366,6 +368,9 @@ bash_config_error() {
     # A preset is kept the same way.
     TLOGGER_ENGAGEMENT=MANIFEST TLOGGER_LOGDIR_MOUNT=relative load_places
     [ "$output" = 'MANIFEST|relative' ]
+    [ -z "$stderr" ]
+    TLOGGER_ENGAGEMENT=PRUNED TLOGGER_LOGDIR_MOUNT=relative load_places
+    [ "$output" = 'PRUNED|relative' ]
     [ -z "$stderr" ]
     [ -z "$(find "$BATS_TEST_TMPDIR" -name 'pwned*')" ]
 }

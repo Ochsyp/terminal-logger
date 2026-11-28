@@ -10,6 +10,9 @@
 #   LOGDIR, over <TLOGGER_PROC>/self/mountinfo (TLOGGER_PROC defaults to /proc).
 # - _tlogger_check_dir DIR WHAT: the checks of a folder that holds sessions, WHAT being
 #   'log folder' or 'engagement folder', as in 'the engagement folder ~/x is a symlink'.
+# The handshake takes a session folder in an engagement folder only under a valid engagement
+# name: not MANIFEST, not PRUNED and not a session id; otherwise it refuses with 'its folder does
+# not lie directly under the log folder'.
 
 bats_require_minimum_version 1.5.0
 
@@ -409,6 +412,23 @@ assert_handshake_refuses() {
     assert_handshake_refuses "$idlike" 'its folder does not lie directly under the log folder'
     assert_handshake_refuses "$SESSIONS/acme/20261104T101500Z-f6G7h8" \
         "its engagement folder is a symlink, not a folder or another user's"
+}
+
+@test "the handshake refuses a session folder in a folder named MANIFEST or PRUNED" {
+    local name dir
+    # The names of the files beside the sessions of a folder are no engagement names, in that
+    # case only: pruned is one.
+    for name in MANIFEST PRUNED; do
+        dir="$SESSIONS/$name/20261104T101500Z-a1B2c3"
+        mkdir -p "$dir"
+        : > "$dir/output.raw"
+        assert_handshake_refuses "$dir" 'its folder does not lie directly under the log folder'
+    done
+    make_hs_session pruned
+    TLOGGER_HS=$HS_DIR TLOGGER_HS_TZSET=0 TLOGGER_HS_TZ='' TZ=UTC0 run_guard "$HS_TREE" "$HS_REPORT"
+    [ "$status" -eq 0 ]
+    [ "${lines[0]}" = "REC main $HS_DIR" ]
+    [ -s "$HS_DIR/recorder" ]
 }
 
 @test "the volume guard refuses a logdir_mount that nothing is mounted at" {
