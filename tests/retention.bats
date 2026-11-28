@@ -99,8 +99,10 @@
 #   does not hold exactly '<SHA-256 of FILE>  <file name of FILE>'; a non-zero byte follows the
 #   end of the tar, in the same gzip stream or in another appended to it; a member name that is
 #   absolute, holds '..', has another first part, or is <name>/<entry> for an entry other than
-#   MANIFEST; a second <name>/MANIFEST; or, when the log folder holds an engagement folder
-#   <name>, an archived MANIFEST that is not a byte prefix of that folder's MANIFEST.
+#   MANIFEST; a second <name>/MANIFEST; or an archived MANIFEST that is a byte prefix of the
+#   MANIFEST of neither folder that <name> may name: the engagement folder <name> of the log
+#   folder, when there is one, and the log folder itself, when <name> is the last part of its
+#   path, as for --none. With neither folder there, the MANIFEST is not compared.
 # - Without the .sha256 file it says so, and its verdicts stand, with this line alone on stderr:
 #     tlogger: <FILE>.sha256 is missing; compare the archive's SHA-256, <sum>, with the one
 #     archive printed
@@ -141,7 +143,11 @@
 #        tlogger: <folder>/PRUNED is a symlink, which tlogger does not follow
 #        tlogger: <folder>/PRUNED is not a regular file
 #   7. python3, exit 1: tlogger: prune needs python3
-#   8. FILE, exit 1, with archive --verify's lines: does not exist, is not a gzip file, is cut
+#   8. FILE, exit 1: a file name that holds a space or a control character, which would break
+#      the PRUNED line,
+#        tlogger: the file name of the archive <FILE> holds a space or a control character;
+#        rename it
+#      (one line), then archive --verify's lines: does not exist, is not a gzip file, is cut
 #      short;
 #   9. the whole check of archive --verify on FILE, exit 1, when any session or fault fails it:
 #        tlogger: the archive <FILE> fails its check; tlogger archive --verify <FILE> says why
@@ -175,6 +181,8 @@
 #      files its SHA256SUMS lists, SHA256SUMS, SEAL and transcript.txt;
 #   5. each entry: '<entry> is a symlink, which tlogger does not follow', '<entry> is not a
 #      regular file', '<entry> belongs to another user', '<entry> has more than one hard link'.
+#   A session that passes all five is 'finish', not 'remove', when PRUNED holds its line for
+#   FILE already: a prune cut short before its first removal left it whole.
 # - It is all or nothing. When any line is keep, exit 1, with or without --delete, and this last
 #   line on stderr:
 #     tlogger: nothing changed: prune removes all the selected sessions or none; narrow the
@@ -200,12 +208,18 @@
 # - A PRUNED line that cannot be written, as in a PRUNED of mode 0400: exit 1, nothing of that
 #   session or of those after it removed, and this last line on stderr:
 #     tlogger: cannot write <folder>/PRUNED; nothing of session <id> was removed
+#   When the line is written but sync fails, the line stays, nothing of the session is removed,
+#   and the last line is (one line):
+#     tlogger: cannot flush <folder>/PRUNED to the disk; it holds the line of session <id>, but
+#     nothing of it was removed; run the same prune again
 # - A removal that fails: exit 1, the sessions after it stay, and this last line on stderr:
 #     tlogger: cannot remove <file>; session <id> is cut short and the sessions after it stay;
 #     run the same prune again once that is fixed
 #   (one line). verify --all then gives '<id>  changed' with, on stderr, the line
 #     tlogger: <id>: a prune was cut short; run the same prune again
-#   and the same prune with the same archive finishes it.
+#   and the same prune with the same archive finishes it. verify gives that line for any session
+#   but a recording one that PRUNED records with its MANIFEST line's sum: one left whole stays
+#   ok, and one left unsealed or unknown counts as changed.
 # - <folder>/PRUNED lies beside the MANIFEST, mode 0600, made by its first line, and only grows.
 #   One line per session, its fields split by two spaces:
 #     <UTC time as YYYY-MM-DDTHH:MM:SSZ>  <id>  <SHA-256 of its SHA256SUMS>  <file name of FILE>
@@ -1529,6 +1543,87 @@ assert_kept() {
     run_tlogger verify --all
     [ "$status" -eq 0 ]
     [ "$(LC_ALL=C sort <<< "$output")" = "$A  pruned"$'\n'"$B  pruned" ]
+}
+
+@test "a prune cut short before its first removal, or by a failed sync, keeps one PRUNED line" {
+    need modes
+    need python3
+    local sum_a first want first_line
+    local -a lines
+    sealed_engagement acme "$A"
+    make_archive acme
+    make_stand_ins
+    sum_a=$(sha_of "$LOGS/acme/$A/SHA256SUMS")
+    first=$(sed -n 1p "$LOGS/acme/$A/SHA256SUMS" | cut -c67-)
+    # PRUNED cannot be flushed to the disk: its line stays, and nothing is removed.
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$STAND_INS/sync"
+    chmod 755 "$STAND_INS/sync"
+    run_watched prune acme --archive "$ARCHIVE" --delete --confirm acme
+    [ "$status" -eq 1 ]
+    want="tlogger: cannot flush $SHOWN/acme/PRUNED to the disk; it holds the line of session $A,"
+    want+=" but nothing of it was removed; run the same prune again"
+    [ "$(last_stderr_line)" = "$want" ]
+    refute_removed
+    rm -f -- "$STAND_INS/sync"
+    mapfile -t lines < "$LOGS/acme/PRUNED"
+    [ "${#lines[@]}" -eq 1 ]
+    assert_pruned_line "${lines[0]}" "$A" "$sum_a"
+    first_line=${lines[0]}
+    # Its first log cannot be removed either: the session stays whole.
+    UNLINK_FAIL=$(readlink -f -- "$LOGS/acme/$A/$first")
+    run_watched prune acme --archive "$ARCHIVE" --delete --confirm acme
+    [ "$status" -eq 1 ]
+    [ -f "$LOGS/acme/$A/$first" ]
+    # verify --all calls it ok and says that a prune was cut short.
+    run_tlogger verify --all
+    [ "$status" -eq 0 ]
+    [ "$output" = "$A  ok" ]
+    assert_stderr_line "tlogger: $A: a prune was cut short; run the same prune again"
+    # The same prune finishes it, and PRUNED keeps its one line.
+    UNLINK_FAIL=
+    run_watched prune acme --archive "$ARCHIVE" --delete --confirm acme
+    [ "$status" -eq 0 ]
+    [ "$output" = "$A  finish"$'\n'"$(stays_line "$SHOWN/acme")"$'\n'"$first_line" ]
+    mapfile -t lines < "$LOGS/acme/PRUNED"
+    [ "${#lines[@]}" -eq 1 ]
+    [ "${lines[0]}" = "$first_line" ]
+    [[ ! -e $LOGS/acme/$A && ! -L $LOGS/acme/$A ]]
+    refute_rm
+}
+
+@test "prune refuses an archive whose file name holds a space, removing nothing" {
+    need modes
+    need python3
+    local before want
+    sealed_engagement acme "$A"
+    make_archive acme
+    cp -p -- "$ARCHIVE" "$HOME/acme copy.tar.gz"
+    make_stand_ins
+    before=$(tree_of "$LOGS")
+    run_watched prune acme --archive "$HOME/acme copy.tar.gz" --delete --confirm acme
+    want='tlogger: the file name of the archive ~/acme copy.tar.gz holds a space or a control'
+    assert_refused 1 "$want character; rename it"
+    [ "$(tree_of "$LOGS")" = "$before" ]
+    refute_removed
+}
+
+@test "an archive --none passes its checks when an engagement shares the log folder's name" {
+    need modes
+    need python3
+    sealed_engagement sessions "$A"
+    make_session "$B"
+    run_tlogger seal --all
+    [ "$status" -eq 0 ]
+    make_archive --none
+    run_tlogger archive --verify "$ARCHIVE"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$B  ok" ]
+    make_stand_ins
+    run_watched prune --none --archive "$ARCHIVE"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$B  remove"$'\n'"$(stays_line "$SHOWN")" ]
+    [ "$(last_stderr_line)" = "$DRY_RUN" ]
+    refute_removed
 }
 
 @test "prune --delete needs --confirm off a terminal, and a wrong name changes nothing" {

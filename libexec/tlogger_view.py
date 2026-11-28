@@ -2342,36 +2342,49 @@ def _check_sidecar(path, shown, result):
     return None
 
 
-def _check_live(logdir, result):
-    """When the log folder LOGDIR holds the engagement folder that RESULT's <name> names, make
-    it a fault of RESULT that the archived MANIFEST is not a byte prefix of that folder's."""
-    name = result.name
-    if logdir is None or result.manifest is None or not _engagement_ok(name):
-        return
-    folder = os.path.join(logdir, name)
-    try:
-        if not stat.S_ISDIR(os.lstat(folder).st_mode):
-            return
-    except OSError:
-        return
+def _live_problem(folder, manifest):
+    """Return why the bytes MANIFEST are not a byte prefix of FOLDER/MANIFEST, read without
+    following a symlink, or None when they are; a missing one has no bytes."""
     live = os.path.join(folder, "MANIFEST")
     try:
         fd = os.open(live, _O_READ)
     except FileNotFoundError:
         data = b""
     except OSError as error:
-        result.faults.append("cannot read %s: %s" % (_shown(live), error.strerror))
-        return
+        return "cannot read %s: %s" % (_shown(live), error.strerror)
     else:
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
-                result.faults.append("%s is not a regular file" % _shown(live))
-                return
-            data = _read_upto(fd, len(result.manifest))
+                return "%s is not a regular file" % _shown(live)
+            data = _read_upto(fd, len(manifest))
         finally:
             os.close(fd)
-    if data != result.manifest:
-        result.faults.append("its MANIFEST is not the start of %s" % _shown(live))
+    if data != manifest:
+        return "its MANIFEST is not the start of %s" % _shown(live)
+    return None
+
+
+def _check_live(logdir, result):
+    """Make it a fault of RESULT that its archived MANIFEST starts neither the MANIFEST of the
+    engagement folder of LOGDIR that its <name> names, nor, when <name> is the last part of
+    LOGDIR's path, that of LOGDIR itself, as archive --none names its archives. An archive
+    whose <name> names neither folder is not checked."""
+    name = result.name
+    if logdir is None or result.manifest is None or not name:
+        return
+    folders = []
+    if _engagement_ok(name):
+        folder = os.path.join(logdir, name)
+        try:
+            if stat.S_ISDIR(os.lstat(folder).st_mode):
+                folders.append(folder)
+        except OSError:
+            pass
+    if os.path.basename(logdir.rstrip("/")) == name:
+        folders.append(logdir)
+    problems = [_live_problem(folder, result.manifest) for folder in folders]
+    if problems and None not in problems:
+        result.faults.extend(problems)
 
 
 def report_check(result, label):

@@ -873,9 +873,10 @@ volume: copy it to other encrypted storage, or hand it over encrypted.
 nothing. It prints `<session>  ok` or `<session>  changed` for each session, exits 0 when every
 one is `ok` and 1 otherwise, and names each fault on stderr. It applies the rules of
 `tlogger verify` to each session, and also checks the `.sha256` file beside FILE, the names and
-types of the members, that nothing follows the end of the archive, and, when the log folder holds
-a folder of the archive's name, that the archived `MANIFEST` is the start of that folder's
-`MANIFEST`. Without the `.sha256` file, it says so and prints the archive's SHA-256 to compare
+types of the members, that nothing follows the end of the archive, and that the archived
+`MANIFEST` is the start of the `MANIFEST` of the folder whose name the archive holds: the
+engagement folder of that name, or the log folder itself for an archive made with `--none`.
+Without the `.sha256` file, it says so and prints the archive's SHA-256 to compare
 with the one that archive printed. A FILE that is missing, not gzip or cut short exits 1.
 
 `ok` means that the archive is whole and agrees with itself. Its SHA-256, compared with the sum
@@ -986,7 +987,7 @@ said to do, and `verify --all` says `pruned` for it.
 A power loss, or a removal that fails, as on an immutable file, can stop prune inside a session.
 A failed removal makes prune exit 1 and name the file, and the sessions it had not reached stay.
 Since the `PRUNED` line comes before the first removal and `SEAL` goes last, that session
-verifies `changed`, never `unsealed`, and `verify --all` adds:
+verifies `changed`, or `ok` when its first file could not go, and `verify --all` adds:
 
 ```text
 tlogger: 20261112T100000Z-a1B2c3: a prune was cut short; run the same prune again
@@ -994,9 +995,12 @@ tlogger: 20261112T100000Z-a1B2c3: a prune was cut short; run the same prune agai
 
 Run the same prune, with the same archive, once the cause is fixed. Its plan says `finish` for
 that session, and it removes the rest, but only while every file left is a 0400 file of yours
-that the archive holds with the same sum, or `transcript.txt`. A `PRUNED` line of an attempt
-that failed stays, as the record of that attempt. Once the folder is gone, `verify --all` says
-`pruned`.
+that the archive holds with the same sum, or `transcript.txt`. The finish adds no second
+`PRUNED` line: the one written first stays. A session left with no file at all also counts as
+`changed`, with the same line. Once the folder is gone, `verify --all` says `pruned`.
+
+prune refuses an archive whose file name holds a space or a control character, as it would split
+the `PRUNED` line; archive never makes such a name.
 
 ### What cannot be undone
 

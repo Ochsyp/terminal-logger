@@ -4731,30 +4731,37 @@ gone_verdict() {
     fi
 }
 
-# Say, for the session folder DIR that verify found changed, that a prune was cut short in it,
-# when the PRUNED file beside it records its id with the sum of its MANIFEST line, or else of its
-# SHA256SUMS: prune writes that line before it removes the first file.
+# Say, for the session folder DIR that verify checked, that a prune was cut short in it, and
+# succeed, when the PRUNED file beside it records its id with the sum of its MANIFEST line, or
+# else of its SHA256SUMS: prune writes that line before it removes the first file, so the folder
+# may be whole still, or hold only some of its files, or none. Fail when PRUNED does not.
 cut_short_hint() {
-    local dir=$1 id=${1##*/} sum
+    local dir=$1 id=${1##*/} sum pruned=${1%/*}/PRUNED
+    if [[ -L $pruned || ! -f $pruned ]]; then
+        return 1
+    fi
     sum=$(manifest_line "${dir%/*}/MANIFEST" "$id")
     sum=${sum%% *}
     if [[ -z $sum && -f $dir/SHA256SUMS && ! -L $dir/SHA256SUMS ]]; then
         sum=$(sha256_of "$dir/SHA256SUMS" 2> /dev/null) || sum=
     fi
-    if [[ -n $sum && -n $(pruned_line "${dir%/*}/PRUNED" "$id  $sum  ") ]]; then
+    if [[ -n $sum && -n $(pruned_line "$pruned" "$id  $sum  ") ]]; then
         msg "$id: a prune was cut short; run the same prune again"
+        return 0
     fi
+    return 1
 }
 
 # tlogger verify [SESSION | --all]: check one session, by default the newest, or every session of
 # the log folder and its engagement folders with --all, and print '<id>  <verdict>' for each (see
 # verify_session). --all also reads the MANIFEST of each of these folders and gives each id it
 # names whose folder is gone a line of its own (see gone_verdict): by id, the session folders'
-# lines first, then those of the MANIFESTs, the log folder's first. A changed session that PRUNED
-# records is a prune cut short, and verify says so. Exits 0 when no sealed session changed or is
-# missing and every finished one is sealed; 1 when one changed or is missing; 4 when none did but
-# a finished session is unsealed or has no recorder file, naming both counts apart; 3 when there
-# is neither a session nor a MANIFEST line for a gone one. A session still recorded does not count.
+# lines first, then those of the MANIFESTs, the log folder's first. A session that PRUNED records
+# is a prune cut short, and verify says so; an unsealed or unknown one then counts as changed.
+# Exits 0 when no sealed session changed or is missing and every finished one is sealed; 1 when
+# one changed or is missing; 4 when none did but a finished session is unsealed or has no
+# recorder file, naming both counts apart; 3 when there is neither a session nor a MANIFEST line
+# for a gone one. A session still recorded does not count.
 cmd_verify() {
     local dir id kind rest sum folder now changed=0
     local -i unsealed=0 unknown=0
@@ -4796,8 +4803,11 @@ cmd_verify() {
             gone_verdict "$id" "$sum" "${rest#*$'\t'}" "$now" "$LOGDIR" "${ENGAGEMENT_DIRS[@]}"
         else
             verify_session "$rest"
-            if [[ $VERDICT == changed ]]; then
-                cut_short_hint "$rest"
+            # A prune cut short counts as changed, whatever its files say now; a whole session
+            # that PRUNED records is one too, but stays ok.
+            if [[ $VERDICT != recording ]] && cut_short_hint "$rest" &&
+                [[ $VERDICT == unsealed || $VERDICT == unknown ]]; then
+                VERDICT=changed
             fi
         fi
         case $VERDICT in
@@ -5249,10 +5259,11 @@ check_pruned_file() {
 # prints. Exits as prune-check does, with its one line, when the archive fails; writes nothing.
 prune_archive() {
     local file=$1 out kind a b c
-    # The file name goes into PRUNED lines, which a line break or a tab would split.
-    if [[ ${file##*/} == *[[:cntrl:]]* ]]; then
-        die 1 "the file name of the archive $(shown "$file") holds a control character;" \
-            "rename it"
+    # The file name goes into PRUNED lines, whose fields two spaces split, and which a line break
+    # or a tab would break; archive's own names hold neither.
+    if [[ ${file##*/} == *[[:cntrl:]]* || ${file##*/} == *' '* ]]; then
+        die 1 "the file name of the archive $(shown "$file") holds a space or a control" \
+            "character; rename it"
     fi
     out=$("$PYTHON" -I "$SRC_ROOT/libexec/tlogger_view.py" prune-check --name "$FOLDER_NAME" \
         --folder "$FOLDER" --logdir "$LOGDIR" -- "$file" < /dev/null) || exit "$?"
@@ -5336,8 +5347,10 @@ prune_finish_ok() {
 # this user's, no symlink, closed to its group and others, and open to this user; its verdict,
 # which must be ok; the archive, which must hold it with the sum of its SEAL and MANIFEST line;
 # its entries, which may only be the files its SHA256SUMS lists, SHA256SUMS, SEAL and
-# transcript.txt; and each entry (see prune_entry_reason). VERIFY_OUT holds verify's lines about
-# a session kept for its verdict. Reads and changes nothing else.
+# transcript.txt; and each entry (see prune_entry_reason). A session that passes is finish, not
+# remove, when PRUNED holds its line for this archive already: a prune cut short before its first
+# removal. VERIFY_OUT holds verify's lines about a session kept for its verdict. Reads and
+# changes nothing else.
 prune_session() {
     local dir=$1 id=${1##*/} mode out verdict sealed mline e name a ok
     local -a allowed
@@ -5423,12 +5436,21 @@ prune_session() {
             return 0
         fi
     done < <(dir_entries "$dir")
+    # A prune with this archive that was cut short before its first removal left the session
+    # whole: finish it, so that PRUNED keeps one line for it.
+    FINISH_LINE=$(pruned_line "$PRUNED_FILE" \
+        "$id  ${ARCH_SESSION[$id]}  $ARCH_NAME  $ARCH_SUM  tlogger ")
+    if [[ -n $FINISH_LINE ]]; then
+        ACTION=finish
+        return 0
+    fi
     ACTION=remove
 }
 
 # Append LINE to PRUNED_FILE under flock, creating it with mode 0600 (the umask of main), after a
-# newline when the file does not end with one, and flush it to the disk. Fails, and appends
-# nothing, when PRUNED_FILE is a symlink or not a regular file, or cannot be written.
+# newline when the file does not end with one, and flush it to the disk. Returns 1, having
+# appended nothing, when PRUNED_FILE is a symlink or not a regular file, or cannot be written;
+# 2 when the line is appended but cannot be flushed to the disk.
 prune_record() {
     local line=$1 rc=0
     if [[ -L $PRUNED_FILE || ( -e $PRUNED_FILE && ! -f $PRUNED_FILE ) ]]; then
@@ -5447,7 +5469,7 @@ prune_record() {
     if (( rc != 0 )); then
         return 1
     fi
-    sync -- "$PRUNED_FILE" 2> /dev/null
+    sync -- "$PRUNED_FILE" 2> /dev/null || return 2
 }
 
 # Remove the session folder DIR of FOLDER, which the plan marked WANT, remove or finish. Checks
@@ -5467,9 +5489,13 @@ prune_one() {
     if [[ $want == remove ]]; then
         stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ) || die 1 "cannot read the clock"
         line="$stamp  $id  ${ARCH_SESSION[$id]}  $ARCH_NAME  $ARCH_SUM  tlogger $VERSION_STR"
-        if ! prune_record "$line"; then
-            die 1 "cannot write $(shown "$PRUNED_FILE"); nothing of session $id was removed"
-        fi
+        prune_record "$line" || case $? in
+            2)
+                die 1 "cannot flush $(shown "$PRUNED_FILE") to the disk; it holds the line of" \
+                    "session $id, but nothing of it was removed; run the same prune again"
+                ;;
+            *) die 1 "cannot write $(shown "$PRUNED_FILE"); nothing of session $id was removed" ;;
+        esac
     else
         line=$FINISH_LINE
     fi

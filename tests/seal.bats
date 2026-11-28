@@ -625,6 +625,30 @@ assert_missing() {
     [[ ${lines[1]} == "$b "* ]]
 }
 
+@test "verify names a prune cut short, whole or emptied, and counts the emptied one changed" {
+    local b=20261112T110000Z-bbbbbb c=20261112T120000Z-cccccc f
+    make_session "$b"
+    make_session "$c"
+    run_tlogger seal --all
+    [ "$status" -eq 0 ]
+    # Both are in PRUNED: c as a prune cut short before its first removal left it, b as one cut
+    # short before its folder went, with no file left.
+    record_pruned "$LOGS" "$b" "$(sha_of "$LOGS/$b/SHA256SUMS")"
+    record_pruned "$LOGS" "$c" "$(sha_of "$LOGS/$c/SHA256SUMS")"
+    for f in "$LOGS/$b"/*; do
+        rm -f -- "$f"
+    done
+    run_tlogger verify --all
+    [ "$status" -eq 1 ]
+    [ "${#lines[@]}" -eq 2 ]
+    [[ ${lines[0]} == "$b  "* && ${lines[0]} != "$b  ok" ]]
+    [ "${lines[1]}" = "$c  ok" ]
+    grep -Fxq "tlogger: $b: a prune was cut short; run the same prune again" <<< "$stderr"
+    grep -Fxq "tlogger: $c: a prune was cut short; run the same prune again" <<< "$stderr"
+    # Neither count names b: it is no session for seal --all.
+    [[ $stderr != *'not sealed'* && $stderr != *'no recorder file'* ]]
+}
+
 @test "a session deleted by hand is missing, exits 1, and its message gives the PRUNED line" {
     local a=20261112T100000Z-aaaaaa b=20261112T110000Z-bbbbbb c=20261112T120000Z-cccccc
     local sum_a sum_c
