@@ -96,6 +96,9 @@
 #   either is gone, as discard then no longer finds the session:
 #     tlogger: cannot remove <file>; session <id> is discarded only in part, and without its
 #     logs discard no longer finds it; remove what is left of <dir> by hand once that is fixed
+#   and when rmdir fails, every file being gone:
+#     tlogger: cannot remove <dir>; its files are gone, and discard no longer finds it; remove
+#     the empty folder by hand once that is fixed
 #   (each one line).
 # - Done: exit 0, stdout the 6 lines then the PRUNED line, and this line alone on stderr:
 #     tlogger: discarded session <id>; <parent>/PRUNED records it. Its data is gone from this
@@ -768,6 +771,22 @@ assert_discard_refused() {
     [ -f "$SDIR/output.raw" ]
     [ -f "$SDIR/recorder" ]
     [[ ! -e $SDIR/timing ]]
+    refute_rm
+}
+
+@test "an rmdir that fails, once every file is gone, says to remove the empty folder by hand" {
+    need modes
+    local want
+    make_session "$A"
+    make_stand_ins
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$STAND_INS/rmdir"
+    run_watched discard "$A" --confirm "$A"
+    [ "$status" -eq 1 ]
+    want="tlogger: cannot remove $SHOWN/$A; its files are gone, and discard no longer finds it;"
+    [ "$(last_stderr_line)" = "$want remove the empty folder by hand once that is fixed" ]
+    [ -d "$SDIR" ]
+    [ -z "$(ls -A "$SDIR")" ]
+    [ "$(grep -c discarded "$LOGS/PRUNED")" -eq 1 ]
     refute_rm
 }
 

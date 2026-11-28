@@ -422,7 +422,7 @@ archive and prune need python3, not python3-pyte.
                        archive of that folder, holds with the same sums. --delete removes them
                        once you type the folder's name, or give it as --confirm NAME.
 
-discard takes one SESSION as render does, never the newest by default.
+discard needs one SESSION, an id or a path as render takes it, never the newest by default.
   discard SESSION [--confirm ID]
                        Show the session, which must be unsealed or without a recorder file,
                        and remove it once you type its id, or give it as --confirm ID. It
@@ -5798,17 +5798,6 @@ discard_show() {
         start "$start" length "$(list_duration "$dir")" commands "$count"
 }
 
-# tlogger discard SESSION [--confirm ID]: remove one session that cannot be sealed, unsealed or
-# without a recorder file, named by its id or by a path to its folder (see resolve_session),
-# never the newest by default. It refuses what discard_check refuses, shows the session (see
-# discard_show) and goes on only once you type its id, or give it as --confirm ID. Then, with
-# HUP, INT, QUIT and TERM ignored, it checks again, appends '<UTC time>  <id>  -  -  -  discarded
-# <state> by tlogger <version>' to the PRUNED beside it, synced (see prune_record), prints that
-# line, and removes each file by its own name with unlink, in the order of DISCARD_ORDER, and
-# the folder with rmdir. It never runs rm, chmod or a
-# glob to remove, and never touches the MANIFEST, other sessions, .archive or an archive. Exits 0
-# when done, 1 for a refusal, a failure or a wrong id, 2 for a usage error or a missing --confirm
-# off a terminal, 3 without a log folder.
 # Exit 1 for the file F of the session folder DIR, whose id is ID, that discard could not
 # remove: run discard again while the folder still holds output.raw and timing, as a session
 # folder does, or else remove the rest by hand, since discard no longer finds it.
@@ -5823,6 +5812,17 @@ discard_cut() {
         "that is fixed"
 }
 
+# tlogger discard SESSION [--confirm ID]: remove one session that cannot be sealed, unsealed or
+# without a recorder file, named by its id or by a path to its folder (see resolve_session),
+# never the newest by default. It refuses what discard_check refuses, shows the session (see
+# discard_show) and goes on only once you type its id, or give it as --confirm ID. Then, with
+# HUP, INT, QUIT and TERM ignored, it checks again, appends '<UTC time>  <id>  -  -  -  discarded
+# <state> by tlogger <version>' to the PRUNED beside it, synced (see prune_record), prints that
+# line, and removes each file by its own name with unlink, in the order of DISCARD_ORDER, and
+# the folder with rmdir. It never runs rm, chmod or a glob to remove, and never touches the
+# MANIFEST, other sessions, .archive or an archive. Exits 0 when done, 1 for a refusal, a failure
+# or a wrong id, 2 for a usage error or a missing --confirm off a terminal, 3 without a log
+# folder.
 cmd_discard() {
     local session='' confirm='' answer dir id stamp line f
     local -i count=0 confirm_set=0
@@ -5896,9 +5896,10 @@ cmd_discard() {
             unlink -- "$f" 2> /dev/null || discard_cut "$f" "$dir" "$id"
         fi
     done
+    # Every file is gone by now, so discard no longer finds the folder as a session.
     rmdir -- "$dir" 2> /dev/null ||
-        die 1 "cannot remove $(shown "$dir"); session $id is discarded only in part; run discard" \
-            "again once that is fixed"
+        die 1 "cannot remove $(shown "$dir"); its files are gone, and discard no longer finds it;" \
+            "remove the empty folder by hand once that is fixed"
     set_signal_traps
     trap - QUIT
     msg "discarded session $id; $(shown "$PRUNED_FILE") records it. Its data is gone from this" \
