@@ -62,10 +62,13 @@
 #
 # seal takes an exclusive flock on each session folder it works on, through a read-only fd on
 # the folder itself, for its whole run on it: the lock that discard takes, so that the two never
-# work on one session at once. When it cannot have the lock within TLOGGER_LOCK_WAIT seconds,
-# for tests only (default 10), it refuses that session, which stays as it was, with this line:
+# work on one session at once. When another holds the lock for TLOGGER_LOCK_WAIT seconds, for
+# tests only (default 10), as flock -E 75 reports it, it refuses that session, which stays as it
+# was, with this line:
 #   tlogger: another tlogger command works on session <id>; try again
-# hold_lock (helpers.bash) holds the lock from the test.
+# hold_lock (helpers.bash) holds the lock from the test. A lock that cannot be taken at all,
+# flock missing or failing at once with any other status, as on NFS, is not waited for: seal
+# goes on without it. One test puts a flock first on PATH that fails at once.
 
 bats_require_minimum_version 1.5.0
 
@@ -257,6 +260,29 @@ assert_missing() {
     run_tlogger seal "$id"
     [ "$status" -eq 0 ]
     [ -f "$LOGS/$id/SEAL" ]
+}
+
+@test "seal goes on without the lock when flock fails at once, as on NFS" {
+    local id=20261112T100000Z-a1B2c3 dir
+    make_session "$id"
+    # A flock first on PATH that logs its arguments and fails at once, as flock on a read-only
+    # fd fails with EBADF on NFS.
+    dir="$BATS_TEST_TMPDIR/stand-ins"
+    mkdir -p "$dir"
+    cat > "$dir/flock" << 'STAND_IN'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${0%/*}/flock-calls"
+exit 1
+STAND_IN
+    chmod 755 "$dir/flock"
+    require_test_home
+    run --separate-stderr env PATH="$dir:$PATH" bash "$TLOGGER" seal "$id" < /dev/null
+    [ "$status" -eq 0 ]
+    [ "$stderr" = "$(sealed_notice "$id")" ]
+    [ -f "$LOGS/$id/SEAL" ]
+    [ "$(cat "$LOGS/MANIFEST")" = "$(manifest_entry "$id")" ]
+    # seal asked for the lock on its fd with -E 75, waiting 10 seconds.
+    grep -Eqx -- '-x -w 10 -E 75 [0-9]+' "$dir/flock-calls"
 }
 
 @test "seal counts a recorder as gone when its pid runs another process or the machine rebooted" {

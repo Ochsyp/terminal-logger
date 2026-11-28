@@ -1066,8 +1066,11 @@ tlogger discard 20261112T100000Z-a1B2c3
 SESSION is required: a session id, which names a folder in the log folder or in one of its
 engagement folders, as for `seal` and `verify`, or a path to a session folder, which holds a `/`.
 discard never takes the newest session by default, and takes one session at a time. A path to a
-session in the log folder or in a folder of it, compared by their real paths with symlinks
-resolved, gets every check of a session named by its id below.
+session in the log folder or in a folder of it gets every check of a session named by its id
+below. The folders are compared by device and inode, so a path through a symlink, a second mount
+or a bind mount of the log folder counts too. For that, discard by path must know where the log
+folder lies: it reads the config, and needs zsh and `HOME`, as the other commands do, and it
+refuses with exit 1 when the config has an error.
 
 It refuses, exits 1 and changes nothing when:
 
@@ -1077,10 +1080,12 @@ It refuses, exits 1 and changes nothing when:
   remove sealed sessions;
 - one of its logs has mode 400, as seal leaves them, so it may be a sealed session whose seal is
   gone;
-- its recorder still runs: it verifies `recording`, or a `script` process writes it, recorder
-  file or not: its command line names the session's `output.raw`, or it holds `output.raw`,
-  `timing` or `input.raw` open. Only a process named `script` counts, so a `tlogger replay` or a
-  `less` of the session does not;
+- its recorder still runs: it verifies `recording`, or a process writes it, recorder file or
+  not. A recording is found by the files a process holds open for writing: any process, whatever
+  its name, that holds the session's `output.raw`, `timing` or `input.raw` open for writing
+  counts, so a recorder under another name does too, while a `tlogger replay` or a `less` of the
+  session, which only read, does not. A process named `script` whose command line names the
+  session's `output.raw` counts as well;
 - it has no recorder file, and its folder or a file in it changed in the last 10 minutes, since a
   terminal that writes no recorder file may still record into it. A change counts by the file's
   change time too, which `touch` cannot set back;
@@ -1117,12 +1122,14 @@ question, and outside a terminal discard needs it, or exits 2. Any other id exit
 Then it holds off HUP, INT, PIPE, QUIT and TERM, goes into the session's folder and takes a lock
 on it. `seal` takes the same lock for its whole run on a session, so the two never work on one
 session at once: a seal that runs first makes discard find the session sealed, and one that
-comes later waits until discard is done. When the lock cannot be had within 10 seconds, discard
-exits 1 and removes nothing, and seal refuses that session with `another tlogger command works
-on session <id>; try again`. discard checks the session again, and when its folder is no longer
-the one it showed, as when it was moved or replaced, it exits 1 with `its folder changed while
-discard checked it` and removes nothing. It appends a line to `PRUNED` in the folder that holds
-the session, with mode 0600 when it creates the file, flushes it to the disk and prints it:
+comes later waits until discard is done. When another command holds the lock for 10 seconds,
+discard exits 1 and removes nothing, and seal refuses that session with `another tlogger command
+works on session <id>; try again`. A lock that cannot be taken at all, as on some network file
+systems, is not waited for: seal and discard go on without it, as they do without `flock`.
+discard checks the session again, and when its folder is no longer the one it showed, as when it
+was moved or replaced, it exits 1 with `its folder changed while discard checked it` and removes
+nothing. It appends a line to `PRUNED` in the folder that holds the session, with mode 0600 when
+it creates the file, flushes it to the disk and prints it:
 
 ```text
 2026-11-28T10:00:00Z  20261112T100000Z-a1B2c3  -  -  -  discarded unsealed by tlogger X.Y.Z

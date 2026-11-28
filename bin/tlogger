@@ -4276,8 +4276,11 @@ sha256_of() {
 # so that seal and discard never work on one session at once. LOCK_FD holds it until
 # unlock_session closes it; the exit of tlogger closes it too. It waits TLOGGER_LOCK_WAIT
 # seconds, for tests only, else 10. Returns 1, holding nothing, when DIR cannot be opened, and 2
-# when the lock cannot be had in that time. Without flock on PATH (status 127) it holds the fd
-# but no lock, as manifest_add and prune_record go on without one.
+# only when another holds the lock all that time: flock's -E 75 sets that status apart. A lock
+# that cannot be taken at all is not "busy": without flock on PATH (status 127), or when flock
+# fails at once with any other status, as on NFS, where flock on a read-only fd fails with EBADF,
+# it closes the fd and goes on without a lock, as manifest_add and prune_record do; LOCK_FD is
+# then empty.
 lock_session() {
     # Byte ranges, so that no locale widens [0-9].
     local LC_ALL=C wait=10 rc=0
@@ -4289,10 +4292,13 @@ lock_session() {
         LOCK_FD=
         return 1
     fi
-    flock -x -w "$wait" "$LOCK_FD" 2> /dev/null || rc=$?
-    if (( rc != 0 && rc != 127 )); then
+    flock -x -w "$wait" -E 75 "$LOCK_FD" 2> /dev/null || rc=$?
+    if (( rc == 75 )); then
         unlock_session
         return 2
+    fi
+    if (( rc != 0 )); then
+        unlock_session
     fi
 }
 
@@ -4308,7 +4314,8 @@ unlock_session() {
 # whole run, so that a discard of the same session ends before it or waits until it is done. A
 # lock not had in time refuses the session with WHY 'another tlogger command works on session
 # <id>; try again'; a folder that cannot be opened goes on without a lock, to the refusals of
-# seal_run. Sets what seal_run sets, and returns as it does.
+# seal_run, and so does a lock that cannot be taken at all (see lock_session). Sets what seal_run
+# sets, and returns as it does.
 seal_session() {
     local rc=0
     SEAL_RESULT=refused SEAL_SUM='' WHY='' LIVE=''
@@ -5754,19 +5761,26 @@ discard_manifest() {
     fi
 }
 
-# Exit 1 when a script process under TLOGGER_PROC (default /proc) writes the logs of the session
-# folder DIR, whose id is ID. A process counts only when its name in <pid>/stat, between the
-# first '(' and the last ')', is exactly script, as the plugin's handshake reads it, so that a
-# scriptreplay of the session or a less of its output.raw does not. Such a process writes them
-# when an argument of its cmdline is DIR/output.raw as written, as the handshake looks for it, or
-# another path to output.raw that names the same file, by device and inode, as a session named by
-# a path spelled otherwise has; or when an entry of its fd/ resolves, by device and inode, to
-# output.raw, timing or input.raw, as for a script started with a relative path or a session
-# folder moved by hand while it records. Only real folders <pid> with real files stat and cmdline
-# count; what cannot be read is skipped, as the fd/ of another user's process is.
+# Exit 1 when a process under TLOGGER_PROC (default /proc) writes the logs of the session folder
+# DIR, whose id is ID, whatever its name, so that a recorder binary under another name counts,
+# while a scriptreplay of the session or a less of its output.raw, which only read, do not. A
+# process writes them when one of its fds holds DIR's output.raw, timing or input.raw open for
+# writing: one find over every <pid>/fd/ picks the entries whose link ends in /output.raw,
+# /timing or /input.raw, by -lname, which reads the link and stats nothing, so that an fd on a
+# hung mount elsewhere cannot block it; such an entry counts when it resolves, by device and
+# inode, to one of those three files of DIR, and <pid>/fdinfo/<fd> has a line 'flags:' whose
+# octal value has O_WRONLY or O_RDWR in its low two bits. A process named exactly script in
+# <pid>/stat, between the first '(' and the last ')', as the plugin's handshake reads it, also
+# writes them when an argument of its cmdline is DIR/output.raw as written, as the handshake
+# looks for it, or another path ending in /output.raw to the same file, by device and inode, as
+# a session named by a path spelled otherwise has. Only real folders <pid>, fd and fdinfo with
+# real files stat, cmdline and fdinfo count; what cannot be read is skipped, as the fd/ of
+# another user's process is.
 discard_writer() {
-    local dir=$1 id=$2 want=$1/output.raw p line comm a got key name
-    local -a args fds held keys=()
+    # Byte ranges, so that no locale widens [0-9] or [0-7].
+    local LC_ALL=C dir=$1 id=$2 want=$1/output.raw p line comm a got key name hit fd info
+    local flags match
+    local -a args keys=() fdirs=() hits=() held=()
     key=$(stat -c %d:%i -- "$want" 2> /dev/null) || key=
     for name in output.raw timing input.raw; do
         got=$(stat -c %d:%i -- "$dir/$name" 2> /dev/null) || got=
@@ -5775,8 +5789,13 @@ discard_writer() {
         fi
     done
     for p in "${TLOGGER_PROC:-/proc}"/[0-9]*; do
-        if [[ ! ${p##*/} =~ ^[0-9]+$ || -L $p || ! -d $p || -L $p/stat || ! -f $p/stat ||
-            ! -r $p/stat ]]; then
+        if [[ ! ${p##*/} =~ ^[0-9]+$ || -L $p || ! -d $p ]]; then
+            continue
+        fi
+        if [[ ! -L $p/fd && -d $p/fd ]]; then
+            fdirs+=("$p/fd")
+        fi
+        if [[ -L $p/stat || ! -f $p/stat || ! -r $p/stat ]]; then
             continue
         fi
         # read, not $(< ), so that no subshell runs for each process.
@@ -5804,26 +5823,46 @@ discard_writer() {
                     "output.raw; discard refuses it"
             fi
         done
-        fds=()
-        if [[ ! -L $p/fd ]]; then
-            for a in "$p"/fd/*; do
-                if [[ -e $a || -L $a ]]; then
-                    fds+=("$a")
-                fi
-            done
-        fi
-        if (( ${#fds[@]} == 0 || ${#keys[@]} == 0 )); then
+    done
+    if (( ${#fdirs[@]} == 0 || ${#keys[@]} == 0 )); then
+        return 0
+    fi
+    # The folders themselves, not a glob, so that find never gets no folder and searches '.'.
+    mapfile -t hits < <(find "${fdirs[@]}" -mindepth 1 -maxdepth 1 \( -lname '*/output.raw' \
+        -o -lname '*/timing' -o -lname '*/input.raw' \) -printf '%h/%f\n' 2> /dev/null || true)
+    if (( ${#hits[@]} == 0 )); then
+        return 0
+    fi
+    # One stat for every hit; a link that no longer resolves prints no line.
+    mapfile -t held < <(stat -L -c '%d:%i %n' -- "${hits[@]}" 2> /dev/null || true)
+    for line in "${held[@]}"; do
+        got=${line%% *} hit=${line#* }
+        match=0
+        for a in "${keys[@]}"; do
+            if [[ $got == "$a" ]]; then
+                match=1
+            fi
+        done
+        fd=${hit##*/} p=${hit%/fd/*}
+        info=$p/fdinfo/$fd
+        if [[ $match == 0 || ! $fd =~ ^[0-9]+$ || -L $p/fdinfo || -L $info || ! -f $info ||
+            ! -r $info ]]; then
             continue
         fi
-        mapfile -t held < <(stat -L -c %d:%i -- "${fds[@]}" 2> /dev/null || true)
-        for got in "${held[@]}"; do
-            for a in "${keys[@]}"; do
-                if [[ $got == "$a" ]]; then
-                    die 1 "session $id is still being recorded: a script process writes its" \
-                        "output.raw; discard refuses it"
+        flags=
+        {
+            while IFS= read -r a; do
+                if [[ $a =~ ^flags:[[:space:]]*0*([0-7]{1,21})$ ]]; then
+                    flags=${BASH_REMATCH[1]}
+                    break
                 fi
-            done
-        done
+            done < "$info"
+        } 2> /dev/null || true
+        # O_ACCMODE: 1 is O_WRONLY, 2 O_RDWR; 0, O_RDONLY, only reads.
+        if [[ -n $flags ]] && (( (8#$flags & 3) != 0 )); then
+            die 1 "session $id is still being recorded: a script process writes its" \
+                "output.raw; discard refuses it"
+        fi
     done
 }
 
@@ -6026,13 +6065,15 @@ discard_same() {
 }
 
 # Succeed when the folder that holds the session folder DIR, named by its path, is the log folder
-# or a folder in it, as an engagement folder is, by their physical paths (pwd -P), so that
-# discard gives the session the checks of one named by its id; LOGDIR is then the log folder as
-# written. The log folder is the config's logdir, else the default; one that does not exist
-# never matches. Exits 1 for an unsafe config, as resolve_logdir does, since discard could not
-# tell where the log folder lies.
+# or a folder in it, as an engagement folder is, by device and inode (stat -L of the folder and
+# of the folder above it, against the log folder's), not by path, so that a symlink, a second
+# mount or a bind mount of the log folder is caught too; discard then gives the session the
+# checks of one named by its id, and LOGDIR is the log folder as written. The log folder is the
+# config's logdir, else the default; one that does not exist never matches. Needs zsh and HOME,
+# as resolve_paths does, and exits 1 for an unsafe config, as resolve_logdir does, since discard
+# could not tell where the log folder lies.
 discard_in_logdir() {
-    local parent=${1%/*} real up upup
+    local parent=${1%/*} real out up upup
     parent=${parent:-/}
     resolve_paths
     read_config
@@ -6040,10 +6081,10 @@ discard_in_logdir() {
         die 1 "the config $(shown "$CONFIG_FILE") $CONFIG_ERROR; fix it by hand"
     fi
     LOGDIR=${CONFIG_LOGDIR:-$SESSIONS_DIR}
-    real=$(cd -P -- "$LOGDIR" 2> /dev/null && pwd -P) || return 1
-    up=$(cd -P -- "$parent" 2> /dev/null && pwd -P) || return 1
-    upup=$(cd -P -- "$up/.." 2> /dev/null && pwd -P) || return 1
-    [[ -n $real && ( $up == "$real" || $upup == "$real" ) ]]
+    real=$(stat -L -c %d:%i -- "$LOGDIR" 2> /dev/null) || return 1
+    out=$(stat -L -c %d:%i -- "$parent" "$parent/.." 2> /dev/null) || return 1
+    up=${out%%$'\n'*} upup=${out#*$'\n'}
+    [[ -n $real && $out == *$'\n'* && ( $up == "$real" || $upup == "$real" ) ]]
 }
 
 # tlogger discard SESSION [--confirm ID]: remove one session that cannot be sealed, unsealed or

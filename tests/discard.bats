@@ -8,7 +8,8 @@
 # of a session folder instead of 10, so that a test of a lock held elsewhere ends soon; a value
 # of another form is ignored. hold_lock (helpers.bash) holds that lock from the test. Stand-ins
 # first on PATH log every rm, unlink, rmdir and sync that bin/tlogger runs: rm fails, unlink
-# fails for one named file as on an immutable one, and sync fails when a test says so. One test
+# fails for one named file as on an immutable one, and sync fails when a test says so; one test
+# adds a flock that exits at once, as on a file system where the lock cannot be taken. One test
 # answers discard's question in a pseudo-terminal that zsh's zpty module drives
 # (tests/helpers/pty.zsh).
 #
@@ -38,9 +39,12 @@
 #     tlogger: the name of <folder> holds a space or a control character, which a PRUNED line
 #     cannot hold; rename it
 #   (one line). A session named by a path whose <parent>, or the folder above <parent>, is the
-#   log folder by their physical paths (pwd -P), so that <parent> is the log folder or a folder
-#   in it, gets the checks of a session named by its id below ("by id" covers it). For a path,
-#   discard reads the config for that: an unsafe config exits 1 with resolve_logdir's line
+#   log folder by device and inode (stat -L), so that <parent> is the log folder or a folder in
+#   it, reached through a symlink, a second mount or a bind mount too, gets the checks of a
+#   session named by its id below ("by id" covers it). For a path, discard must know where the
+#   log folder lies, so it reads the config as the other commands do, and needs zsh and an
+#   absolute HOME as they do (resolve_paths' refusals, exit 1); an unsafe config exits 1 with
+#   resolve_logdir's line
 #     tlogger: the config <config> <what is wrong>; fix it by hand
 #   and a log folder that does not exist matches no path.
 # - It checks, in this order, and stops at the first that fails: exit 1, nothing on stdout, the
@@ -77,14 +81,17 @@
 #      its path in the log folder.
 #   4. the verdict of verify must be unsealed or unknown:
 #        tlogger: session <id> is still being recorded; discard refuses it
-#      and, unsealed or unknown alike, no script process under TLOGGER_PROC (default /proc) may
-#      write it. A process counts only when its name in <pid>/stat, between the first '(' and
-#      the last ')', is exactly script, as the plugin's handshake reads it: a scriptreplay of the
-#      session or a less of its output.raw never does. Such a process writes it when an argument
-#      of its cmdline, split on NUL, is <folder>/output.raw, as the handshake looks for it, or
-#      another path ending in /output.raw to the same file, by device and inode; or when an
-#      entry of its fd/ resolves, by device and inode, to <folder>/output.raw, timing or
-#      input.raw, as for a script started with a relative path:
+#      and, unsealed or unknown alike, no process under TLOGGER_PROC (default /proc) may write
+#      it. Any process writes it, whatever its name, when an entry of its fd/ whose link ends in
+#      /output.raw, /timing or /input.raw resolves, by device and inode, to <folder>/output.raw,
+#      timing or input.raw, and <pid>/fdinfo/<fd> has a line 'flags:' whose octal value has a
+#      low two bits not 0 (O_WRONLY or O_RDWR): a recorder under another name, such as
+#      script-2.40, or a script started with a relative path. One that holds it open only to
+#      read (flags with low two bits 0), as a scriptreplay of the session or a less of its
+#      output.raw does, never counts. A process whose name in <pid>/stat, between the first '('
+#      and the last ')', is exactly script, as the plugin's handshake reads it, also writes it
+#      when an argument of its cmdline, split on NUL, is <folder>/output.raw, as the handshake
+#      looks for it, or another path ending in /output.raw to the same file, by device and inode:
 #        tlogger: session <id> is still being recorded: a script process writes its output.raw;
 #        discard refuses it
 #      (one line).
@@ -131,11 +138,13 @@
 #     removed
 #   (one line). It takes an exclusive flock on that folder, through a read-only fd on the folder
 #   itself, the lock that seal takes for its whole run on a session, and holds it through rmdir,
-#   so that seal and discard never work on one session at once. When the lock cannot be had
-#   within TLOGGER_LOCK_WAIT seconds (default 10): exit 1, stdout the 6 lines, nothing changed,
-#   and stderr ends with (one line):
+#   so that seal and discard never work on one session at once. When another holds the lock
+#   for TLOGGER_LOCK_WAIT seconds (default 10), as flock -E 75 reports it: exit 1, stdout the 6
+#   lines, nothing changed, and stderr ends with (one line):
 #     tlogger: another tlogger command works on session <id>; nothing of it was removed; try
 #     again
+#   A lock that cannot be taken at all, flock missing or failing at once with any other status,
+#   as on NFS, is not waited for: discard goes on without it.
 #   Then the path must still name that folder, with the "changed" line above, and it checks
 #   everything again: any change since, such as a SEAL or a stray file made while the question
 #   waits, exits 1 with the matching refusal and removes nothing; then the path once more. Then
@@ -392,6 +401,18 @@ fake_other() {
     printf '%s (%s) S 1 %s %s 34816 -1 4194560 100 0 0 0 0 0 0 0 20 0 1 0 3000 9887744 1024\n' \
         "$pid" "$name" "$pid" "$pid" > "$PROC/$pid/stat"
     printf '%s\0' "$@" > "$PROC/$pid/cmdline"
+}
+
+# Give the process PID of the fake /proc the fd FD, a symlink to TARGET, with FLAGS, octal as
+# Linux writes them, on the line 'flags:' of its fdinfo: 0100001 for O_WRONLY, 0100002 for
+# O_RDWR, 0100000 for O_RDONLY, each with O_LARGEFILE.
+fake_fd() {
+    local pid=$1 fd=$2
+    mkdir -p "$PROC/$pid/fd" "$PROC/$pid/fdinfo"
+    rm -f -- "$PROC/$pid/fd/$fd"
+    ln -s "$3" "$PROC/$pid/fd/$fd"
+    printf 'pos:\t0\nflags:\t%s\nmnt_id:\t25\nino:\t%s\n' "$4" "$(( 1000 + fd ))" \
+        > "$PROC/$pid/fdinfo/$fd"
 }
 
 # Print the refusal of the session ID without a recorder file that changed in the last 10
@@ -671,25 +692,53 @@ assert_discard_refused() {
     make_session "$A"
     make_stand_ins
     # A script started with relative paths in the session folder, as its cmdline shows; one of
-    # its fds holds a log open. timing or input.raw alone counts too, as for a session folder
-    # moved by hand while it records.
+    # its fds holds a log open for writing. timing or input.raw alone counts too, as for a
+    # session folder moved by hand while it records.
     fake_process 5150 2000
     printf '%s\0' script --quiet --flush --log-timing timing --log-in input.raw \
         --log-out output.raw > "$PROC/5150/cmdline"
-    mkdir "$PROC/5150/fd"
-    ln -s /dev/null "$PROC/5150/fd/0"
+    fake_fd 5150 0 /dev/null 0100002
     for name in output.raw timing input.raw; do
-        ln -s "$SDIR/$name" "$PROC/5150/fd/3"
+        fake_fd 5150 3 "$SDIR/$name" 0100001
         assert_discard_refused "$A" "$(writer_msg "$A")"
-        rm -f -- "$PROC/5150/fd/3"
     done
-    # The same fd in a process of another name does not count.
-    ln -s "$SDIR/output.raw" "$PROC/5150/fd/3"
+    # Open to read and write counts as well.
+    fake_fd 5150 3 "$SDIR/output.raw" 0100002
+    assert_discard_refused "$A" "$(writer_msg "$A")"
+    # The same fd open only to read, in a process of another name, does not count.
+    fake_fd 5150 3 "$SDIR/output.raw" 0100000
     fake_other 5150 less less -R output.raw
     run_watched discard "$A" --confirm "$A"
     [ "$status" -eq 0 ]
     [ "$stderr" = "$(done_msg "$A" "$SHOWN")" ]
     [[ ! -e $SDIR && ! -L $SDIR ]]
+}
+
+@test "discard refuses a session that a recorder of any name writes, not one that only reads it" {
+    need modes
+    need symlinks
+    local want
+    make_session "$A"
+    make_session "$B"
+    make_stand_ins
+    # A recorder binary under another name, its cmdline naming no path of the session: its fd
+    # holds output.raw open for writing.
+    fake_other 5152 script-2.40 /usr/local/bin/script-2.40 --log-out output.raw
+    fake_fd 5152 3 "$LOGS/$A/output.raw" 0100001
+    assert_discard_refused "$A" "$(writer_msg "$A")"
+    # The same fd open only to read, in a less: discard goes on. A recorder that writes another
+    # session's output.raw does not count either.
+    fake_other 5152 less less -R output.raw
+    fake_fd 5152 3 "$LOGS/$A/output.raw" 0100000
+    fake_other 5153 script-2.40 /usr/local/bin/script-2.40 --log-out output.raw
+    fake_fd 5153 3 "$LOGS/$B/output.raw" 0100001
+    want=$(discard_calls "$LOGS/$A")
+    run_watched discard "$A" --confirm "$A"
+    [ "$status" -eq 0 ]
+    [ "$stderr" = "$(done_msg "$A" "$SHOWN")" ]
+    [ "$(cat "$CALLS")" = "$want" ]
+    [[ ! -e $LOGS/$A && ! -L $LOGS/$A ]]
+    [ -d "$LOGS/$B" ]
 }
 
 @test "discard passes over a scriptreplay or a less of the session, which are no script process" {
@@ -732,6 +781,42 @@ assert_discard_refused() {
     want=$(discard_calls "$SDIR")
     run_watched discard "$A" --confirm "$A"
     [ "$status" -eq 0 ]
+    [ "$(cat "$CALLS")" = "$want" ]
+    [[ ! -e $SDIR && ! -L $SDIR ]]
+}
+
+@test "discard waits only for a lock another holds, and goes on when flock fails at once" {
+    need modes
+    local before want
+    make_session "$A"
+    make_stand_ins
+    # A flock that logs its arguments and exits at once with the status in flock-status: 75, as
+    # flock -E 75 reports a lock that another holds, or 1, as when the lock cannot be taken at
+    # all, as on NFS, where flock on a read-only fd fails with EBADF.
+    cat > "$STAND_INS/flock" << 'STAND_IN'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${0%/*}/flock-calls"
+exit "$(< "${0%/*}/flock-status")"
+STAND_IN
+    chmod 755 "$STAND_INS/flock"
+    printf '75\n' > "$STAND_INS/flock-status"
+    before=$(tree_of "$HOME")
+    run_watched discard "$A" --confirm "$A"
+    [ "$status" -eq 1 ]
+    [ "$output" = "$(show_lines "$A" "$SHOWN" unsealed)" ]
+    want="tlogger: another tlogger command works on session $A; nothing of it was removed;"
+    [ "$stderr" = "$want try again" ]
+    [ "$(tree_of "$HOME")" = "$before" ]
+    refute_removed
+    # discard asks for the lock on its fd with -E 75, waiting 10 seconds.
+    grep -Eqx -- '-x -w 10 -E 75 [0-9]+' "$STAND_INS/flock-calls"
+    # A lock that cannot be taken at all is not busy: discard goes on without it.
+    printf '1\n' > "$STAND_INS/flock-status"
+    : > "$CALLS"
+    want=$(discard_calls "$SDIR")
+    run_watched discard "$A" --confirm "$A"
+    [ "$status" -eq 0 ]
+    [ "$stderr" = "$(done_msg "$A" "$SHOWN")" ]
     [ "$(cat "$CALLS")" = "$want" ]
     [[ ! -e $SDIR && ! -L $SDIR ]]
 }
@@ -823,6 +908,35 @@ assert_discard_refused() {
     [ "$stderr" = 'tlogger: nothing changed' ]
     refute_removed
     [ ! -e "$LOGS/PRUNED" ]
+}
+
+@test "discard gives a path through a symlink to the log folder the checks of an id" {
+    need modes
+    need symlinks
+    local mounted='tlogger: the volume ~/vault of the log folder is not mounted'
+    make_session "$A"
+    mkdir -m 700 "$LOGS/acme"
+    make_session "acme/$B"
+    # A symlink in HOME to the log folder, and one to the folder above it.
+    ln -s "$LOGS" "$HOME/logs"
+    ln -s "$HOME/.local/state" "$HOME/state"
+    make_stand_ins
+    # The volume of logdir_mount is not mounted: a session named through either symlink is
+    # refused as one named by its id, whether <parent> is the log folder or an engagement folder.
+    write_config "logdir_mount=$HOME/vault"$'\n'
+    run_watched discard "$HOME/state/tlogger/sessions/$A" --confirm "$A"
+    assert_refused 1 "$mounted"
+    run_watched discard "$HOME/logs/acme/$B" --confirm "$B"
+    assert_refused 1 "$mounted"
+    # The MANIFEST of the log folder, which only a session named by its id reads, has a line for
+    # B, as for a session sealed there and moved by hand.
+    write_config ''
+    printf '%s  %s/SHA256SUMS\n' "$ZERO_SUM" "$B" > "$LOGS/MANIFEST"
+    run_watched discard "$HOME/logs/acme/$B" --confirm "$B"
+    assert_refused 1 "$(sealed_msg "$B")"
+    refute_removed
+    [ ! -e "$LOGS/PRUNED" ]
+    [ ! -e "$LOGS/acme/PRUNED" ]
 }
 
 @test "discard refuses a session folder whose name holds a space, which a PRUNED line cannot" {
