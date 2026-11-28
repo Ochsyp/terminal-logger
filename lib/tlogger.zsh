@@ -202,9 +202,11 @@ _tlogger_handshake() {
     local my_tty ppid start
     local -a reply args
     # An engagement name, as _tlogger_preflight checks it: letters, digits, . _ and -, at most 64
-    # characters, starting with a letter or a digit; not MANIFEST and not a session name.
+    # characters, starting with a letter or a digit; not MANIFEST, not PRUNED and not a session
+    # name.
     if [[ -n $logdir && $dir == /* && ${dir:h} != "$logdir" && ${dir:h:h} == "$logdir" &&
-        ${dir:h:t} == [A-Za-z0-9][A-Za-z0-9._-](#c0,63) && ${dir:h:t} != MANIFEST &&
+        ${dir:h:t} == [A-Za-z0-9][A-Za-z0-9._-](#c0,63) &&
+        ${dir:h:t} != MANIFEST && ${dir:h:t} != PRUNED &&
         ${dir:h:t} != [0-9](#c8)T[0-9](#c6)Z-[A-Za-z0-9](#c6) ]]; then
         eng=${dir:h}
     fi
@@ -458,10 +460,10 @@ _tlogger_preflight() {
         return 1
     fi
     # Letters, digits, . _ and -, at most 64 characters, starting with a letter or a digit; not
-    # MANIFEST and not a session name. An invalid name refuses, rather than seal the session into
-    # another folder than the one meant.
+    # MANIFEST, not PRUNED and not a session name. An invalid name refuses, rather than seal the
+    # session into another folder than the one meant.
     if [[ -n $eng && ( $eng != [A-Za-z0-9][A-Za-z0-9._-](#c0,63) || $eng == MANIFEST ||
-        $eng == [0-9](#c8)T[0-9](#c6)Z-[A-Za-z0-9](#c6) ) ]]; then
+        $eng == PRUNED || $eng == [0-9](#c8)T[0-9](#c6)Z-[A-Za-z0-9](#c6) ) ]]; then
         REPLY='engagement in the config is not a valid name'
         return 1
     fi
