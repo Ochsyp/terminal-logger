@@ -196,8 +196,10 @@ bats tests/
   `/proc` that `TLOGGER_PROC` names, so that a session counts as still recorded only when a test
   says so. It also checks the walk of `verify --all` over each `MANIFEST`: `pruned`, `moved` and
   `missing`, with sessions removed by hand and `PRUNED` lines written in prune's form, so that
-  it does not depend on prune; and the refusal of a folder named `MANIFEST` or `PRUNED` that
-  holds sessions. `tests/folder-modes.bats` checks the folder check of the session commands.
+  it does not depend on prune; the refusal of a folder named `MANIFEST` or `PRUNED` that holds
+  sessions; and the lock of a session folder that seal shares with discard, held from the test,
+  with `TLOGGER_LOCK_WAIT`, for the tests only, in place of its wait of 10 seconds.
+  `tests/folder-modes.bats` checks the folder check of the session commands.
 - `tests/doctor.bats` runs `tlogger doctor` over three trees that the tests fake: the
   `self/mountinfo` of `TLOGGER_PROC`, the block devices under `TLOGGER_SYSFS`, and
   `TLOGGER_FSTAB`, the file doctor reads instead of `/etc/fstab`, which exists for the tests

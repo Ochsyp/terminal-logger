@@ -59,6 +59,13 @@
 #   rename it to a valid engagement name
 # (one line). Such a folder without a session-named entry is passed over, as before, and a
 # regular file named PRUNED in the log folder is the record prune --none writes.
+#
+# seal takes an exclusive flock on each session folder it works on, through a read-only fd on
+# the folder itself, for its whole run on it: the lock that discard takes, so that the two never
+# work on one session at once. When it cannot have the lock within TLOGGER_LOCK_WAIT seconds,
+# for tests only (default 10), it refuses that session, which stays as it was, with this line:
+#   tlogger: another tlogger command works on session <id>; try again
+# hold_lock (helpers.bash) holds the lock from the test.
 
 bats_require_minimum_version 1.5.0
 
@@ -95,6 +102,12 @@ setup() {
     mkdir -p "$PROC/sys/kernel/random"
     printf '%s\n' "$BOOT" > "$PROC/sys/kernel/random/boot_id"
     export TLOGGER_PROC="$PROC"
+}
+
+# Run after each test by bats.
+# Ends a lock that hold_lock still holds.
+teardown() {
+    release_lock
 }
 
 # Print the notice that seal prints for the session SESSION, an id or ENGAGEMENT/ID in the log
@@ -216,6 +229,34 @@ assert_missing() {
     want="tlogger: session $id has no recorder file, so tlogger cannot tell whether it is still"
     assert_refused 1 "$want being recorded"
     [ ! -e "$LOGS/$id/SEAL" ]
+}
+
+@test "seal waits for a lock that another command holds on the folder, then refuses it" {
+    need command flock
+    local id=20261112T100000Z-a1B2c3 before start
+    make_session "$id"
+    before=$(modes_of "$LOGS/$id")
+    hold_lock "$LOGS/$id"
+    export TLOGGER_LOCK_WAIT=1
+    start=$SECONDS
+    run_tlogger seal "$id"
+    assert_refused 1 "tlogger: another tlogger command works on session $id; try again"
+    (( SECONDS - start >= 1 ))
+    # Still unsealed, every log as it was.
+    [ "$(modes_of "$LOGS/$id")" = "$before" ]
+    [ ! -e "$LOGS/$id/SEAL" ]
+    [ ! -e "$LOGS/$id/SHA256SUMS" ]
+    [ ! -e "$LOGS/MANIFEST" ]
+    # seal --all names it and leaves it.
+    run_tlogger seal --all
+    [ "$status" -eq 1 ]
+    [ "$stderr" = "tlogger: another tlogger command works on session $id; try again" ]
+    [ ! -e "$LOGS/$id/SEAL" ]
+    # Once the lock is let go, it seals.
+    release_lock
+    run_tlogger seal "$id"
+    [ "$status" -eq 0 ]
+    [ -f "$LOGS/$id/SEAL" ]
 }
 
 @test "seal counts a recorder as gone when its pid runs another process or the machine rebooted" {

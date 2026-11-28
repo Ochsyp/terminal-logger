@@ -951,12 +951,13 @@ type the folder's name: the engagement, or for `--none` the last part of the log
 `--confirm NAME` gives that answer without the question, and outside a terminal `--delete` needs
 it, or prune exits 2. Any other name exits 1, and nothing changes.
 
-Then prune works on one session at a time, oldest first, and holds off HUP, INT, QUIT and TERM
-while it does. For each session, it checks it again, appends its line to `PRUNED`, flushes it to
-the disk and prints it, then removes the files that `SHA256SUMS` lists, `transcript.txt`,
-`SHA256SUMS` and `SEAL` last, each by its own name with `unlink`, and the empty folder with
-`rmdir`. It never uses `rm -r` or a glob, and follows no symlink. When it is done, it names the
-number of sessions it removed and the `PRUNED` file that records them.
+Then prune works on one session at a time, oldest first, and holds off HUP, INT, PIPE, QUIT and
+TERM while it does, so that a pager on its output that you quit early stops nothing. For each
+session, it checks it again, appends its line to `PRUNED`, flushes it to the disk and prints it,
+then removes the files that `SHA256SUMS` lists, `transcript.txt`, `SHA256SUMS` and `SEAL` last,
+each by its own name with `unlink`, and the empty folder with `rmdir`. It never uses `rm -r` or a
+glob, and follows no symlink. When it is done, it names the number of sessions it removed and the
+`PRUNED` file that records them.
 
 prune never removes a `MANIFEST`, `PRUNED`, an engagement folder, even an empty one, the log
 folder, `.archive` or an archive, the rc backups or the quarantine.
@@ -1064,17 +1065,22 @@ tlogger discard 20261112T100000Z-a1B2c3
 
 SESSION is required: a session id, which names a folder in the log folder or in one of its
 engagement folders, as for `seal` and `verify`, or a path to a session folder, which holds a `/`.
-discard never takes the newest session by default, and takes one session at a time.
+discard never takes the newest session by default, and takes one session at a time. A path to a
+session in the log folder or in a folder of it, compared by their real paths with symlinks
+resolved, gets every check of a session named by its id below.
 
 It refuses, exits 1 and changes nothing when:
 
 - the session is sealed: its folder holds `SEAL`, `SHA256SUMS` or a temp file of either, or the
-  `MANIFEST` beside it has a line for it, or, for a session named by its id, the `MANIFEST` of
-  the log folder or of any engagement folder does. `archive` and `prune` remove sealed sessions;
+  `MANIFEST` beside it has a line for it, or, for a session in the log folder or a folder of it,
+  the `MANIFEST` of the log folder or of any engagement folder does. `archive` and `prune`
+  remove sealed sessions;
 - one of its logs has mode 400, as seal leaves them, so it may be a sealed session whose seal is
   gone;
-- its recorder still runs: it verifies `recording`, or a `script` process writes its
-  `output.raw`, recorder file or not;
+- its recorder still runs: it verifies `recording`, or a `script` process writes it, recorder
+  file or not: its command line names the session's `output.raw`, or it holds `output.raw`,
+  `timing` or `input.raw` open. Only a process named `script` counts, so a `tlogger replay` or a
+  `less` of the session does not;
 - it has no recorder file, and its folder or a file in it changed in the last 10 minutes, since a
   terminal that writes no recorder file may still record into it. A change counts by the file's
   change time too, which `touch` cannot set back;
@@ -1083,10 +1089,12 @@ It refuses, exits 1 and changes nothing when:
   `transcript.txt.part`. Dot files count;
 - a file in it is a symlink, not a regular file, another user's, or has a second hard link;
 - its folder is a symlink or another user's, its group or others may write in it, sticky bit or
-  not, or you may not read, write and search it. discard never runs `chmod`;
-- the folder that holds it lets its group or others write in it, sticky bit or not, or you may
-  not write in it; for a session named by its id, the volume that `logdir_mount` names is not
-  mounted;
+  not, or you may not read, write and search it. discard never runs `chmod`. When you follow its
+  own advice, `chmod go-w` on the folder, that counts as a change, so for a session without a
+  recorder file the next run waits 10 minutes;
+- the folder that holds it is a symlink, not a folder or another user's, lets its group or
+  others write in it, sticky bit or not, or you may not write in it; for a session in the log
+  folder or a folder of it, the volume that `logdir_mount` names is not mounted;
 - `PRUNED` beside it is a symlink, not a regular file, another user's or has a second hard link,
   or the `MANIFEST` beside it cannot be read.
 
@@ -1106,9 +1114,15 @@ On a terminal it asks you to type the session's id. `--confirm ID` gives that an
 question, and outside a terminal discard needs it, or exits 2. Any other id exits 1 with
 `tlogger: nothing changed`.
 
-Then it holds off HUP, INT, QUIT and TERM and checks the session again. It appends a line to
-`PRUNED` in the folder that holds the session, with mode 0600 when it creates the file, flushes
-it to the disk and prints it:
+Then it holds off HUP, INT, PIPE, QUIT and TERM, goes into the session's folder and takes a lock
+on it. `seal` takes the same lock for its whole run on a session, so the two never work on one
+session at once: a seal that runs first makes discard find the session sealed, and one that
+comes later waits until discard is done. When the lock cannot be had within 10 seconds, discard
+exits 1 and removes nothing, and seal refuses that session with `another tlogger command works
+on session <id>; try again`. discard checks the session again, and when its folder is no longer
+the one it showed, as when it was moved or replaced, it exits 1 with `its folder changed while
+discard checked it` and removes nothing. It appends a line to `PRUNED` in the folder that holds
+the session, with mode 0600 when it creates the file, flushes it to the disk and prints it:
 
 ```text
 2026-11-28T10:00:00Z  20261112T100000Z-a1B2c3  -  -  -  discarded unsealed by tlogger X.Y.Z
@@ -1167,8 +1181,9 @@ The logs hold everything typed and shown in a recorded terminal, passwords inclu
   recorded: not bash, not a graphical program, not another user, and not a terminal opened
   while the recording is paused or refused.
 - **Its own environment.** tlogger trusts the environment it runs in: `PATH`, the config, and
-  the variables that exist for the tests, such as `TLOGGER_PYTHON` and `TLOGGER_PROC`. Whoever
-  can set them in your shell can change what tlogger runs and reads.
+  the variables that exist for the tests, such as `TLOGGER_PYTHON`, `TLOGGER_PROC`, `TLOGGER_NOW`
+  and `TLOGGER_LOCK_WAIT`. Whoever can set them in your shell can change what tlogger runs and
+  reads.
 - **Forged stamps.** A stamp line in a transcript comes from the recorded output, which any
   program in the terminal could imitate; `commands.tsv` is the record of when each command
   started.

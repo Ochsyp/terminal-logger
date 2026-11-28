@@ -18,9 +18,11 @@
 # TLOGGER_SCRIPTREPLAY, which name the python3 and scriptreplay that render, show and replay run,
 # TLOGGER_PROC, the /proc whose boot id and processes seal's liveness check and discard read and
 # whose self/mountinfo doctor, archive, prune and discard read, TLOGGER_SYSFS, the /sys whose
-# block devices doctor follows, TLOGGER_FSTAB, the file doctor reads instead of /etc/fstab, and
+# block devices doctor follows, TLOGGER_FSTAB, the file doctor reads instead of /etc/fstab,
 # TLOGGER_NOW, the time in seconds since 1970 that discard's 10-minute rule takes instead of the
-# clock; production never sets them.
+# clock, 1 to 12 digits without a leading 0, and TLOGGER_LOCK_WAIT, the seconds, 1 to 3 digits,
+# that seal and discard wait for the lock of a session folder instead of 10; a value of another
+# form is ignored. Production never sets them.
 
 # =======================================================
 #                    GLOBAL SETTINGS
@@ -222,8 +224,13 @@ VERIFY_OUT=
 FINISH_LINE=
 PRUNED_FILE=
 
-# The state of the session that discard removes, unsealed or unknown, set by discard_check.
+# The state of the session that discard removes, unsealed or unknown, set by discard_check, and
+# the time its 10-minute rule takes for now, set by discard_now.
 DISCARD_STATE=
+DISCARD_NOW=
+
+# The fd of the session folder whose lock lock_session holds, empty while it holds none.
+LOCK_FD=
 
 # The order in which discard removes the files of a session: what a session may lack first, then
 # timing and output.raw, which make a folder a session, and the recorder file last, so that a
@@ -4265,6 +4272,57 @@ sha256_of() {
     printf '%s\n' "${sum%% *}"
 }
 
+# Take an exclusive flock on the session folder DIR through a read-only fd on the folder itself,
+# so that seal and discard never work on one session at once. LOCK_FD holds it until
+# unlock_session closes it; the exit of tlogger closes it too. It waits TLOGGER_LOCK_WAIT
+# seconds, for tests only, else 10. Returns 1, holding nothing, when DIR cannot be opened, and 2
+# when the lock cannot be had in that time. Without flock on PATH (status 127) it holds the fd
+# but no lock, as manifest_add and prune_record go on without one.
+lock_session() {
+    # Byte ranges, so that no locale widens [0-9].
+    local LC_ALL=C wait=10 rc=0
+    LOCK_FD=
+    if [[ ${TLOGGER_LOCK_WAIT-} =~ ^[0-9]{1,3}$ ]]; then
+        wait=$(( 10#$TLOGGER_LOCK_WAIT ))
+    fi
+    if ! { exec {LOCK_FD}< "$1"; } 2> /dev/null; then
+        LOCK_FD=
+        return 1
+    fi
+    flock -x -w "$wait" "$LOCK_FD" 2> /dev/null || rc=$?
+    if (( rc != 0 && rc != 127 )); then
+        unlock_session
+        return 2
+    fi
+}
+
+# Close the fd of lock_session, which ends its lock; nothing when it holds none.
+unlock_session() {
+    if [[ -n $LOCK_FD ]]; then
+        exec {LOCK_FD}<&-
+        LOCK_FD=
+    fi
+}
+
+# Seal the session folder DIR as seal_run does, under the lock of lock_session, held for the
+# whole run, so that a discard of the same session ends before it or waits until it is done. A
+# lock not had in time refuses the session with WHY 'another tlogger command works on session
+# <id>; try again'; a folder that cannot be opened goes on without a lock, to the refusals of
+# seal_run. Sets what seal_run sets, and returns as it does.
+seal_session() {
+    local rc=0
+    SEAL_RESULT=refused SEAL_SUM='' WHY='' LIVE=''
+    lock_session "$1" || rc=$?
+    if (( rc == 2 )); then
+        WHY="another tlogger command works on session ${1##*/}; try again"
+        return 1
+    fi
+    rc=0
+    seal_run "$1" || rc=$?
+    unlock_session
+    return "$rc"
+}
+
 # Seal the session folder DIR. Refuses a session whose recorder still runs or has no recorder
 # file, and one that seal_check refuses. Writes SHA256SUMS over the SEAL_FILES the session holds,
 # in their order, through a temp file and a rename; makes them and SHA256SUMS 0400; writes SEAL,
@@ -4272,8 +4330,8 @@ sha256_of() {
 # disk with sync; and appends '<sum>  <id>/SHA256SUMS' to the MANIFEST of the folder that holds
 # DIR with manifest_add. A session sealed already only gets its missing MANIFEST line, as long as
 # SHA256SUMS still has the sum SEAL names; else it is refused as a mismatch. Sets SEAL_RESULT,
-# SEAL_SUM and, on a refusal, WHY; returns 1 on a refusal or a failure.
-seal_session() {
+# SEAL_SUM and, on a refusal, WHY; returns 1 on a refusal or a failure. Only seal_session runs it.
+seal_run() {
     local dir=$1 id=${1##*/} parent=${1%/*} f tmp sum stamp manifest line
     local -a files=() paths=()
     SEAL_RESULT=refused SEAL_SUM='' WHY='' LIVE=''
@@ -5544,8 +5602,8 @@ prune_one() {
 # It prints the plan, one line per session of the selection, remove, finish or keep with a
 # reason, and what stays; without --delete it writes nothing. It is all or nothing: one kept
 # session keeps them all. With --delete and the folder's name, from --confirm or typed at the
-# question on a terminal, it works session by session, oldest first, with HUP, INT, QUIT and
-# TERM ignored (see prune_one), and writes a line in the folder's PRUNED before it removes a
+# question on a terminal, it works session by session, oldest first, with HUP, INT, PIPE, QUIT
+# and TERM ignored (see prune_one), and writes a line in the folder's PRUNED before it removes a
 # session. It never runs rm, chmod or a glob to remove, and never touches the MANIFEST, PRUNED's
 # lines, the folders above the sessions, .archive or an archive. Exits 0 when done or for a dry
 # run that --delete would carry out, 1 for a refusal, a failure or a wrong name, 2 for a usage
@@ -5665,10 +5723,13 @@ cmd_prune() {
         die 1 "nothing changed"
     fi
     for i in "${!SELECTED[@]}"; do
-        trap '' HUP INT QUIT TERM
+        # PIPE too, so that a reader of stdout that goes away, as less quit early, cannot stop
+        # bash between a PRUNED line and the removals it records.
+        trap '' HUP INT PIPE QUIT TERM
         prune_one "${SELECTED[i]}" "${actions[i]}"
         set_signal_traps
         trap - QUIT
+        trap - PIPE
     done
     word=sessions
     if (( ${#SELECTED[@]} == 1 )); then
@@ -5693,23 +5754,46 @@ discard_manifest() {
     fi
 }
 
-# Exit 1 when a process under TLOGGER_PROC (default /proc) has the argument FILE in its cmdline:
-# the output.raw that a script process writes, as the plugin's handshake looks for it. An
-# argument counts when it is FILE as written, or another path to output.raw that names the same
-# file, by device and inode, as a session named by a path spelled otherwise has. Only real files
-# named <pid>/cmdline count; one that cannot be read is skipped.
+# Exit 1 when a script process under TLOGGER_PROC (default /proc) writes the logs of the session
+# folder DIR, whose id is ID. A process counts only when its name in <pid>/stat, between the
+# first '(' and the last ')', is exactly script, as the plugin's handshake reads it, so that a
+# scriptreplay of the session or a less of its output.raw does not. Such a process writes them
+# when an argument of its cmdline is DIR/output.raw as written, as the handshake looks for it, or
+# another path to output.raw that names the same file, by device and inode, as a session named by
+# a path spelled otherwise has; or when an entry of its fd/ resolves, by device and inode, to
+# output.raw, timing or input.raw, as for a script started with a relative path or a session
+# folder moved by hand while it records. Only real folders <pid> with real files stat and cmdline
+# count; what cannot be read is skipped, as the fd/ of another user's process is.
 discard_writer() {
-    local want=$1 id=$2 f pid a key got
-    local -a args
+    local dir=$1 id=$2 want=$1/output.raw p line comm a got key name
+    local -a args fds held keys=()
     key=$(stat -c %d:%i -- "$want" 2> /dev/null) || key=
-    for f in "${TLOGGER_PROC:-/proc}"/[0-9]*/cmdline; do
-        pid=${f%/*}
-        pid=${pid##*/}
-        if [[ ! $pid =~ ^[0-9]+$ || -L ${f%/*} || -L $f || ! -f $f || ! -r $f ]]; then
+    for name in output.raw timing input.raw; do
+        got=$(stat -c %d:%i -- "$dir/$name" 2> /dev/null) || got=
+        if [[ -n $got ]]; then
+            keys+=("$got")
+        fi
+    done
+    for p in "${TLOGGER_PROC:-/proc}"/[0-9]*; do
+        if [[ ! ${p##*/} =~ ^[0-9]+$ || -L $p || ! -d $p || -L $p/stat || ! -f $p/stat ||
+            ! -r $p/stat ]]; then
+            continue
+        fi
+        # read, not $(< ), so that no subshell runs for each process.
+        line=
+        { IFS= read -r line < "$p/stat"; } 2> /dev/null || true
+        if [[ $line != *'('*')'* ]]; then
+            continue
+        fi
+        comm=${line#*\(}
+        comm=${comm%\)*}
+        if [[ $comm != script ]]; then
             continue
         fi
         args=()
-        { mapfile -d '' -t args < "$f"; } 2> /dev/null || continue
+        if [[ ! -L $p/cmdline && -f $p/cmdline && -r $p/cmdline ]]; then
+            { mapfile -d '' -t args < "$p/cmdline"; } 2> /dev/null || args=()
+        fi
         for a in "${args[@]}"; do
             got=
             if [[ $a != "$want" && $a == */output.raw && -n $key ]]; then
@@ -5720,12 +5804,50 @@ discard_writer() {
                     "output.raw; discard refuses it"
             fi
         done
+        fds=()
+        if [[ ! -L $p/fd ]]; then
+            for a in "$p"/fd/*; do
+                if [[ -e $a || -L $a ]]; then
+                    fds+=("$a")
+                fi
+            done
+        fi
+        if (( ${#fds[@]} == 0 || ${#keys[@]} == 0 )); then
+            continue
+        fi
+        mapfile -t held < <(stat -L -c %d:%i -- "${fds[@]}" 2> /dev/null || true)
+        for got in "${held[@]}"; do
+            for a in "${keys[@]}"; do
+                if [[ $got == "$a" ]]; then
+                    die 1 "session $id is still being recorded: a script process writes its" \
+                        "output.raw; discard refuses it"
+                fi
+            done
+        done
     done
 }
 
+# Set DISCARD_NOW to the time in seconds since 1970 for discard's 10-minute rule: TLOGGER_NOW,
+# for tests only, as touch -d cannot set a ctime back, when it is 1 to 12 digits without a
+# leading 0; else, and for a TLOGGER_NOW of any other form, the clock. Exits 1 when the clock
+# cannot be read.
+discard_now() {
+    # Byte ranges, so that no locale widens [0-9].
+    local LC_ALL=C
+    if [[ ${TLOGGER_NOW-} =~ ^[1-9][0-9]{0,11}$ ]]; then
+        DISCARD_NOW=$TLOGGER_NOW
+        return 0
+    fi
+    DISCARD_NOW=$(date +%s) || die 1 "cannot read the clock"
+    if [[ ! $DISCARD_NOW =~ ^[0-9]+$ ]]; then
+        die 1 "cannot read the clock"
+    fi
+}
+
 # Exit 1 with the first refusal of discard for the session folder DIR, else set DISCARD_STATE to
-# unsealed or unknown. BY_ID is 1 when the session was named by its id, so that the folder that
-# holds it is the log folder or an engagement folder. In this order: for BY_ID, the volume of
+# unsealed or unknown. BY_ID is 1 when the folder that holds it is the log folder LOGDIR or an
+# engagement folder: for a session named by its id, or by a path that discard_in_logdir finds
+# there. In this order: for BY_ID, the volume of
 # logdir_mount (see check_logdir_mount); the folder that holds it (see check_closed_dir); its
 # folder, which must be this user's, no symlink, closed to its group and others, sticky bit or
 # not, and open to this user; a seal, which a SEAL, a SHA256SUMS, a temp file of either or a line
@@ -5807,16 +5929,10 @@ discard_check() {
         recording) die 1 "session $id is still being recorded; discard refuses it" ;;
         *) die 1 "cannot tell the state of session $id; tlogger verify $id says more" ;;
     esac
-    discard_writer "$dir/output.raw" "$id"
+    discard_writer "$dir" "$id"
     if [[ $verdict == unknown ]]; then
-        # TLOGGER_NOW, for tests only, stands for the clock: touch -d cannot set ctime back.
-        now=${TLOGGER_NOW-}
-        if [[ -z $now ]]; then
-            now=$(date +%s) || die 1 "cannot read the clock"
-        fi
-        if [[ ! $now =~ ^[0-9]+$ ]]; then
-            die 1 "cannot read the clock"
-        fi
+        discard_now
+        now=$DISCARD_NOW
         mapfile -t times < <(stat -c '%Y %Z' -- "$dir" "${entries[@]}" 2> /dev/null || true)
         if (( ${#times[@]} != ${#entries[@]} + 1 )); then
             die 1 "session $id: cannot read the times of its files"
@@ -5899,19 +6015,54 @@ discard_cut() {
         "that is fixed"
 }
 
+# Exit 1, nothing of the session ID removed, unless the session folder DIR is still the folder
+# IDENT, its device and inode as discard took them right after resolve_session.
+discard_same() {
+    local now
+    now=$(stat -c %d:%i -- "$1" 2> /dev/null) || now=
+    if [[ -z $2 || $now != "$2" ]]; then
+        die 1 "session $3: its folder changed while discard checked it; nothing of it was removed"
+    fi
+}
+
+# Succeed when the folder that holds the session folder DIR, named by its path, is the log folder
+# or a folder in it, as an engagement folder is, by their physical paths (pwd -P), so that
+# discard gives the session the checks of one named by its id; LOGDIR is then the log folder as
+# written. The log folder is the config's logdir, else the default; one that does not exist
+# never matches. Exits 1 for an unsafe config, as resolve_logdir does, since discard could not
+# tell where the log folder lies.
+discard_in_logdir() {
+    local parent=${1%/*} real up upup
+    parent=${parent:-/}
+    resolve_paths
+    read_config
+    if [[ -n $CONFIG_ERROR ]]; then
+        die 1 "the config $(shown "$CONFIG_FILE") $CONFIG_ERROR; fix it by hand"
+    fi
+    LOGDIR=${CONFIG_LOGDIR:-$SESSIONS_DIR}
+    real=$(cd -P -- "$LOGDIR" 2> /dev/null && pwd -P) || return 1
+    up=$(cd -P -- "$parent" 2> /dev/null && pwd -P) || return 1
+    upup=$(cd -P -- "$up/.." 2> /dev/null && pwd -P) || return 1
+    [[ -n $real && ( $up == "$real" || $upup == "$real" ) ]]
+}
+
 # tlogger discard SESSION [--confirm ID]: remove one session that cannot be sealed, unsealed or
 # without a recorder file, named by its id or by a path to its folder (see resolve_session),
-# never the newest by default. It refuses what discard_check refuses, shows the session (see
-# discard_show) and goes on only once you type its id, or give it as --confirm ID. Then, with
-# HUP, INT, PIPE, QUIT and TERM ignored, it checks again and goes into the folder, which must be
-# the one it checked, by device and inode. It appends '<UTC time>  <id>  -  -  -  discarded
+# never the newest by default; a path whose folder is the log folder or a folder in it gets the
+# checks of an id (see discard_in_logdir). It takes the folder's device and inode at once, refuses
+# what discard_check refuses, shows the session (see discard_show) and goes on only once you type
+# its id, or give it as --confirm ID. Then, with HUP, INT, PIPE, QUIT and TERM ignored, it goes
+# into the folder, which must still be that one, takes the lock that seal takes (see
+# lock_session), waiting up to 10 seconds, checks that the path still names that folder, checks
+# the session again and the path once more. It appends '<UTC time>  <id>  -  -  -  discarded
 # <state> by tlogger <version>' to the PRUNED beside it, synced (see prune_record), prints that
 # line, and removes each file by its own name, relative to the folder, with unlink, in the order
-# of DISCARD_ORDER, then the folder by its name with rmdir from the folder above it. Output that
-# cannot be written never stops the removal. It never runs rm, chmod or a glob to remove, and
-# never touches the MANIFEST, other sessions, .archive or an archive. Exits 0 when done, 1 for a
-# refusal, a failure, a wrong id or a session it does not find, 2 for a usage error or a missing
-# --confirm off a terminal, 3 without a log folder.
+# of DISCARD_ORDER, then the folder by its name with rmdir from the folder above it, and only
+# then lets the lock go. Output that cannot be written never stops the removal. It never runs
+# rm, chmod or a glob to remove, and never touches the MANIFEST, other sessions, .archive or an
+# archive. Exits 0 when done, 1 for a refusal, a failure, a wrong id, a session it does not find
+# or a lock it cannot have, 2 for a usage error or a missing --confirm off a terminal, 3 without
+# a log folder.
 cmd_discard() {
     local session='' confirm='' answer dir id stamp line f ident here
     local -i count=0 confirm_set=0 by_id=1
@@ -5950,11 +6101,17 @@ cmd_discard() {
     fi
     resolve_session "$session"
     dir=$SESSION_DIR id=$SESSION_ID
+    # The folder shown to the user, by device and inode: what discard locks, goes into and
+    # removes must be this one.
+    ident=$(stat -c %d:%i -- "$dir" 2> /dev/null) || ident=
     # The id goes into a PRUNED line, whose fields two spaces split; a session id holds neither a
     # space nor a control character, but a folder named by its path may.
     if [[ $id == *[[:cntrl:]]* || $id == *' '* ]]; then
         die 1 "the name of $(shown "$dir") holds a space or a control character, which a PRUNED" \
             "line cannot hold; rename it"
+    fi
+    if (( ! by_id )) && discard_in_logdir "$dir"; then
+        by_id=1
     fi
     read_version
     PRUNED_FILE=${dir%/*}/PRUNED
@@ -5972,10 +6129,8 @@ cmd_discard() {
     fi
     # PIPE too, so that a reader of stdout or stderr that goes away cannot stop the removal.
     trap '' HUP INT PIPE QUIT TERM
-    discard_check "$dir" "$by_id"
-    # From here on, each name is relative to the folder checked, so that a folder put in its
-    # place after the check cannot lose its files; nothing is written before this holds.
-    ident=$(stat -c %d:%i -- "$dir" 2> /dev/null) || ident=
+    # From here on, each name is relative to the folder shown, the current one, so that a folder
+    # put in its place cannot lose its files; nothing is written before this holds.
     here=
     if [[ -n $ident ]] && cd -P -- "$dir" 2> /dev/null; then
         here=$(stat -c %d:%i . 2> /dev/null) || here=
@@ -5983,6 +6138,22 @@ cmd_discard() {
     if [[ -z $here || $here != "$ident" ]]; then
         die 1 "session $id: its folder changed while discard checked it; nothing of it was removed"
     fi
+    # The lock that seal takes too, on the current folder, held through rmdir: a seal of this
+    # session ends before it, and the check below finds the session sealed, or waits until the
+    # folder is gone.
+    lock_session . || case $? in
+        2)
+            die 1 "another tlogger command works on session $id; nothing of it was removed;" \
+                "try again"
+            ;;
+        *)
+            die 1 "session $id: its folder changed while discard checked it; nothing of it was" \
+                "removed"
+            ;;
+    esac
+    discard_same "$dir" "$ident" "$id"
+    discard_check "$dir" "$by_id"
+    discard_same "$dir" "$ident" "$id"
     stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ) || die 1 "cannot read the clock"
     line="$stamp  $id  -  -  -  discarded $DISCARD_STATE by tlogger $VERSION_STR"
     prune_record "$line" || case $? in
@@ -5998,10 +6169,12 @@ cmd_discard() {
             unlink -- "$f" 2> /dev/null || discard_cut "$dir/$f" "$dir" "$id"
         fi
     done
-    # Every file is gone by now, so discard no longer finds the folder as a session.
+    # Every file is gone by now, so discard no longer finds the folder as a session. The lock
+    # stays held across rmdir, which an open fd does not stop on Linux.
     { cd -P .. && rmdir -- "$id"; } 2> /dev/null ||
         die 1 "cannot remove $(shown "$dir"); its files are gone, and discard no longer finds it;" \
             "remove the empty folder by hand once that is fixed"
+    unlock_session
     set_signal_traps
     trap - QUIT
     msg "discarded session $id; $(shown "$PRUNED_FILE") records it. Its data is gone from this" \

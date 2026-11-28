@@ -25,6 +25,7 @@ Each version is the GitHub release `vX.Y.Z`.
 - `tlogger discard SESSION` removes one session that cannot be sealed, unsealed or without a
   recorder file, after showing it and asking for its id (or `--confirm ID`). It records the
   session in `PRUNED` first, and never touches a sealed session or one still being recorded.
+  `seal` and `discard` lock the session folder, so they never work on one session at once.
 - The README says what tlogger does not protect against, what authorized use means, where copies of
   the logs exist, and how to keep and remove logs. `SECURITY.md` names the supported versions
   and the scope, `CONTRIBUTING.md` has a section for outside contributors and a release audit,

@@ -5,7 +5,8 @@
 # files can reach it. Also: need() for tests that only some machines can run, a zsh stub first on
 # PATH where zsh is missing, a fake sysfs, journal line checks, synthetic session logs for render,
 # show and replay, ended sessions and a fake /proc process for seal, verify, list, archive and
-# prune, folder snapshots, the shared refusal check, and drive, which runs every e2e driver.
+# prune, the lock of seal and discard held by a test, folder snapshots, the shared refusal check,
+# and drive, which runs every e2e driver.
 # shellcheck source=.github/standard/tests/lib.bash
 source "${BASH_SOURCE[0]%/*}/../.github/standard/tests/lib.bash"
 
@@ -419,6 +420,34 @@ fake_process() {
     mkdir -p "$PROC/$1"
     printf '%s (script) S 1 %s %s 34816 -1 4194560 100 0 0 0 0 0 0 0 20 0 1 0 %s 9887744 1024\n' \
         "$1" "$1" "$1" "$2" > "$PROC/$1/stat"
+}
+
+# Hold the lock that seal and discard take on the folder DIR: an exclusive flock through a
+# read-only fd on the folder itself, which a background process of the test keeps open until
+# release_lock ends it. Sets LOCK_PID, and returns once the lock is held, or fails after 10
+# seconds. Needs flock (need command flock).
+hold_lock() {
+    local i
+    # The subshell opens the folder, locks it and becomes sleep, which keeps the fd.
+    (exec 8< "$1" && flock -x 8 && exec sleep 120) > /dev/null 2>&1 < /dev/null 3>&- &
+    LOCK_PID=$!
+    for (( i = 0; i < 100; i++ )); do
+        if ! flock -x -n "$1" true 2> /dev/null; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    printf 'hold_lock: the lock on %s was never held\n' "$1" >&2
+    return 1
+}
+
+# End the process of hold_lock, which lets its lock go; nothing when there is none.
+release_lock() {
+    if [[ -n ${LOCK_PID-} ]]; then
+        kill "$LOCK_PID" 2> /dev/null || true
+        wait "$LOCK_PID" 2> /dev/null || true
+        LOCK_PID=
+    fi
 }
 
 # Print the files of the session folder DIR with their modes, 'NAME MODE' per line, sorted.

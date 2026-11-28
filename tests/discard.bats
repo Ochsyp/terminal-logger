@@ -2,11 +2,15 @@
 # Tests for tlogger discard in bin/tlogger, run as a subprocess in the test's own HOME on
 # synthetic sessions. A fake /proc, which TLOGGER_PROC names, holds the boot id, the mountinfo
 # and the processes that discard reads, so that a session counts as still recorded only when a
-# test says so. TLOGGER_NOW, which discard reads instead of the clock for its 10-minute rule,
-# lets a test make a session old: touch -d cannot set a file's ctime back. Stand-ins first on
-# PATH log every rm, unlink, rmdir and sync that bin/tlogger runs: rm fails, unlink fails for one
-# named file as on an immutable one, and sync fails when a test says so. One test answers
-# discard's question in a pseudo-terminal that zsh's zpty module drives (tests/helpers/pty.zsh).
+# test says so. TLOGGER_NOW, which discard reads instead of the clock for its 10-minute rule when
+# it is 1 to 12 digits without a leading 0, lets a test make a session old: touch -d cannot set a
+# file's ctime back. TLOGGER_LOCK_WAIT, 1 to 3 digits, is the seconds discard waits for the lock
+# of a session folder instead of 10, so that a test of a lock held elsewhere ends soon; a value
+# of another form is ignored. hold_lock (helpers.bash) holds that lock from the test. Stand-ins
+# first on PATH log every rm, unlink, rmdir and sync that bin/tlogger runs: rm fails, unlink
+# fails for one named file as on an immutable one, and sync fails when a test says so. One test
+# answers discard's question in a pseudo-terminal that zsh's zpty module drives
+# (tests/helpers/pty.zsh).
 #
 # The contract these tests pin. Every message starts with 'tlogger: ' and shows a path under HOME
 # with ~; <log folder> is ~/.local/state/tlogger/sessions here, and <parent> is the folder that
@@ -33,10 +37,15 @@
 #   refused next, as a PRUNED line cannot hold it:
 #     tlogger: the name of <folder> holds a space or a control character, which a PRUNED line
 #     cannot hold; rename it
-#   (one line).
+#   (one line). A session named by a path whose <parent>, or the folder above <parent>, is the
+#   log folder by their physical paths (pwd -P), so that <parent> is the log folder or a folder
+#   in it, gets the checks of a session named by its id below ("by id" covers it). For a path,
+#   discard reads the config for that: an unsafe config exits 1 with resolve_logdir's line
+#     tlogger: the config <config> <what is wrong>; fix it by hand
+#   and a log folder that does not exist matches no path.
 # - It checks, in this order, and stops at the first that fails: exit 1, nothing on stdout, the
 #   one message alone on stderr, and nothing changed anywhere:
-#   1. for a session named by its id, the volume of logdir_mount, as archive and prune check it:
+#   1. by id, the volume of logdir_mount, as archive and prune check it:
 #        tlogger: the volume <mount> of the log folder is not mounted
 #      and check_logdir_mount's other lines; then <parent>, closed to its group and others,
 #      sticky bit or not:
@@ -62,16 +71,20 @@
 #      leaves 0600:
 #        tlogger: session <id> has logs of mode 400, as seal leaves them, so it may be a sealed
 #        session whose seal is gone; discard refuses it
-#      (one line). Then, for a session named by its id, the MANIFEST of the log folder and of
-#      each engagement folder, with the same two lines: a sealed session moved by hand to
-#      another folder, its SEAL and SHA256SUMS deleted and its logs set back to 0600, is still
-#      found.
+#      (one line). Then, by id, the MANIFEST of the log folder and of each engagement folder,
+#      with the same two lines: a sealed session moved by hand to another folder, its SEAL and
+#      SHA256SUMS deleted and its logs set back to 0600, is still found, named by its id or by
+#      its path in the log folder.
 #   4. the verdict of verify must be unsealed or unknown:
 #        tlogger: session <id> is still being recorded; discard refuses it
-#      and, unsealed or unknown alike, no process under TLOGGER_PROC (default /proc) may have an
-#      argument of its cmdline, split on NUL, equal to <folder>/output.raw, as the plugin's
-#      handshake looks for its script process, or another path ending in /output.raw to the
-#      same file, by device and inode:
+#      and, unsealed or unknown alike, no script process under TLOGGER_PROC (default /proc) may
+#      write it. A process counts only when its name in <pid>/stat, between the first '(' and
+#      the last ')', is exactly script, as the plugin's handshake reads it: a scriptreplay of the
+#      session or a less of its output.raw never does. Such a process writes it when an argument
+#      of its cmdline, split on NUL, is <folder>/output.raw, as the handshake looks for it, or
+#      another path ending in /output.raw to the same file, by device and inode; or when an
+#      entry of its fd/ resolves, by device and inode, to <folder>/output.raw, timing or
+#      input.raw, as for a script started with a relative path:
 #        tlogger: session <id> is still being recorded: a script process writes its output.raw;
 #        discard refuses it
 #      (one line).
@@ -111,15 +124,24 @@
 #     tlogger: this cannot be undone; type the session's id, <id>, to go ahead:
 #   (ending with ': '). A wrong ID or answer: exit 1, stdout the 6 lines, nothing changed, and
 #   stderr ends with: tlogger: nothing changed
-# - Then, with HUP, INT, PIPE, QUIT and TERM held off, it checks everything again: any change
-#   since, such as a SEAL or a stray file made while the question waits, exits 1 with the
-#   matching refusal and removes nothing. It goes into the session folder (cd -P) and exits 1,
-#   writing and removing nothing, unless that is the folder it checked, by device and inode:
+# - Then, with HUP, INT, PIPE, QUIT and TERM held off, it goes into the session folder (cd -P)
+#   and exits 1, writing and removing nothing, unless that is the folder it found, by the device
+#   and inode it took right after resolving the session:
 #     tlogger: session <id>: its folder changed while discard checked it; nothing of it was
 #     removed
-#   (one line). Then it appends to <parent>/PRUNED, under flock, made with mode 0600, after a
-#   line end when the file does not end with one, this line, flushes it with
-#   sync -- <parent>/PRUNED (no fallback), and prints it on stdout:
+#   (one line). It takes an exclusive flock on that folder, through a read-only fd on the folder
+#   itself, the lock that seal takes for its whole run on a session, and holds it through rmdir,
+#   so that seal and discard never work on one session at once. When the lock cannot be had
+#   within TLOGGER_LOCK_WAIT seconds (default 10): exit 1, stdout the 6 lines, nothing changed,
+#   and stderr ends with (one line):
+#     tlogger: another tlogger command works on session <id>; nothing of it was removed; try
+#     again
+#   Then the path must still name that folder, with the "changed" line above, and it checks
+#   everything again: any change since, such as a SEAL or a stray file made while the question
+#   waits, exits 1 with the matching refusal and removes nothing; then the path once more. Then
+#   it appends to <parent>/PRUNED, under flock, made with mode 0600, after a line end when the
+#   file does not end with one, this line, flushes it with sync -- <parent>/PRUNED (no
+#   fallback), and prints it on stdout:
 #     <UTC time as YYYY-MM-DDTHH:MM:SSZ>  <id>  -  -  -  discarded <state> by tlogger <version>
 #   (fields split by two spaces, as prune's; the dashes stand for prune's sum, archive and its
 #   sum). A line that cannot be written: exit 1, nothing removed, last on stderr:
@@ -155,8 +177,9 @@
 #   session folder, .archive or archives. verify --all then gives no line for <id>, and a
 #   discarded line never makes a sealed session's MANIFEST line count as pruned, nor give the
 #   hint of a prune cut short: its sum field is '-'.
-# - Exit codes: 0 done; 1 a refusal, a failure, a wrong id or a session it does not find; 2 a
-#   usage error, or no --confirm off a terminal; 3 no log folder, and nothing else.
+# - Exit codes: 0 done; 1 a refusal, a failure, a wrong id, a session it does not find or a lock
+#   it cannot have; 2 a usage error, or no --confirm off a terminal; 3 no log folder, and nothing
+#   else.
 
 bats_require_minimum_version 1.5.0
 
@@ -195,9 +218,10 @@ setup() {
 }
 
 # Run after each test by bats.
-# Gives every folder under HOME back to its owner's write, so that bats can remove a folder that
-# a test closed.
+# Ends a lock that hold_lock still holds, and gives every folder under HOME back to its owner's
+# write, so that bats can remove a folder that a test closed.
 teardown() {
+    release_lock
     if [[ -d $HOME ]]; then
         find "$HOME" -type d -exec chmod u+rwx {} + 2> /dev/null || true
     fi
@@ -357,6 +381,17 @@ fake_script() {
     fake_process "$pid" "$start"
     printf '%s\0' script --quiet --flush --return --logging-format advanced --log-timing \
         "$dir/timing" --log-in "$dir/input.raw" "$@" > "$PROC/$pid/cmdline"
+}
+
+# Make the process PID of the fake /proc a process named NAME, no script, with ARGS as its
+# cmdline, each ended by a NUL.
+fake_other() {
+    local pid=$1 name=$2
+    shift 2
+    mkdir -p "$PROC/$pid"
+    printf '%s (%s) S 1 %s %s 34816 -1 4194560 100 0 0 0 0 0 0 0 20 0 1 0 3000 9887744 1024\n' \
+        "$pid" "$name" "$pid" "$pid" > "$PROC/$pid/stat"
+    printf '%s\0' "$@" > "$PROC/$pid/cmdline"
 }
 
 # Print the refusal of the session ID without a recorder file that changed in the last 10
@@ -568,6 +603,7 @@ assert_discard_refused() {
 
 @test "discard refuses a sealed session moved by hand, its SEAL and SHA256SUMS deleted" {
     need modes
+    local before
     mkdir -m 700 "$LOGS/acme"
     make_session "acme/$A"
     run_tlogger seal "$A"
@@ -580,6 +616,12 @@ assert_discard_refused() {
     # Set back to 0600, only the line in the MANIFEST of acme, where it was sealed, shows it.
     chmod 600 "$LOGS/$A"/*
     assert_discard_refused "$A" "$(sealed_msg "$A")"
+    # Named by its path in the log folder, it gets the same checks as by its id.
+    before=$(tree_of "$HOME")
+    run_watched discard "$LOGS/$A" --confirm "$A"
+    assert_refused 1 "$(sealed_msg "$A")"
+    [ "$(tree_of "$HOME")" = "$before" ]
+    refute_removed
     [ ! -e "$LOGS/PRUNED" ]
     [ ! -e "$LOGS/acme/PRUNED" ]
 }
@@ -620,6 +662,96 @@ assert_discard_refused() {
     [ "$stderr" = "$(done_msg "$A" "$SHOWN")" ]
     [ "$(cat "$CALLS")" = "$want" ]
     [[ ! -e $LOGS/$A && ! -L $LOGS/$A ]]
+}
+
+@test "discard refuses a session that a script process holds open, whatever its cmdline names" {
+    need modes
+    need symlinks
+    local name
+    make_session "$A"
+    make_stand_ins
+    # A script started with relative paths in the session folder, as its cmdline shows; one of
+    # its fds holds a log open. timing or input.raw alone counts too, as for a session folder
+    # moved by hand while it records.
+    fake_process 5150 2000
+    printf '%s\0' script --quiet --flush --log-timing timing --log-in input.raw \
+        --log-out output.raw > "$PROC/5150/cmdline"
+    mkdir "$PROC/5150/fd"
+    ln -s /dev/null "$PROC/5150/fd/0"
+    for name in output.raw timing input.raw; do
+        ln -s "$SDIR/$name" "$PROC/5150/fd/3"
+        assert_discard_refused "$A" "$(writer_msg "$A")"
+        rm -f -- "$PROC/5150/fd/3"
+    done
+    # The same fd in a process of another name does not count.
+    ln -s "$SDIR/output.raw" "$PROC/5150/fd/3"
+    fake_other 5150 less less -R output.raw
+    run_watched discard "$A" --confirm "$A"
+    [ "$status" -eq 0 ]
+    [ "$stderr" = "$(done_msg "$A" "$SHOWN")" ]
+    [[ ! -e $SDIR && ! -L $SDIR ]]
+}
+
+@test "discard passes over a scriptreplay or a less of the session, which are no script process" {
+    need modes
+    local want
+    make_session "$A"
+    make_stand_ins
+    fake_other 6100 scriptreplay scriptreplay --log-timing "$SDIR/timing" \
+        --log-out "$SDIR/output.raw"
+    fake_other 6101 less less -R "$SDIR/output.raw"
+    want=$(discard_calls "$SDIR")
+    run_watched discard "$A" --confirm "$A"
+    [ "$status" -eq 0 ]
+    [ "$stderr" = "$(done_msg "$A" "$SHOWN")" ]
+    [ "$(cat "$CALLS")" = "$want" ]
+    [[ ! -e $SDIR && ! -L $SDIR ]]
+}
+
+@test "discard waits for a lock that another command holds on the folder, then changes nothing" {
+    need modes
+    need command flock
+    local before want start
+    make_session "$A"
+    make_stand_ins
+    hold_lock "$SDIR"
+    export TLOGGER_LOCK_WAIT=1
+    before=$(tree_of "$HOME")
+    start=$SECONDS
+    run_watched discard "$A" --confirm "$A"
+    [ "$status" -eq 1 ]
+    (( SECONDS - start >= 1 ))
+    [ "$output" = "$(show_lines "$A" "$SHOWN" unsealed)" ]
+    want="tlogger: another tlogger command works on session $A; nothing of it was removed;"
+    [ "$stderr" = "$want try again" ]
+    [ "$(tree_of "$HOME")" = "$before" ]
+    refute_removed
+    # Once the lock is let go, discard removes the session.
+    release_lock
+    : > "$CALLS"
+    want=$(discard_calls "$SDIR")
+    run_watched discard "$A" --confirm "$A"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$CALLS")" = "$want" ]
+    [[ ! -e $SDIR && ! -L $SDIR ]]
+}
+
+@test "discard reads the clock for a TLOGGER_NOW of another form than 1 to 12 digits" {
+    need modes
+    local later value
+    unknown_session "$A"
+    make_stand_ins
+    later=$(( $(date +%s) + 720 ))
+    for value in "0$later" "$later " "+$later" "${later}000" "$later.5" '-1'; do
+        export TLOGGER_NOW=$value
+        assert_discard_refused "$A" "$(fresh_msg "$A")"
+    done
+    [ ! -e "$LOGS/PRUNED" ]
+    # The same time in the form it takes: the session is old enough.
+    export TLOGGER_NOW=$later
+    run_watched discard "$A" --confirm "$A"
+    [ "$status" -eq 0 ]
+    [[ ! -e $SDIR && ! -L $SDIR ]]
 }
 
 @test "discard refuses a session folder open to group or others, or one you cannot change" {
@@ -673,12 +805,21 @@ assert_discard_refused() {
     assert_discard_refused "$B" "$want session $B"
     chmod 700 "$LOGS/acme"
     # logdir_mount names a volume that is not mounted: a session named by its id is refused, as
-    # archive and prune refuse its folder. Named by its path, it is shown.
+    # archive and prune refuse its folder, and so is one named by its path in the log folder or
+    # in an engagement folder. A session elsewhere, named by its path, is shown.
     write_config "logdir_mount=$HOME/vault"$'\n'
     assert_discard_refused "$A" 'tlogger: the volume ~/vault of the log folder is not mounted'
-    run_watched discard "$LOGS/$A" --confirm "$B"
+    run_watched discard "$LOGS/$A" --confirm "$A"
+    assert_refused 1 'tlogger: the volume ~/vault of the log folder is not mounted'
+    run_watched discard "$LOGS/acme/$B" --confirm "$B"
+    assert_refused 1 'tlogger: the volume ~/vault of the log folder is not mounted'
+    mkdir -p "$HOME/cases"
+    mkdir -m 700 "$HOME/cases/kept"
+    make_session "$HOME/cases/kept/$C"
+    run_watched discard "$HOME/cases/kept/$C" --confirm "$B"
     [ "$status" -eq 1 ]
-    [ "$output" = "$(show_lines "$A" "$SHOWN" unsealed)" ]
+    # shellcheck disable=SC2088 # The ~ is the text tlogger prints.
+    [ "$output" = "$(show_lines "$C" '~/cases/kept' unsealed)" ]
     [ "$stderr" = 'tlogger: nothing changed' ]
     refute_removed
     [ ! -e "$LOGS/PRUNED" ]
