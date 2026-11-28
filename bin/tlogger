@@ -4731,10 +4731,10 @@ gone_verdict() {
     fi
 }
 
-# Say, for the session folder DIR that verify checked, that a prune was cut short in it, and
-# succeed, when the PRUNED file beside it records its id with the sum of its MANIFEST line, or
-# else of its SHA256SUMS: prune writes that line before it removes the first file, so the folder
-# may be whole still, or hold only some of its files, or none. Fail when PRUNED does not.
+# Say, for the session folder DIR that verify found not ok and not recording, that a prune was
+# cut short in it, and succeed, when the PRUNED file beside it records its id with the sum of its
+# MANIFEST line, or else of its SHA256SUMS: prune writes that line before it removes the first
+# file, so the folder may hold only some of its files, or none. Fail when PRUNED does not.
 cut_short_hint() {
     local dir=$1 id=${1##*/} sum pruned=${1%/*}/PRUNED
     if [[ -L $pruned || ! -f $pruned ]]; then
@@ -4756,8 +4756,8 @@ cut_short_hint() {
 # the log folder and its engagement folders with --all, and print '<id>  <verdict>' for each (see
 # verify_session). --all also reads the MANIFEST of each of these folders and gives each id it
 # names whose folder is gone a line of its own (see gone_verdict): by id, the session folders'
-# lines first, then those of the MANIFESTs, the log folder's first. A session that PRUNED records
-# is a prune cut short, and verify says so; an unsealed or unknown one then counts as changed.
+# lines first, then those of the MANIFESTs, the log folder's first. A session that is not ok and
+# that PRUNED records is a prune cut short, and verify says so; it counts as changed.
 # Exits 0 when no sealed session changed or is missing and every finished one is sealed; 1 when
 # one changed or is missing; 4 when none did but a finished session is unsealed or has no
 # recorder file, naming both counts apart; 3 when there is neither a session nor a MANIFEST line
@@ -4803,10 +4803,10 @@ cmd_verify() {
             gone_verdict "$id" "$sum" "${rest#*$'\t'}" "$now" "$LOGDIR" "${ENGAGEMENT_DIRS[@]}"
         else
             verify_session "$rest"
-            # A prune cut short counts as changed, whatever its files say now; a whole session
-            # that PRUNED records is one too, but stays ok.
-            if [[ $VERDICT != recording ]] && cut_short_hint "$rest" &&
-                [[ $VERDICT == unsealed || $VERDICT == unknown ]]; then
+            # A prune cut short counts as changed, whatever its files say now. A whole session
+            # that PRUNED records is ok and gets no hint: it may have been put back on purpose.
+            if [[ $VERDICT == changed || $VERDICT == unsealed || $VERDICT == unknown ]] &&
+                cut_short_hint "$rest"; then
                 VERDICT=changed
             fi
         fi
@@ -4970,6 +4970,11 @@ resolve_folder() {
                     "engagement folder"
                 ;;
         esac
+        # The name goes into the archive's file name, which PRUNED lines hold.
+        if [[ $FOLDER_NAME == *' '* || $FOLDER_NAME == *[[:cntrl:]]* ]]; then
+            die 1 "the name of the log folder $(shown "$LOGDIR") holds a space or a control" \
+                "character, which an archive's name cannot hold; use an engagement folder"
+        fi
         return 0
     fi
     FOLDER=${LOGDIR%/}/$engagement FOLDER_NAME=$engagement
@@ -5347,10 +5352,10 @@ prune_finish_ok() {
 # this user's, no symlink, closed to its group and others, and open to this user; its verdict,
 # which must be ok; the archive, which must hold it with the sum of its SEAL and MANIFEST line;
 # its entries, which may only be the files its SHA256SUMS lists, SHA256SUMS, SEAL and
-# transcript.txt; and each entry (see prune_entry_reason). A session that passes is finish, not
-# remove, when PRUNED holds its line for this archive already: a prune cut short before its first
-# removal. VERIFY_OUT holds verify's lines about a session kept for its verdict. Reads and
-# changes nothing else.
+# transcript.txt; and each entry (see prune_entry_reason). A whole session is remove even when
+# PRUNED holds a line for it, as after a restore, or a prune stopped before its first removal:
+# each removal gets its own line. VERIFY_OUT holds verify's lines about a session kept for its
+# verdict. Reads and changes nothing else.
 prune_session() {
     local dir=$1 id=${1##*/} mode out verdict sealed mline e name a ok
     local -a allowed
@@ -5436,14 +5441,6 @@ prune_session() {
             return 0
         fi
     done < <(dir_entries "$dir")
-    # A prune with this archive that was cut short before its first removal left the session
-    # whole: finish it, so that PRUNED keeps one line for it.
-    FINISH_LINE=$(pruned_line "$PRUNED_FILE" \
-        "$id  ${ARCH_SESSION[$id]}  $ARCH_NAME  $ARCH_SUM  tlogger ")
-    if [[ -n $FINISH_LINE ]]; then
-        ACTION=finish
-        return 0
-    fi
     ACTION=remove
 }
 
@@ -5469,7 +5466,8 @@ prune_record() {
     if (( rc != 0 )); then
         return 1
     fi
-    sync -- "$PRUNED_FILE" 2> /dev/null || return 2
+    # An older sync takes no file and syncs everything (see seal_session).
+    sync -- "$PRUNED_FILE" 2> /dev/null || sync || return 2
 }
 
 # Remove the session folder DIR of FOLDER, which the plan marked WANT, remove or finish. Checks

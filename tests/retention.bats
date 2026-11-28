@@ -51,7 +51,11 @@
 #        tlogger: there is no engagement folder <ENGAGEMENT> in <log folder>
 #        tlogger: <what> <folder> is writable by its group or by others; chmod go-w <folder>
 #        fixes it
-#      <what> is 'the log folder', 'the engagement folder' or 'the session folder';
+#      <what> is 'the log folder', 'the engagement folder' or 'the session folder'. With --none,
+#      a log folder whose name holds a space or a control character, which the archive's name
+#      and the PRUNED lines cannot hold (one line):
+#        tlogger: the name of the log folder <log folder> holds a space or a control character,
+#        which an archive's name cannot hold; use an engagement folder
 #   5. a session to take, exit 3: tlogger: no session to archive in <folder>
 #   6. the verdict of each session it takes, as tlogger verify gives it, exit 1. One line per
 #      session that is not ok, by id; verify's own lines 'tlogger: <id>: ...' about a changed
@@ -101,8 +105,9 @@
 #   absolute, holds '..', has another first part, or is <name>/<entry> for an entry other than
 #   MANIFEST; a second <name>/MANIFEST; or an archived MANIFEST that is a byte prefix of the
 #   MANIFEST of neither folder that <name> may name: the engagement folder <name> of the log
-#   folder, when there is one, and the log folder itself, when <name> is the last part of its
-#   path, as for --none. With neither folder there, the MANIFEST is not compared.
+#   folder, and the log folder itself, when <name> is the last part of its path, as for --none.
+#   Only a folder whose MANIFEST names a session of the archive is compared; with none, as on
+#   another computer, the MANIFEST is not compared.
 # - Without the .sha256 file it says so, and its verdicts stand, with this line alone on stderr:
 #     tlogger: <FILE>.sha256 is missing; compare the archive's SHA-256, <sum>, with the one
 #     archive printed
@@ -181,8 +186,8 @@
 #      files its SHA256SUMS lists, SHA256SUMS, SEAL and transcript.txt;
 #   5. each entry: '<entry> is a symlink, which tlogger does not follow', '<entry> is not a
 #      regular file', '<entry> belongs to another user', '<entry> has more than one hard link'.
-#   A session that passes all five is 'finish', not 'remove', when PRUNED holds its line for
-#   FILE already: a prune cut short before its first removal left it whole.
+#   A whole session that passes all five is 'remove', even when PRUNED holds a line for it, as
+#   after a restore or a prune stopped before its first removal: each removal gets its own line.
 # - It is all or nothing. When any line is keep, exit 1, with or without --delete, and this last
 #   line on stderr:
 #     tlogger: nothing changed: prune removes all the selected sessions or none; narrow the
@@ -217,11 +222,11 @@
 #     run the same prune again once that is fixed
 #   (one line). verify --all then gives '<id>  changed' with, on stderr, the line
 #     tlogger: <id>: a prune was cut short; run the same prune again
-#   and the same prune with the same archive finishes it. verify gives that line for any session
-#   but a recording one that PRUNED records with its MANIFEST line's sum: one left whole stays
-#   ok, and one left unsealed or unknown counts as changed.
+#   and the same prune with the same archive finishes it. verify gives that line for a session
+#   that is changed, unsealed or unknown and that PRUNED records with its MANIFEST line's sum,
+#   and counts it as changed; a whole session that PRUNED records is ok, with no such line.
 # - <folder>/PRUNED lies beside the MANIFEST, mode 0600, made by its first line, and only grows.
-#   One line per session, its fields split by two spaces:
+#   One line per removal of a session, its fields split by two spaces:
 #     <UTC time as YYYY-MM-DDTHH:MM:SSZ>  <id>  <SHA-256 of its SHA256SUMS>  <file name of FILE>
 #     <SHA-256 of FILE>  tlogger <version>
 #   (one line). The MANIFEST, <folder> even when empty, the log folder, .archive and every
@@ -1318,10 +1323,14 @@ assert_kept() {
     run_tlogger seal "${s[11]}"
     [ "$status" -eq 0 ]
     # Moved away, and sealed again under its id with other logs: the archive has the old sum.
+    # seal refuses a second MANIFEST line for one id, so the line is added by hand, as for a
+    # session sealed again elsewhere and copied back with its line.
     mv "$LOGS/acme/${s[14]}" "$HOME/old/${s[14]}"
     make_session "acme/${s[14]}" 3
     run_tlogger seal "${s[14]}"
-    [ "$status" -eq 0 ]
+    [ "$status" -eq 1 ]
+    printf '%s  %s/SHA256SUMS\n' "$(sha_of "$LOGS/acme/${s[14]}/SHA256SUMS")" "${s[14]}" \
+        >> "$LOGS/acme/MANIFEST"
     # Ended unsealed, its recorder 4343 gone; still recorded by 4242; without a recorder file.
     REC_PID=4343 make_session "acme/${s[12]}"
     make_session "acme/${s[13]}"
@@ -1545,10 +1554,10 @@ assert_kept() {
     [ "$(LC_ALL=C sort <<< "$output")" = "$A  pruned"$'\n'"$B  pruned" ]
 }
 
-@test "a prune cut short before its first removal, or by a failed sync, keeps one PRUNED line" {
+@test "a prune stopped before its first removal leaves the session ok for the next one" {
     need modes
     need python3
-    local sum_a first want first_line
+    local sum_a first want
     local -a lines
     sealed_engagement acme "$A"
     make_archive acme
@@ -1556,7 +1565,8 @@ assert_kept() {
     sum_a=$(sha_of "$LOGS/acme/$A/SHA256SUMS")
     first=$(sed -n 1p "$LOGS/acme/$A/SHA256SUMS" | cut -c67-)
     # PRUNED cannot be flushed to the disk: its line stays, and nothing is removed.
-    printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$STAND_INS/sync"
+    printf '%s
+' '#!/usr/bin/env bash' 'exit 1' > "$STAND_INS/sync"
     chmod 755 "$STAND_INS/sync"
     run_watched prune acme --archive "$ARCHIVE" --delete --confirm acme
     [ "$status" -eq 1 ]
@@ -1568,30 +1578,34 @@ assert_kept() {
     mapfile -t lines < "$LOGS/acme/PRUNED"
     [ "${#lines[@]}" -eq 1 ]
     assert_pruned_line "${lines[0]}" "$A" "$sum_a"
-    first_line=${lines[0]}
-    # Its first log cannot be removed either: the session stays whole.
+    # Its first log cannot be removed either: the session stays whole, with a second line.
     UNLINK_FAIL=$(readlink -f -- "$LOGS/acme/$A/$first")
     run_watched prune acme --archive "$ARCHIVE" --delete --confirm acme
     [ "$status" -eq 1 ]
     [ -f "$LOGS/acme/$A/$first" ]
-    # verify --all calls it ok and says that a prune was cut short.
+    # A whole session is ok, with no hint: it may as well have been put back on purpose.
     run_tlogger verify --all
     [ "$status" -eq 0 ]
     [ "$output" = "$A  ok" ]
-    assert_stderr_line "tlogger: $A: a prune was cut short; run the same prune again"
-    # The same prune finishes it, and PRUNED keeps its one line.
+    [ -z "$stderr" ]
+    # The next prune removes it as any other, and records it once more.
     UNLINK_FAIL=
     run_watched prune acme --archive "$ARCHIVE" --delete --confirm acme
     [ "$status" -eq 0 ]
-    [ "$output" = "$A  finish"$'\n'"$(stays_line "$SHOWN/acme")"$'\n'"$first_line" ]
     mapfile -t lines < "$LOGS/acme/PRUNED"
-    [ "${#lines[@]}" -eq 1 ]
-    [ "${lines[0]}" = "$first_line" ]
+    [ "${#lines[@]}" -eq 3 ]
+    assert_pruned_line "${lines[2]}" "$A" "$sum_a"
+    [ "$output" = "$A  remove"$'
+'"$(stays_line "$SHOWN/acme")"$'
+'"${lines[2]}" ]
     [[ ! -e $LOGS/acme/$A && ! -L $LOGS/acme/$A ]]
     refute_rm
+    run_tlogger verify --all
+    [ "$status" -eq 0 ]
+    [ "$output" = "$A  pruned" ]
 }
 
-@test "prune refuses an archive whose file name holds a space, removing nothing" {
+@test "prune refuses an archive file name with a space, and archive never makes one" {
     need modes
     need python3
     local before want
@@ -1605,6 +1619,17 @@ assert_kept() {
     assert_refused 1 "$want character; rename it"
     [ "$(tree_of "$LOGS")" = "$before" ]
     refute_removed
+    # archive --none never makes such a name: a log folder named with a space is refused.
+    mkdir -m 700 "$HOME/case logs"
+    make_session "$HOME/case logs/$B"
+    write_config "logdir=$HOME/case logs"$'\n'
+    run_tlogger seal --all
+    [ "$status" -eq 0 ]
+    before=$(tree_of "$HOME/case logs")
+    run_tlogger archive --none
+    want='tlogger: the name of the log folder ~/case logs holds a space or a control character,'
+    assert_refused 1 "$want which an archive's name cannot hold; use an engagement folder"
+    [ "$(tree_of "$HOME/case logs")" = "$before" ]
 }
 
 @test "an archive --none passes its checks when an engagement shares the log folder's name" {

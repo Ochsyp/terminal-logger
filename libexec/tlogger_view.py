@@ -2342,47 +2342,51 @@ def _check_sidecar(path, shown, result):
     return None
 
 
-def _live_problem(folder, manifest):
-    """Return why the bytes MANIFEST are not a byte prefix of FOLDER/MANIFEST, read without
-    following a symlink, or None when they are; a missing one has no bytes."""
+def _live_problem(folder, result):
+    """Return why the MANIFEST bytes of RESULT are not a byte prefix of FOLDER/MANIFEST, read
+    without following a symlink; None when they are; and False when FOLDER is no folder, or its
+    MANIFEST is missing or names none of RESULT's sessions, so that the archive is not of it."""
+    try:
+        if not stat.S_ISDIR(os.lstat(folder).st_mode):
+            return False
+    except OSError:
+        return False
     live = os.path.join(folder, "MANIFEST")
     try:
         fd = os.open(live, _O_READ)
     except FileNotFoundError:
-        data = b""
+        return False
     except OSError as error:
         return "cannot read %s: %s" % (_shown(live), error.strerror)
-    else:
-        try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                return "%s is not a regular file" % _shown(live)
-            data = _read_upto(fd, len(manifest))
-        finally:
-            os.close(fd)
-    if data != manifest:
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return "%s is not a regular file" % _shown(live)
+        data = _read_upto(fd, _MANIFEST_MAX)
+    finally:
+        os.close(fd)
+    ends = tuple(("  %s/SHA256SUMS" % sid).encode() for sid in result.sessions)
+    if not any(line.endswith(ends) for line in _lines(data)):
+        return False
+    if not data.startswith(result.manifest):
         return "its MANIFEST is not the start of %s" % _shown(live)
     return None
 
 
 def _check_live(logdir, result):
-    """Make it a fault of RESULT that its archived MANIFEST starts neither the MANIFEST of the
-    engagement folder of LOGDIR that its <name> names, nor, when <name> is the last part of
-    LOGDIR's path, that of LOGDIR itself, as archive --none names its archives. An archive
-    whose <name> names neither folder is not checked."""
+    """Make it a fault of RESULT that its archived MANIFEST starts the MANIFEST of none of the
+    folders of LOGDIR that its <name> may name: the engagement folder <name>, and LOGDIR itself
+    when <name> is the last part of its path, as archive --none names its archives. A folder
+    that is missing, or whose MANIFEST names none of the archived sessions, is not of this
+    archive, as on another computer, and is not compared."""
     name = result.name
     if logdir is None or result.manifest is None or not name:
         return
     folders = []
     if _engagement_ok(name):
-        folder = os.path.join(logdir, name)
-        try:
-            if stat.S_ISDIR(os.lstat(folder).st_mode):
-                folders.append(folder)
-        except OSError:
-            pass
+        folders.append(os.path.join(logdir, name))
     if os.path.basename(logdir.rstrip("/")) == name:
         folders.append(logdir)
-    problems = [_live_problem(folder, result.manifest) for folder in folders]
+    problems = [p for p in (_live_problem(f, result) for f in folders) if p is not False]
     if problems and None not in problems:
         result.faults.extend(problems)
 
@@ -2682,7 +2686,7 @@ def _write_tar(sink, fdfd, folder, name, ids):
     return manifest
 
 
-def _create_part(dfd, base, made):
+def _create_temp(dfd, base, made):
     """Create a new temp file for the file BASE in the folder DFD, mode 0600, add its name to
     MADE and return the name and an fd that writes it. The signals of _STOP_SIGNALS wait while it
     is created, so that none comes between its creation and its name in MADE."""
@@ -2757,14 +2761,14 @@ def archive_write(name, out, folder, ids):
     try:
         fdfd = _open_folder(folder)
         fds.append(fdfd)
-        part, fd = _create_part(adfd, base, made)
+        part, fd = _create_temp(adfd, base, made)
         fds.append(fd)
         sink = _HashingWriter(fd)
         manifest = _write_tar(sink, fdfd, folder, name, ids)
         _finish_part(fd, fds)
         digest = sink.digest.hexdigest()
         _check_written(adfd, part, out, name, ids, manifest, digest)
-        side_part, fd = _create_part(adfd, side, made)
+        side_part, fd = _create_temp(adfd, side, made)
         fds.append(fd)
         _write_all(fd, ("%s  %s\n" % (digest, base)).encode())
         _finish_part(fd, fds)

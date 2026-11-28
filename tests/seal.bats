@@ -625,14 +625,15 @@ assert_missing() {
     [[ ${lines[1]} == "$b "* ]]
 }
 
-@test "verify names a prune cut short, whole or emptied, and counts the emptied one changed" {
+@test "verify names a prune cut short that emptied a folder, but not a whole session" {
     local b=20261112T110000Z-bbbbbb c=20261112T120000Z-cccccc f
     make_session "$b"
     make_session "$c"
     run_tlogger seal --all
     [ "$status" -eq 0 ]
-    # Both are in PRUNED: c as a prune cut short before its first removal left it, b as one cut
-    # short before its folder went, with no file left.
+    # Both are in PRUNED: b as a prune cut short before its folder went left it, with no file
+    # left; c whole, as a session put back after a prune, or one a prune stopped before its first
+    # removal.
     record_pruned "$LOGS" "$b" "$(sha_of "$LOGS/$b/SHA256SUMS")"
     record_pruned "$LOGS" "$c" "$(sha_of "$LOGS/$c/SHA256SUMS")"
     for f in "$LOGS/$b"/*; do
@@ -644,7 +645,7 @@ assert_missing() {
     [[ ${lines[0]} == "$b  "* && ${lines[0]} != "$b  ok" ]]
     [ "${lines[1]}" = "$c  ok" ]
     grep -Fxq "tlogger: $b: a prune was cut short; run the same prune again" <<< "$stderr"
-    grep -Fxq "tlogger: $c: a prune was cut short; run the same prune again" <<< "$stderr"
+    [ "$(grep -c 'a prune was cut short' <<< "$stderr")" -eq 1 ]
     # Neither count names b: it is no session for seal --all.
     [[ $stderr != *'not sealed'* && $stderr != *'no recorder file'* ]]
 }

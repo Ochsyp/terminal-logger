@@ -875,9 +875,11 @@ one is `ok` and 1 otherwise, and names each fault on stderr. It applies the rule
 `tlogger verify` to each session, and also checks the `.sha256` file beside FILE, the names and
 types of the members, that nothing follows the end of the archive, and that the archived
 `MANIFEST` is the start of the `MANIFEST` of the folder whose name the archive holds: the
-engagement folder of that name, or the log folder itself for an archive made with `--none`.
-Without the `.sha256` file, it says so and prints the archive's SHA-256 to compare
-with the one that archive printed. A FILE that is missing, not gzip or cut short exits 1.
+engagement folder of that name, or the log folder itself for an archive made with `--none`. It
+compares only with a folder whose `MANIFEST` names a session of the archive, so a copy checked
+on another computer is checked by itself. Without the `.sha256` file, it says so and prints the
+archive's SHA-256 to compare with the one that archive printed. A FILE that is missing, not gzip
+or cut short exits 1.
 
 `ok` means that the archive is whole and agrees with itself. Its SHA-256, compared with the sum
 you kept apart, shows that it is the archive you made.
@@ -987,7 +989,7 @@ said to do, and `verify --all` says `pruned` for it.
 A power loss, or a removal that fails, as on an immutable file, can stop prune inside a session.
 A failed removal makes prune exit 1 and name the file, and the sessions it had not reached stay.
 Since the `PRUNED` line comes before the first removal and `SEAL` goes last, that session
-verifies `changed`, or `ok` when its first file could not go, and `verify --all` adds:
+verifies `changed`, and `verify --all` adds:
 
 ```text
 tlogger: 20261112T100000Z-a1B2c3: a prune was cut short; run the same prune again
@@ -999,8 +1001,14 @@ that the archive holds with the same sum, or `transcript.txt`. The finish adds n
 `PRUNED` line: the one written first stays. A session left with no file at all also counts as
 `changed`, with the same line. Once the folder is gone, `verify --all` says `pruned`.
 
+When prune stops before the first file of a session goes, as when `PRUNED` cannot be flushed to
+the disk, the session stays whole and verifies `ok`, with no line about a prune: a session put
+back after a prune looks the same. The next prune removes it as any other and adds a new
+`PRUNED` line, so `PRUNED` may hold more than one line for it.
+
 prune refuses an archive whose file name holds a space or a control character, as it would split
-the `PRUNED` line; archive never makes such a name.
+the `PRUNED` line. archive never makes such a name: `archive --none` refuses a log folder whose
+name holds one, and an engagement name holds none.
 
 ### What cannot be undone
 

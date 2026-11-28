@@ -32,6 +32,25 @@ for node in ast.walk(tree):
         if name.split(".")[0] not in allowed:
             print("line %d imports %s" % (node.lineno, name))'
 
+# A Python script that prints each function, class or upper-case constant that the top level of
+# the file in argv[1] defines more than once, with the lines of each definition.
+TWICE_DEFINED='import ast, sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    tree = ast.parse(source.read())
+seen = {}
+for node in tree.body:
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        names = [node.name]
+    elif isinstance(node, ast.Assign):
+        names = [t.id for t in node.targets if isinstance(t, ast.Name) and t.id.isupper()]
+    else:
+        continue
+    for name in names:
+        seen.setdefault(name, []).append(node.lineno)
+for name, lines in sorted(seen.items()):
+    if len(lines) > 1:
+        print("%s is defined on lines %s" % (name, ", ".join(map(str, lines))))'
+
 # Run before each test by bats.
 # Gives the test its own home, so no global git setting changes what git lists.
 setup() {
@@ -220,6 +239,15 @@ recursive_removals() {
     "$PYTHON3" -I -c 'import py_compile, sys; py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True)' \
         "$VIEW" "$BATS_TEST_TMPDIR/tlogger_view.pyc"
     run "$PYTHON3" -I -c "$FOREIGN_IMPORTS" "$VIEW"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "libexec/tlogger_view.py defines each top-level function, class and constant once" {
+    need python3
+    # A second def of a name replaces the first for every caller, as a second _create_part once
+    # broke render; the script prints each name defined twice.
+    run "$PYTHON3" -I -c "$TWICE_DEFINED" "$VIEW"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
