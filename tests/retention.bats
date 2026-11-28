@@ -203,12 +203,14 @@
 #     tlogger: this cannot be undone; type the folder's name, <name>, to go ahead:
 #   Any other NAME or answer: exit 1, nothing changed, and stderr ends with: tlogger: nothing
 #   changed
-# - Then session by session, oldest first, with HUP, INT, QUIT and TERM held off, it checks the
-#   session again. For remove, it appends the session's PRUNED line under flock, syncs it and
-#   prints it on stdout; for finish, it appends nothing and prints the line PRUNED holds. Then it
-#   removes, each with unlink -- by its own name, the files SHA256SUMS lists, in its order, then
-#   transcript.txt, SHA256SUMS and SEAL, and runs rmdir on the folder. Only unlink, rmdir,
-#   flock and sync change anything: never rm, chmod, a glob, or a symlink followed.
+# - Then session by session, oldest first, with HUP, INT, PIPE, QUIT and TERM held off, it
+#   checks the session again. For remove, it appends the session's PRUNED line under flock,
+#   syncs it and prints it on stdout; for finish, it appends nothing and prints the line PRUNED
+#   holds. Then it removes, each with unlink -- by its own name, the files SHA256SUMS lists, in
+#   its order, then transcript.txt, SHA256SUMS and SEAL, and runs rmdir on the folder. Only
+#   unlink, rmdir, flock and sync change anything: never rm, chmod, a glob, or a symlink
+#   followed. A reader of stdout that goes away, as less quit early, stops nothing: a PRUNED
+#   line that cannot be printed is passed over.
 # - Done: exit 0, stdout the plan and then the PRUNED line of each session, and this line alone
 #   on stderr, after the question if one was asked ('session' for 1):
 #     tlogger: removed <N> sessions of <folder>, as <folder>/PRUNED records
@@ -1602,6 +1604,39 @@ assert_kept() {
     run_tlogger verify --all
     [ "$status" -eq 0 ]
     [ "$output" = "$A  pruned" ]
+}
+
+@test "a reader of stdout that goes away after the plan never stops prune between its steps" {
+    need modes
+    need python3
+    local id
+    local -A sums=()
+    local -a lines
+    sealed_engagement acme "$A" "$B" "$C"
+    make_archive acme
+    for id in "$A" "$B" "$C"; do
+        sums[$id]=$(sha_of "$LOGS/acme/$id/SHA256SUMS")
+    done
+    require_test_home
+    # head takes the plan, 3 lines and the stays line, and exits, so each PRUNED line that prune
+    # prints after it goes into a pipe without a reader, as after less quit early: SIGPIPE.
+    # shellcheck disable=SC2016 # The inner bash expands them.
+    run --separate-stderr bash -c \
+        '"$@" < /dev/null | head -n 4 > /dev/null; exit "${PIPESTATUS[0]}"' _ \
+        bash "$TLOGGER" prune acme --archive "$ARCHIVE" --delete --confirm acme
+    [ "$status" -eq 0 ]
+    [ "$stderr" = "tlogger: removed 3 sessions of $SHOWN/acme, as $SHOWN/acme/PRUNED records" ]
+    mapfile -t lines < "$LOGS/acme/PRUNED"
+    [ "${#lines[@]}" -eq 3 ]
+    assert_pruned_line "${lines[0]}" "$A" "${sums[$A]}"
+    assert_pruned_line "${lines[1]}" "$B" "${sums[$B]}"
+    assert_pruned_line "${lines[2]}" "$C" "${sums[$C]}"
+    for id in "$A" "$B" "$C"; do
+        [[ ! -e $LOGS/acme/$id && ! -L $LOGS/acme/$id ]]
+    done
+    run_tlogger verify --all
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(printf '%s  pruned\n' "$A" "$B" "$C")" ]
 }
 
 @test "prune refuses an archive file name with a space, and archive never makes one" {
