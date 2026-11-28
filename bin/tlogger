@@ -5466,8 +5466,10 @@ prune_record() {
     if (( rc != 0 )); then
         return 1
     fi
-    # An older sync takes no file and syncs everything (see seal_session).
-    sync -- "$PRUNED_FILE" 2> /dev/null || sync || return 2
+    # No fallback to a plain sync, which succeeds even when this file could not be flushed: the
+    # line must be on the disk before anything goes. An older sync that ignores the file still
+    # exits 0 after syncing everything.
+    sync -- "$PRUNED_FILE" 2> /dev/null || return 2
 }
 
 # Remove the session folder DIR of FOLDER, which the plan marked WANT, remove or finish. Checks

@@ -827,7 +827,7 @@ assert_missing() {
     [ "$stderr" = "$unsealed1" ]
 }
 
-@test "a folder named MANIFEST or PRUNED that holds sessions is refused by list, seal and verify" {
+@test "a folder named MANIFEST or PRUNED holding sessions is refused, by id lookups too" {
     local a=20261112T100000Z-aaaaaa f=20261112T130000Z-ffffff name want
     make_session "$a"
     for name in MANIFEST PRUNED; do
@@ -845,6 +845,13 @@ assert_missing() {
         run_tlogger seal --all
         assert_refused 1 "$want"
         run_tlogger verify --all
+        assert_refused 1 "$want"
+        # A lookup by id reads the engagement folders, and the newest session too.
+        run_tlogger verify "$a"
+        assert_refused 1 "$want"
+        run_tlogger show "$a"
+        assert_refused 1 "$want"
+        run_tlogger show
         assert_refused 1 "$want"
         [ ! -e "$LOGS/$a/SEAL" ]
         [ "$(stat -c %a "$LOGS/$a/output.raw")" = 600 ]

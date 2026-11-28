@@ -106,8 +106,10 @@
 #   MANIFEST; a second <name>/MANIFEST; or an archived MANIFEST that is a byte prefix of the
 #   MANIFEST of neither folder that <name> may name: the engagement folder <name> of the log
 #   folder, and the log folder itself, when <name> is the last part of its path, as for --none.
-#   Only a folder whose MANIFEST names a session of the archive is compared; with none, as on
-#   another computer, the MANIFEST is not compared.
+#   Only a folder with a tie to the archive is compared: its MANIFEST names a session of the
+#   archive, its PRUNED records one, or it holds an entry named like one. There a missing or
+#   emptied MANIFEST is compared as empty, and fails. A folder with no tie, as on another
+#   computer, is not compared.
 # - Without the .sha256 file it says so, and its verdicts stand, with this line alone on stderr:
 #     tlogger: <FILE>.sha256 is missing; compare the archive's SHA-256, <sum>, with the one
 #     archive printed
@@ -1565,8 +1567,7 @@ assert_kept() {
     sum_a=$(sha_of "$LOGS/acme/$A/SHA256SUMS")
     first=$(sed -n 1p "$LOGS/acme/$A/SHA256SUMS" | cut -c67-)
     # PRUNED cannot be flushed to the disk: its line stays, and nothing is removed.
-    printf '%s
-' '#!/usr/bin/env bash' 'exit 1' > "$STAND_INS/sync"
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$STAND_INS/sync"
     chmod 755 "$STAND_INS/sync"
     run_watched prune acme --archive "$ARCHIVE" --delete --confirm acme
     [ "$status" -eq 1 ]
@@ -1595,9 +1596,7 @@ assert_kept() {
     mapfile -t lines < "$LOGS/acme/PRUNED"
     [ "${#lines[@]}" -eq 3 ]
     assert_pruned_line "${lines[2]}" "$A" "$sum_a"
-    [ "$output" = "$A  remove"$'
-'"$(stays_line "$SHOWN/acme")"$'
-'"${lines[2]}" ]
+    [ "$output" = "$A  remove"$'\n'"$(stays_line "$SHOWN/acme")"$'\n'"${lines[2]}" ]
     [[ ! -e $LOGS/acme/$A && ! -L $LOGS/acme/$A ]]
     refute_rm
     run_tlogger verify --all
@@ -1630,6 +1629,39 @@ assert_kept() {
     want='tlogger: the name of the log folder ~/case logs holds a space or a control character,'
     assert_refused 1 "$want which an archive's name cannot hold; use an engagement folder"
     [ "$(tree_of "$HOME/case logs")" = "$before" ]
+    # prune --none checks the folder the same way, before it reads FILE.
+    run_tlogger prune --none --archive "$ARCHIVE"
+    assert_refused 1 "$want which an archive's name cannot hold; use an engagement folder"
+    [ "$(tree_of "$HOME/case logs")" = "$before" ]
+}
+
+@test "archive --verify compares with a folder tied to the archive, never with an unrelated one" {
+    need modes
+    need python3
+    sealed_engagement acme "$A"
+    make_archive acme
+    run_tlogger prune acme --archive "$ARCHIVE" --delete --confirm acme
+    [ "$status" -eq 0 ]
+    run_tlogger archive --verify "$ARCHIVE"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$A  ok" ]
+    # PRUNED still records A, so an emptied or removed MANIFEST of acme is compared, and fails.
+    : > "$LOGS/acme/MANIFEST"
+    run_tlogger archive --verify "$ARCHIVE"
+    [ "$status" -eq 1 ]
+    [ "$output" = "$A  changed" ]
+    assert_stderr_line \
+        "tlogger: ${ARCHIVE##*/}: its MANIFEST is not the start of $SHOWN/acme/MANIFEST"
+    rm -f -- "$LOGS/acme/MANIFEST"
+    run_tlogger archive --verify "$ARCHIVE"
+    [ "$status" -eq 1 ]
+    [ "$output" = "$A  changed" ]
+    # A folder acme with no tie to the archive, as on another computer, is passed over.
+    mv "$LOGS/acme" "$HOME/old-acme"
+    sealed_engagement acme "$B"
+    run_tlogger archive --verify "$ARCHIVE"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$A  ok" ]
 }
 
 @test "an archive --none passes its checks when an engagement shares the log folder's name" {

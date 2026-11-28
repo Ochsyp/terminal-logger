@@ -32,24 +32,48 @@ for node in ast.walk(tree):
         if name.split(".")[0] not in allowed:
             print("line %d imports %s" % (node.lineno, name))'
 
-# A Python script that prints each function, class or upper-case constant that the top level of
-# the file in argv[1] defines more than once, with the lines of each definition.
+# A Python script that prints each name that the top level of the file in argv[1] binds more
+# than once, with the lines of each: a function, a class, an assignment or an import, also
+# inside a top-level if, try or with.
 TWICE_DEFINED='import ast, sys
 with open(sys.argv[1], encoding="utf-8") as source:
     tree = ast.parse(source.read())
 seen = {}
-for node in tree.body:
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        names = [node.name]
-    elif isinstance(node, ast.Assign):
-        names = [t.id for t in node.targets if isinstance(t, ast.Name) and t.id.isupper()]
-    else:
-        continue
-    for name in names:
-        seen.setdefault(name, []).append(node.lineno)
+def bind(name, node):
+    seen.setdefault(name, []).append(node.lineno)
+def targets(target, node):
+    if isinstance(target, ast.Name):
+        bind(target.id, node)
+    elif isinstance(target, (ast.Tuple, ast.List)):
+        for item in target.elts:
+            targets(item, node)
+def walk(body):
+    for node in body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bind(node.name, node)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                targets(target, node)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and node.value is not None:
+            targets(node.target, node)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                bind((alias.asname or alias.name).split(".")[0], node)
+        elif isinstance(node, ast.If):
+            walk(node.body)
+            walk(node.orelse)
+        elif isinstance(node, ast.Try):
+            walk(node.body)
+            for handler in node.handlers:
+                walk(handler.body)
+            walk(node.orelse)
+            walk(node.finalbody)
+        elif isinstance(node, ast.With):
+            walk(node.body)
+walk(tree.body)
 for name, lines in sorted(seen.items()):
     if len(lines) > 1:
-        print("%s is defined on lines %s" % (name, ", ".join(map(str, lines))))'
+        print("%s is bound on lines %s" % (name, ", ".join(map(str, lines))))'
 
 # Run before each test by bats.
 # Gives the test its own home, so no global git setting changes what git lists.
@@ -243,7 +267,7 @@ recursive_removals() {
     [ -z "$output" ]
 }
 
-@test "libexec/tlogger_view.py defines each top-level function, class and constant once" {
+@test "libexec/tlogger_view.py binds each top-level name once" {
     need python3
     # A second def of a name replaces the first for every caller, as a second _create_part once
     # broke render; the script prints each name defined twice.

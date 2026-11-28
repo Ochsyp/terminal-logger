@@ -876,10 +876,12 @@ one is `ok` and 1 otherwise, and names each fault on stderr. It applies the rule
 types of the members, that nothing follows the end of the archive, and that the archived
 `MANIFEST` is the start of the `MANIFEST` of the folder whose name the archive holds: the
 engagement folder of that name, or the log folder itself for an archive made with `--none`. It
-compares only with a folder whose `MANIFEST` names a session of the archive, so a copy checked
-on another computer is checked by itself. Without the `.sha256` file, it says so and prints the
-archive's SHA-256 to compare with the one that archive printed. A FILE that is missing, not gzip
-or cut short exits 1.
+compares with such a folder when the folder has a tie to the archive: its `MANIFEST` names a
+session of the archive, its `PRUNED` records one, or it holds one. There an emptied or missing
+`MANIFEST` fails the check. A folder with no tie, as on another computer, is not compared, so a
+copy checked there is checked by itself, and its SHA-256 is what shows that it is yours.
+Without the `.sha256` file, it says so and prints the archive's SHA-256 to compare with the one
+that archive printed. A FILE that is missing, not gzip or cut short exits 1.
 
 `ok` means that the archive is whole and agrees with itself. Its SHA-256, compared with the sum
 you kept apart, shows that it is the archive you made.
@@ -989,7 +991,7 @@ said to do, and `verify --all` says `pruned` for it.
 A power loss, or a removal that fails, as on an immutable file, can stop prune inside a session.
 A failed removal makes prune exit 1 and name the file, and the sessions it had not reached stay.
 Since the `PRUNED` line comes before the first removal and `SEAL` goes last, that session
-verifies `changed`, and `verify --all` adds:
+verifies `changed`, unless its first file could not go (see below), and `verify --all` adds:
 
 ```text
 tlogger: 20261112T100000Z-a1B2c3: a prune was cut short; run the same prune again

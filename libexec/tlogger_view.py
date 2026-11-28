@@ -2342,10 +2342,30 @@ def _check_sidecar(path, shown, result):
     return None
 
 
+def _read_small(path):
+    """Return the bytes of the regular file PATH, read without following a symlink, at most
+    _MANIFEST_MAX of them; None when it is missing; raise OSError when it cannot be read, and
+    ValueError when it is not a regular file."""
+    try:
+        fd = os.open(path, _O_READ)
+    except FileNotFoundError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(path)
+        return _read_upto(fd, _MANIFEST_MAX)
+    finally:
+        os.close(fd)
+
+
 def _live_problem(folder, result):
     """Return why the MANIFEST bytes of RESULT are not a byte prefix of FOLDER/MANIFEST, read
-    without following a symlink; None when they are; and False when FOLDER is no folder, or its
-    MANIFEST is missing or names none of RESULT's sessions, so that the archive is not of it."""
+    without following a symlink, a missing one holding none; None when they are; and False when
+    FOLDER has no tie to RESULT, so that the archive is not of it: it is no folder, or its
+    MANIFEST names none of RESULT's sessions, its PRUNED records none, and it holds none of
+    them. On the computer that made the archive the folder keeps such a tie, as the MANIFEST
+    only grows and prune records what it removes; a MANIFEST emptied or removed there is a
+    fault, not a reason to pass over it."""
     try:
         if not stat.S_ISDIR(os.lstat(folder).st_mode):
             return False
@@ -2353,21 +2373,30 @@ def _live_problem(folder, result):
         return False
     live = os.path.join(folder, "MANIFEST")
     try:
-        fd = os.open(live, _O_READ)
-    except FileNotFoundError:
-        return False
+        data = _read_small(live)
+    except ValueError:
+        return "%s is not a regular file" % _shown(live)
     except OSError as error:
         return "cannot read %s: %s" % (_shown(live), error.strerror)
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return "%s is not a regular file" % _shown(live)
-        data = _read_upto(fd, _MANIFEST_MAX)
-    finally:
-        os.close(fd)
-    ends = tuple(("  %s/SHA256SUMS" % sid).encode() for sid in result.sessions)
-    if not any(line.endswith(ends) for line in _lines(data)):
+    sids = set(result.sessions)
+    ends = tuple(("  %s/SHA256SUMS" % sid).encode() for sid in sids)
+    tied = data is not None and any(line.endswith(ends) for line in _lines(data))
+    if not tied:
+        try:
+            pruned = _read_small(os.path.join(folder, "PRUNED"))
+        except (OSError, ValueError):
+            pruned = None
+        if pruned is not None:
+            for line in _lines(pruned):
+                fields = line.split(b"  ")
+                if len(fields) > 1 and fields[1].decode("ascii", "replace") in sids:
+                    tied = True
+                    break
+    if not tied:
+        tied = any(os.path.lexists(os.path.join(folder, sid)) for sid in sids)
+    if not tied:
         return False
-    if not data.startswith(result.manifest):
+    if not (data or b"").startswith(result.manifest):
         return "its MANIFEST is not the start of %s" % _shown(live)
     return None
 
@@ -2376,8 +2405,7 @@ def _check_live(logdir, result):
     """Make it a fault of RESULT that its archived MANIFEST starts the MANIFEST of none of the
     folders of LOGDIR that its <name> may name: the engagement folder <name>, and LOGDIR itself
     when <name> is the last part of its path, as archive --none names its archives. A folder
-    that is missing, or whose MANIFEST names none of the archived sessions, is not of this
-    archive, as on another computer, and is not compared."""
+    with no tie to the archive (see _live_problem), as on another computer, is not compared."""
     name = result.name
     if logdir is None or result.manifest is None or not name:
         return
