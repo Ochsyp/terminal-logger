@@ -67,8 +67,9 @@
 # was, with this line:
 #   tlogger: another tlogger command works on session <id>; try again
 # hold_lock (helpers.bash) holds the lock from the test. A lock that cannot be taken at all,
-# flock missing or failing at once with any other status, as on NFS, is not waited for: seal
-# goes on without it. One test puts a flock first on PATH that fails at once.
+# flock missing (127) or failing with its own error status 1, as on NFS, is not waited for:
+# seal goes on without it; any other failure of flock, a signal included, counts as busy. One
+# test puts a flock first on PATH that fails at once.
 
 bats_require_minimum_version 1.5.0
 

@@ -91,10 +91,13 @@
 #      output.raw does, never counts. A process whose name in <pid>/stat, between the first '('
 #      and the last ')', is exactly script, as the plugin's handshake reads it, also writes it
 #      when an argument of its cmdline, split on NUL, is <folder>/output.raw, as the handshake
-#      looks for it, or another path ending in /output.raw to the same file, by device and inode:
+#      looks for it, or another path ending in /output.raw to the same file, by device and inode.
+#      The fdinfo flags are read first, and only a link open for writing is followed. A script
+#      process found by its cmdline, then one found by its fds, gives (each one line):
 #        tlogger: session <id> is still being recorded: a script process writes its output.raw;
 #        discard refuses it
-#      (one line).
+#        tlogger: session <id> is still being recorded: a process holds its logs open for
+#        writing; discard refuses it
 #   5. unknown only: the folder or any entry in it changed in the last 600 seconds, by the later
 #      of its mtime and its ctime, which touch -d cannot set back:
 #        tlogger: session <id> has no recorder file and changed in the last 10 minutes, so a
@@ -139,12 +142,13 @@
 #   (one line). It takes an exclusive flock on that folder, through a read-only fd on the folder
 #   itself, the lock that seal takes for its whole run on a session, and holds it through rmdir,
 #   so that seal and discard never work on one session at once. When another holds the lock
-#   for TLOGGER_LOCK_WAIT seconds (default 10), as flock -E 75 reports it: exit 1, stdout the 6
-#   lines, nothing changed, and stderr ends with (one line):
+#   for TLOGGER_LOCK_WAIT seconds (default 10), as flock -E 75 reports it, or flock fails in any
+#   way but its own error status 1, as when a signal kills it: exit 1, stdout the 6 lines,
+#   nothing changed, and stderr ends with (one line):
 #     tlogger: another tlogger command works on session <id>; nothing of it was removed; try
 #     again
-#   A lock that cannot be taken at all, flock missing or failing at once with any other status,
-#   as on NFS, is not waited for: discard goes on without it.
+#   A lock that cannot be taken at all, flock missing (127) or failing with its own error
+#   status 1, as on NFS, is not waited for: discard goes on without it.
 #   Then the path must still name that folder, with the "changed" line above, and it checks
 #   everything again: any change since, such as a SEAL or a stray file made while the question
 #   waits, exits 1 with the matching refusal and removes nothing; then the path once more. Then
@@ -362,6 +366,13 @@ open_msg() {
 writer_msg() {
     printf 'tlogger: session %s is still being recorded: a script process writes its' "$1"
     printf ' output.raw; discard refuses it\n'
+}
+
+# Print the refusal of the session ID whose logs a process holds open for writing, found by its
+# fds rather than by the cmdline of a script process.
+held_msg() {
+    printf 'tlogger: session %s is still being recorded: a process holds its logs open for' "$1"
+    printf ' writing; discard refuses it\n'
 }
 
 # Print the refusal of the session ID whose logs have mode 400, as seal leaves them.
@@ -700,15 +711,52 @@ assert_discard_refused() {
     fake_fd 5150 0 /dev/null 0100002
     for name in output.raw timing input.raw; do
         fake_fd 5150 3 "$SDIR/$name" 0100001
-        assert_discard_refused "$A" "$(writer_msg "$A")"
+        assert_discard_refused "$A" "$(held_msg "$A")"
     done
     # Open to read and write counts as well.
     fake_fd 5150 3 "$SDIR/output.raw" 0100002
-    assert_discard_refused "$A" "$(writer_msg "$A")"
+    assert_discard_refused "$A" "$(held_msg "$A")"
     # The same fd open only to read, in a process of another name, does not count.
     fake_fd 5150 3 "$SDIR/output.raw" 0100000
     fake_other 5150 less less -R output.raw
     run_watched discard "$A" --confirm "$A"
+    [ "$status" -eq 0 ]
+    [ "$stderr" = "$(done_msg "$A" "$SHOWN")" ]
+    [[ ! -e $SDIR && ! -L $SDIR ]]
+}
+
+@test "on the real /proc, a process that holds output.raw open to write keeps the session" {
+    need modes
+    local pid i
+    make_session "$A"
+    make_stand_ins
+    # A process of this test holds output.raw on fd 7, open to append, then only to read.
+    bash -c 'exec 7>> "$1"; exec sleep 60' _ "$SDIR/output.raw" \
+        < /dev/null > /dev/null 2>&1 3>&- &
+    pid=$!
+    for (( i = 0; i < 100; i++ )); do
+        [[ -e /proc/$pid/fd/7 ]] && break
+        sleep 0.1
+    done
+    TLOGGER_PROC=/proc run_watched discard "$A" --confirm "$A"
+    kill "$pid" 2> /dev/null || true
+    wait "$pid" 2> /dev/null || true
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+    [ "$(last_stderr_line)" = "$(held_msg "$A")" ]
+    [ -f "$SDIR/output.raw" ]
+    [ ! -e "$LOGS/PRUNED" ]
+    refute_removed
+    bash -c 'exec 7< "$1"; exec sleep 60' _ "$SDIR/output.raw" \
+        < /dev/null > /dev/null 2>&1 3>&- &
+    pid=$!
+    for (( i = 0; i < 100; i++ )); do
+        [[ -e /proc/$pid/fd/7 ]] && break
+        sleep 0.1
+    done
+    TLOGGER_PROC=/proc run_watched discard "$A" --confirm "$A"
+    kill "$pid" 2> /dev/null || true
+    wait "$pid" 2> /dev/null || true
     [ "$status" -eq 0 ]
     [ "$stderr" = "$(done_msg "$A" "$SHOWN")" ]
     [[ ! -e $SDIR && ! -L $SDIR ]]
@@ -725,7 +773,7 @@ assert_discard_refused() {
     # holds output.raw open for writing.
     fake_other 5152 script-2.40 /usr/local/bin/script-2.40 --log-out output.raw
     fake_fd 5152 3 "$LOGS/$A/output.raw" 0100001
-    assert_discard_refused "$A" "$(writer_msg "$A")"
+    assert_discard_refused "$A" "$(held_msg "$A")"
     # The same fd open only to read, in a less: discard goes on. A recorder that writes another
     # session's output.raw does not count either.
     fake_other 5152 less less -R output.raw
@@ -810,6 +858,13 @@ STAND_IN
     refute_removed
     # discard asks for the lock on its fd with -E 75, waiting 10 seconds.
     grep -Eqx -- '-x -w 10 -E 75 [0-9]+' "$STAND_INS/flock-calls"
+    # A flock that a signal killed (143) counts as busy too, never as no lock.
+    printf '143\n' > "$STAND_INS/flock-status"
+    run_watched discard "$A" --confirm "$A"
+    [ "$status" -eq 1 ]
+    [ "$stderr" = "$want try again" ]
+    [ "$(tree_of "$HOME")" = "$before" ]
+    refute_removed
     # A lock that cannot be taken at all is not busy: discard goes on without it.
     printf '1\n' > "$STAND_INS/flock-status"
     : > "$CALLS"

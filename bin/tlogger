@@ -4276,11 +4276,11 @@ sha256_of() {
 # so that seal and discard never work on one session at once. LOCK_FD holds it until
 # unlock_session closes it; the exit of tlogger closes it too. It waits TLOGGER_LOCK_WAIT
 # seconds, for tests only, else 10. Returns 1, holding nothing, when DIR cannot be opened, and 2
-# only when another holds the lock all that time: flock's -E 75 sets that status apart. A lock
-# that cannot be taken at all is not "busy": without flock on PATH (status 127), or when flock
-# fails at once with any other status, as on NFS, where flock on a read-only fd fails with EBADF,
-# it closes the fd and goes on without a lock, as manifest_add and prune_record do; LOCK_FD is
-# then empty.
+# when another holds the lock all that time (flock's -E 75), or flock fails in any way but its
+# own error. A lock that cannot be taken at all is not "busy": without flock on PATH (status
+# 127), or when flock fails with its own error status 1, as on NFS, where flock on a read-only fd
+# fails with EBADF, it closes the fd and goes on without a lock, as manifest_add and prune_record
+# do; LOCK_FD is then empty.
 lock_session() {
     # Byte ranges, so that no locale widens [0-9].
     local LC_ALL=C wait=10 rc=0
@@ -4293,12 +4293,15 @@ lock_session() {
         return 1
     fi
     flock -x -w "$wait" -E 75 "$LOCK_FD" 2> /dev/null || rc=$?
-    if (( rc == 75 )); then
+    # 1 is flock's own error, as for a lock the file system refuses (EBADF on NFS), and 127 no
+    # flock at all: no lock can be had, so go on without one. Every other failure, 75 for a lock
+    # another holds, a flock killed by a signal or one that cannot run as asked, counts as busy,
+    # so that no seal and discard ever work on one session at once.
+    if (( rc == 1 || rc == 127 )); then
+        unlock_session
+    elif (( rc != 0 )); then
         unlock_session
         return 2
-    fi
-    if (( rc != 0 )); then
-        unlock_session
     fi
 }
 
@@ -5766,10 +5769,11 @@ discard_manifest() {
 # while a scriptreplay of the session or a less of its output.raw, which only read, do not. A
 # process writes them when one of its fds holds DIR's output.raw, timing or input.raw open for
 # writing: one find over every <pid>/fd/ picks the entries whose link ends in /output.raw,
-# /timing or /input.raw, by -lname, which reads the link and stats nothing, so that an fd on a
-# hung mount elsewhere cannot block it; such an entry counts when it resolves, by device and
-# inode, to one of those three files of DIR, and <pid>/fdinfo/<fd> has a line 'flags:' whose
-# octal value has O_WRONLY or O_RDWR in its low two bits. A process named exactly script in
+# /timing or /input.raw, by -lname, which reads the link and stats nothing; of those, only one
+# whose <pid>/fdinfo/<fd> has a line 'flags:' with O_WRONLY or O_RDWR in the low two bits of its
+# octal value is then followed, so that a hung mount behind a file a reader holds cannot block
+# it, and it counts when it resolves, by device and inode, to one of the three files of DIR.
+# Its refusal says that a process holds the logs open for writing. A process named exactly script in
 # <pid>/stat, between the first '(' and the last ')', as the plugin's handshake reads it, also
 # writes them when an argument of its cmdline is DIR/output.raw as written, as the handshake
 # looks for it, or another path ending in /output.raw to the same file, by device and inode, as
@@ -5779,8 +5783,8 @@ discard_manifest() {
 discard_writer() {
     # Byte ranges, so that no locale widens [0-9] or [0-7].
     local LC_ALL=C dir=$1 id=$2 want=$1/output.raw p line comm a got key name hit fd info
-    local flags match
-    local -a args keys=() fdirs=() hits=() held=()
+    local flags
+    local -a args keys=() fdirs=() hits=() held=() writers=()
     key=$(stat -c %d:%i -- "$want" 2> /dev/null) || key=
     for name in output.raw timing input.raw; do
         got=$(stat -c %d:%i -- "$dir/$name" 2> /dev/null) || got=
@@ -5833,20 +5837,13 @@ discard_writer() {
     if (( ${#hits[@]} == 0 )); then
         return 0
     fi
-    # One stat for every hit; a link that no longer resolves prints no line.
-    mapfile -t held < <(stat -L -c '%d:%i %n' -- "${hits[@]}" 2> /dev/null || true)
-    for line in "${held[@]}"; do
-        got=${line%% *} hit=${line#* }
-        match=0
-        for a in "${keys[@]}"; do
-            if [[ $got == "$a" ]]; then
-                match=1
-            fi
-        done
+    # The open mode first, from fdinfo, which touches no file system: only a link open for
+    # writing is followed, so that a hung mount behind a file that a reader holds never blocks.
+    writers=()
+    for hit in "${hits[@]}"; do
         fd=${hit##*/} p=${hit%/fd/*}
         info=$p/fdinfo/$fd
-        if [[ $match == 0 || ! $fd =~ ^[0-9]+$ || -L $p/fdinfo || -L $info || ! -f $info ||
-            ! -r $info ]]; then
+        if [[ ! $fd =~ ^[0-9]+$ || -L $p/fdinfo || -L $info || ! -f $info || ! -r $info ]]; then
             continue
         fi
         flags=
@@ -5860,9 +5857,22 @@ discard_writer() {
         } 2> /dev/null || true
         # O_ACCMODE: 1 is O_WRONLY, 2 O_RDWR; 0, O_RDONLY, only reads.
         if [[ -n $flags ]] && (( (8#$flags & 3) != 0 )); then
-            die 1 "session $id is still being recorded: a script process writes its" \
-                "output.raw; discard refuses it"
+            writers+=("$hit")
         fi
+    done
+    if (( ${#writers[@]} == 0 )); then
+        return 0
+    fi
+    # One stat for every writer; a link that no longer resolves prints no line.
+    mapfile -t held < <(stat -L -c '%d:%i %n' -- "${writers[@]}" 2> /dev/null || true)
+    for line in "${held[@]}"; do
+        got=${line%% *}
+        for a in "${keys[@]}"; do
+            if [[ $got == "$a" ]]; then
+                die 1 "session $id is still being recorded: a process holds its logs open for" \
+                    "writing; discard refuses it"
+            fi
+        done
     done
 }
 
