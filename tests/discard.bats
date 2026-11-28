@@ -1,11 +1,12 @@
 #!/usr/bin/env bats
 # Tests for tlogger discard in bin/tlogger, run as a subprocess in the test's own HOME on
-# synthetic sessions. A fake /proc, which TLOGGER_PROC names, holds the boot id and the processes
-# that the liveness check reads, so that a session counts as still recorded only when a test says
-# so. Stand-ins first on PATH log every rm, unlink, rmdir and sync that bin/tlogger runs: rm
-# fails, unlink fails for one named file as on an immutable one, and sync fails when a test says
-# so. One test answers discard's question in a pseudo-terminal that zsh's zpty module drives
-# (tests/helpers/pty.zsh).
+# synthetic sessions. A fake /proc, which TLOGGER_PROC names, holds the boot id, the mountinfo
+# and the processes that discard reads, so that a session counts as still recorded only when a
+# test says so. TLOGGER_NOW, which discard reads instead of the clock for its 10-minute rule,
+# lets a test make a session old: touch -d cannot set a file's ctime back. Stand-ins first on
+# PATH log every rm, unlink, rmdir and sync that bin/tlogger runs: rm fails, unlink fails for one
+# named file as on an immutable one, and sync fails when a test says so. One test answers
+# discard's question in a pseudo-terminal that zsh's zpty module drives (tests/helpers/pty.zsh).
 #
 # The contract these tests pin. Every message starts with 'tlogger: ' and shows a path under HOME
 # with ~; <log folder> is ~/.local/state/tlogger/sessions here, and <parent> is the folder that
@@ -27,28 +28,59 @@
 # - Then it resolves the session; resolve_session's own refusals and exit codes stand (no log
 #   folder: exit 3; no such session, no session id, a folder that is a symlink or holds no
 #   output.raw: exit 1, with its messages). So a session folder that is a symlink is refused by
-#   resolve_session's line '<folder> is a symlink, which tlogger does not follow'.
+#   resolve_session's line '<folder> is a symlink, which tlogger does not follow'. A session
+#   folder whose name holds a space or a control character, which only a path can name, is
+#   refused next, as a PRUNED line cannot hold it:
+#     tlogger: the name of <folder> holds a space or a control character, which a PRUNED line
+#     cannot hold; rename it
+#   (one line).
 # - It checks, in this order, and stops at the first that fails: exit 1, nothing on stdout, the
 #   one message alone on stderr, and nothing changed anywhere:
-#   1. the session folder (discard never runs chmod):
+#   1. for a session named by its id, the volume of logdir_mount, as archive and prune check it:
+#        tlogger: the volume <mount> of the log folder is not mounted
+#      and check_logdir_mount's other lines; then <parent>, closed to its group and others,
+#      sticky bit or not:
+#        tlogger: the folder <parent> is writable by its group or by others; chmod go-w
+#        <parent> fixes it
+#      (one line).
+#   2. the session folder (discard never runs chmod):
 #        tlogger: session <id>: its folder is a symlink, which tlogger does not follow
 #        tlogger: session <id>: its folder belongs to another user
 #        tlogger: session <id>: its folder is writable by its group or by others; chmod go-w
 #        <folder> fixes it
 #        tlogger: session <id>: its folder has mode <mode>, so you cannot remove its files
 #      (the third one line), the last when you may not read, write and search it.
-#   2. sealed: the folder holds SEAL, SHA256SUMS, SEAL.part.* or SHA256SUMS.part.*, or the
+#   3. sealed: the folder holds SEAL, SHA256SUMS, SEAL.part.* or SHA256SUMS.part.*, or the
 #      MANIFEST of <parent> has a line for <id>:
 #        tlogger: session <id> is sealed; tlogger archive and tlogger prune remove sealed
 #        sessions
-#      (one line). A changed sealed session is caught here too.
-#   3. the verdict of verify must be unsealed or unknown:
+#      (one line). A changed sealed session is caught here too. A MANIFEST that is a symlink,
+#      not a regular file or unreadable:
+#        tlogger: cannot read <parent>/MANIFEST, so discard cannot tell whether session <id> is
+#        sealed
+#      (one line). Then a log of SEAL_FILES of mode 0400, as seal leaves it, where a recording
+#      leaves 0600:
+#        tlogger: session <id> has logs of mode 400, as seal leaves them, so it may be a sealed
+#        session whose seal is gone; discard refuses it
+#      (one line). Then, for a session named by its id, the MANIFEST of the log folder and of
+#      each engagement folder, with the same two lines: a sealed session moved by hand to
+#      another folder, its SEAL and SHA256SUMS deleted and its logs set back to 0600, is still
+#      found.
+#   4. the verdict of verify must be unsealed or unknown:
 #        tlogger: session <id> is still being recorded; discard refuses it
-#   4. unknown only: the folder or any entry in it was modified in the last 600 seconds:
+#      and, unsealed or unknown alike, no process under TLOGGER_PROC (default /proc) may have an
+#      argument of its cmdline, split on NUL, equal to <folder>/output.raw, as the plugin's
+#      handshake looks for its script process, or another path ending in /output.raw to the
+#      same file, by device and inode:
+#        tlogger: session <id> is still being recorded: a script process writes its output.raw;
+#        discard refuses it
+#      (one line).
+#   5. unknown only: the folder or any entry in it changed in the last 600 seconds, by the later
+#      of its mtime and its ctime, which touch -d cannot set back:
 #        tlogger: session <id> has no recorder file and changed in the last 10 minutes, so a
 #        terminal may still record into it; try again later
 #      (one line).
-#   5. its entries: only output.raw, timing, input.raw, commands.tsv, recorder, started, exited,
+#   6. its entries: only output.raw, timing, input.raw, commands.tsv, recorder, started, exited,
 #      stop-requested, transcript.txt and transcript.txt.part, each a regular file of yours, not
 #      a symlink, with one hard link; dot files count as entries:
 #        tlogger: session <id> holds <entry>, which is no file of a session; discard removes
@@ -58,9 +90,15 @@
 #        tlogger: session <id>: <entry> belongs to another user
 #        tlogger: session <id>: <entry> has more than one hard link
 #      (the first one line).
-#   6. <parent>/PRUNED, when it exists:
+#   7. <parent>/PRUNED, when it exists, then <parent> itself:
 #        tlogger: <parent>/PRUNED is a symlink, which tlogger does not follow
 #        tlogger: <parent>/PRUNED is not a regular file
+#        tlogger: <parent>/PRUNED belongs to another user
+#        tlogger: <parent>/PRUNED has more than one hard link
+#        tlogger: you cannot write in <parent>, so discard cannot remove the folder of session
+#        <id>
+#      (the last one line). Another user's PRUNED, or entry, needs root to make, so no test here
+#      covers those two lines.
 # - Then it shows the session on stdout, these 6 lines, printf '%-8s  %s\n':
 #     session   <id>
 #     folder    <parent>
@@ -73,10 +111,15 @@
 #     tlogger: this cannot be undone; type the session's id, <id>, to go ahead:
 #   (ending with ': '). A wrong ID or answer: exit 1, stdout the 6 lines, nothing changed, and
 #   stderr ends with: tlogger: nothing changed
-# - Then, with HUP, INT, QUIT and TERM held off, it checks everything again: any change since
-#   exits 1 with the matching refusal and removes nothing. Then it appends to <parent>/PRUNED,
-#   under flock, made with mode 0600, after a line end when the file does not end with one, this
-#   line, flushes it with sync -- <parent>/PRUNED (no fallback), and prints it on stdout:
+# - Then, with HUP, INT, PIPE, QUIT and TERM held off, it checks everything again: any change
+#   since, such as a SEAL or a stray file made while the question waits, exits 1 with the
+#   matching refusal and removes nothing. It goes into the session folder (cd -P) and exits 1,
+#   writing and removing nothing, unless that is the folder it checked, by device and inode:
+#     tlogger: session <id>: its folder changed while discard checked it; nothing of it was
+#     removed
+#   (one line). Then it appends to <parent>/PRUNED, under flock, made with mode 0600, after a
+#   line end when the file does not end with one, this line, flushes it with
+#   sync -- <parent>/PRUNED (no fallback), and prints it on stdout:
 #     <UTC time as YYYY-MM-DDTHH:MM:SSZ>  <id>  -  -  -  discarded <state> by tlogger <version>
 #   (fields split by two spaces, as prune's; the dashes stand for prune's sum, archive and its
 #   sum). A line that cannot be written: exit 1, nothing removed, last on stderr:
@@ -85,14 +128,18 @@
 #     tlogger: cannot flush <parent>/PRUNED to the disk; it holds the line of session <id>, but
 #     nothing of it was removed; run discard again
 #   (one line).
-# - Then it removes each entry by its own name with unlink --, found on PATH, never rm, chmod, a
-#   glob or a recursive removal, those present in this order: input.raw, commands.tsv, started,
-#   exited, stop-requested, transcript.txt.part, transcript.txt, then timing and output.raw,
-#   which make the folder a session, and recorder last; then rmdir -- on the folder. The first
-#   failure: exit 1, last on stderr, while the folder still holds output.raw and timing:
+# - Then it removes each entry by its own name, relative to the session folder, with unlink --,
+#   found on PATH, never rm, chmod, a glob or a recursive removal, those present in this order:
+#   input.raw, commands.tsv, started, exited, stop-requested, transcript.txt.part,
+#   transcript.txt, then timing and output.raw, which make the folder a session, and recorder
+#   last; then, from the folder above it (cd -P ..), rmdir -- <id>. The stand-ins log each name
+#   resolved, so the logged paths are absolute. A stdout or stderr that cannot be written never
+#   stops the removal. The first failure: exit 1, last on stderr, while the folder still holds
+#   output.raw and timing:
 #     tlogger: cannot remove <file>; session <id> is discarded only in part; run discard again
 #     once that is fixed
-#   and a run again on what is left works like a first run and writes another line; once
+#   and a run again on what is left works like a first run and writes another line, though for
+#   an unknown session the removal counts as a change, so that run waits 10 minutes; once
 #   either is gone, as discard then no longer finds the session:
 #     tlogger: cannot remove <file>; session <id> is discarded only in part, and without its
 #     logs discard no longer finds it; remove what is left of <dir> by hand once that is fixed
@@ -108,8 +155,8 @@
 #   session folder, .archive or archives. verify --all then gives no line for <id>, and a
 #   discarded line never makes a sealed session's MANIFEST line count as pruned, nor give the
 #   hint of a prune cut short: its sum field is '-'.
-# - Exit codes: 0 done; 1 a refusal, a failure or a wrong id; 2 a usage error, or no --confirm
-#   off a terminal; 3 no log folder.
+# - Exit codes: 0 done; 1 a refusal, a failure, a wrong id or a session it does not find; 2 a
+#   usage error, or no --confirm off a terminal; 3 no log folder, and nothing else.
 
 bats_require_minimum_version 1.5.0
 
@@ -278,6 +325,40 @@ open_msg() {
     printf ' %s/%s fixes it\n' "$SHOWN" "$1"
 }
 
+# Print the refusal of the session ID whose output.raw a script process writes.
+writer_msg() {
+    printf 'tlogger: session %s is still being recorded: a script process writes its' "$1"
+    printf ' output.raw; discard refuses it\n'
+}
+
+# Print the refusal of the session ID whose logs have mode 400, as seal leaves them.
+mode400_msg() {
+    printf 'tlogger: session %s has logs of mode 400, as seal leaves them, so it may be a' "$1"
+    printf ' sealed session whose seal is gone; discard refuses it\n'
+}
+
+# Print the refusal of the folder FOLDER, as shown, that holds a session, when its group or
+# others may write in it.
+open_parent_msg() {
+    printf 'tlogger: the folder %s is writable by its group or by others; chmod go-w %s' \
+        "$1" "$1"
+    printf ' fixes it\n'
+}
+
+# Make the process PID, started at START, a script process that writes the session folder DIR:
+# fake_process, and a cmdline file that holds the arguments, each ended by a NUL, with which
+# the plugin starts script, then ARGS in place of the default --log-out <DIR>/output.raw.
+fake_script() {
+    local pid=$1 start=$2 dir=$3
+    shift 3
+    if (( $# == 0 )); then
+        set -- --log-out "$dir/output.raw"
+    fi
+    fake_process "$pid" "$start"
+    printf '%s\0' script --quiet --flush --return --logging-format advanced --log-timing \
+        "$dir/timing" --log-in "$dir/input.raw" "$@" > "$PROC/$pid/cmdline"
+}
+
 # Print the refusal of the session ID without a recorder file that changed in the last 10
 # minutes.
 fresh_msg() {
@@ -326,18 +407,26 @@ discard_calls() {
     printf 'rmdir\t%s\n' "$(readlink -f -- "$1")"
 }
 
-# Set the modification time of the session folder DIR and of every entry in it to SECONDS ago.
-age_session() {
-    find "$1" -exec touch -h -d "@$(( $(date +%s) - $2 ))" {} +
+# Set the modification time of the session folder DIR and of every entry in it to the time T, in
+# seconds since 1970. Their ctime, which discard also reads, becomes now.
+set_mtimes() {
+    find "$1" -exec touch -h -d "@$2" {} +
+}
+
+# Make discard's 10-minute rule see now as SECONDS from now (default 720, more than 10 minutes),
+# through TLOGGER_NOW, which every later run of bin/tlogger in this test reads. Files made before
+# then are that much older.
+age_by() {
+    TLOGGER_NOW=$(( $(date +%s) + ${1:-720} ))
+    export TLOGGER_NOW
 }
 
 # Create the session ID in the log folder as a recording that ended leaves it but for the
-# recorder file, which a terminal of an older version did not write, and age it by SECONDS
-# (default 720, more than 10 minutes). Sets SDIR to its folder.
+# recorder file, which a terminal of an older version did not write. It is fresh until a test
+# calls age_by. Sets SDIR to its folder.
 unknown_session() {
     make_session "$1"
     rm -f -- "$SDIR/recorder"
-    age_session "$SDIR" "${2:-720}"
 }
 
 # Run discard on the session ID with --confirm ID through the stand-ins, and fail unless it was
@@ -404,22 +493,25 @@ assert_discard_refused() {
     need modes
     local want
     local -a lines
-    make_session "$A"
-    rm -f -- "$SDIR/recorder"
+    unknown_session "$A"
     make_stand_ins
     # Fresh, as a terminal of an older version that writes no recorder file leaves it.
     assert_discard_refused "$A" "$(fresh_msg "$A")"
-    # Old, but one file written 5 minutes ago.
-    age_session "$SDIR" 720
-    touch -d "@$(( $(date +%s) - 300 ))" "$SDIR/output.raw"
+    # Set back an hour with touch -d, folder and all: their ctime still says now.
+    set_mtimes "$SDIR" $(( $(date +%s) - 3600 ))
     assert_discard_refused "$A" "$(fresh_msg "$A")"
-    # Old files, but the folder changed 5 minutes ago, as when a file in it was removed.
-    age_session "$SDIR" 720
-    touch -d "@$(( $(date +%s) - 300 ))" "$SDIR"
+    # 12 minutes on, but one file written 5 minutes before then.
+    age_by 720
+    touch -d "@$(( TLOGGER_NOW - 300 ))" "$SDIR/output.raw"
+    assert_discard_refused "$A" "$(fresh_msg "$A")"
+    # Old files, but the folder changed 5 minutes before then, as when a file in it was removed.
+    set_mtimes "$SDIR" $(( $(date +%s) - 3600 ))
+    touch -d "@$(( TLOGGER_NOW - 300 ))" "$SDIR"
     assert_discard_refused "$A" "$(fresh_msg "$A")"
     [ ! -e "$LOGS/PRUNED" ]
-    # More than 10 minutes old, folder and all.
-    age_session "$SDIR" 720
+    # More than 10 minutes old, folder and all, by mtime and ctime.
+    set_mtimes "$SDIR" $(( $(date +%s) - 3600 ))
+    age_by 720
     want=$(discard_calls "$SDIR")
     run_watched discard "$A" --confirm "$A"
     [ "$status" -eq 0 ]
@@ -459,6 +551,39 @@ assert_discard_refused() {
     [ ! -e "$LOGS/PRUNED" ]
 }
 
+@test "discard refuses a MANIFEST beside the session that is a symlink" {
+    need modes
+    need symlinks
+    local want
+    make_session "$A"
+    mkdir -m 700 "$HOME/elsewhere"
+    : > "$HOME/elsewhere/MANIFEST"
+    ln -s "$HOME/elsewhere/MANIFEST" "$LOGS/MANIFEST"
+    make_stand_ins
+    want="tlogger: cannot read $SHOWN/MANIFEST, so discard cannot tell whether session $A is"
+    assert_discard_refused "$A" "$want sealed"
+    [ ! -s "$HOME/elsewhere/MANIFEST" ]
+    [ ! -e "$LOGS/PRUNED" ]
+}
+
+@test "discard refuses a sealed session moved by hand, its SEAL and SHA256SUMS deleted" {
+    need modes
+    mkdir -m 700 "$LOGS/acme"
+    make_session "acme/$A"
+    run_tlogger seal "$A"
+    [ "$status" -eq 0 ]
+    mv -- "$LOGS/acme/$A" "$LOGS/$A"
+    rm -f -- "$LOGS/$A/SEAL" "$LOGS/$A/SHA256SUMS"
+    make_stand_ins
+    # Its logs keep the mode 0400 that seal gave them.
+    assert_discard_refused "$A" "$(mode400_msg "$A")"
+    # Set back to 0600, only the line in the MANIFEST of acme, where it was sealed, shows it.
+    chmod 600 "$LOGS/$A"/*
+    assert_discard_refused "$A" "$(sealed_msg "$A")"
+    [ ! -e "$LOGS/PRUNED" ]
+    [ ! -e "$LOGS/acme/PRUNED" ]
+}
+
 @test "discard refuses a session that is still being recorded" {
     need modes
     make_session "$A"
@@ -467,6 +592,34 @@ assert_discard_refused() {
     assert_discard_refused "$A" \
         "tlogger: session $A is still being recorded; discard refuses it"
     [ ! -e "$LOGS/PRUNED" ]
+}
+
+@test "discard refuses a session whose output.raw a script process writes, recorder file or not" {
+    need modes
+    local want
+    make_session "$A"
+    unknown_session "$B"
+    make_stand_ins
+    # Unsealed: its recorder file names a process that has gone, but another script process,
+    # which a recorder file does not name, writes its output.raw.
+    fake_script 5150 2000 "$LOGS/$A"
+    assert_discard_refused "$A" "$(writer_msg "$A")"
+    # Without a recorder file and 12 minutes old, it is still being written.
+    fake_script 5151 2001 "$LOGS/$B"
+    age_by 720
+    assert_discard_refused "$B" "$(writer_msg "$B")"
+    # Another spelling of the path to the same file counts as well.
+    fake_script 5151 2001 "$LOGS/.//$B"
+    assert_discard_refused "$B" "$(writer_msg "$B")"
+    # Only an argument that names the file counts, not one that holds its path.
+    fake_script 5150 2000 "$LOGS/$A" --log-out "$LOGS/$A/output.raw.old" \
+        "--log-out=$LOGS/$A/output.raw"
+    want=$(discard_calls "$LOGS/$A")
+    run_watched discard "$A" --confirm "$A"
+    [ "$status" -eq 0 ]
+    [ "$stderr" = "$(done_msg "$A" "$SHOWN")" ]
+    [ "$(cat "$CALLS")" = "$want" ]
+    [[ ! -e $LOGS/$A && ! -L $LOGS/$A ]]
 }
 
 @test "discard refuses a session folder open to group or others, or one you cannot change" {
@@ -485,6 +638,65 @@ assert_discard_refused() {
     done
     chmod 700 "$SDIR"
     [ ! -e "$LOGS/PRUNED" ]
+}
+
+@test "discard refuses a folder that holds the session open to group or others, sticky or not" {
+    need modes
+    make_session "$A"
+    mkdir -m 700 "$LOGS/acme"
+    make_session "acme/$B"
+    make_stand_ins
+    chmod 1770 "$LOGS"
+    assert_discard_refused "$A" "$(open_parent_msg "$SHOWN")"
+    chmod 700 "$LOGS"
+    chmod 1770 "$LOGS/acme"
+    assert_discard_refused "$B" "$(open_parent_msg "$SHOWN/acme")"
+    # Named by its path, too.
+    run_watched discard "$LOGS/acme/$B" --confirm "$B"
+    assert_refused 1 "$(open_parent_msg "$SHOWN/acme")"
+    chmod 700 "$LOGS/acme"
+    refute_removed
+    [ ! -e "$LOGS/PRUNED" ]
+    [ ! -e "$LOGS/acme/PRUNED" ]
+}
+
+@test "discard refuses a folder you cannot write in, and a session named by id off its volume" {
+    need modes
+    local want
+    make_session "$A"
+    mkdir -m 700 "$LOGS/acme"
+    make_session "acme/$B"
+    make_stand_ins
+    # Closed to yourself, as you may close it: its sessions still show and verify.
+    chmod 500 "$LOGS/acme"
+    want="tlogger: you cannot write in $SHOWN/acme, so discard cannot remove the folder of"
+    assert_discard_refused "$B" "$want session $B"
+    chmod 700 "$LOGS/acme"
+    # logdir_mount names a volume that is not mounted: a session named by its id is refused, as
+    # archive and prune refuse its folder. Named by its path, it is shown.
+    write_config "logdir_mount=$HOME/vault"$'\n'
+    assert_discard_refused "$A" 'tlogger: the volume ~/vault of the log folder is not mounted'
+    run_watched discard "$LOGS/$A" --confirm "$B"
+    [ "$status" -eq 1 ]
+    [ "$output" = "$(show_lines "$A" "$SHOWN" unsealed)" ]
+    [ "$stderr" = 'tlogger: nothing changed' ]
+    refute_removed
+    [ ! -e "$LOGS/PRUNED" ]
+}
+
+@test "discard refuses a session folder whose name holds a space, which a PRUNED line cannot" {
+    need modes
+    local before want
+    mkdir -p "$HOME/cases"
+    mkdir -m 700 "$HOME/cases/kept"
+    make_session "$HOME/cases/kept/old $A"
+    make_stand_ins
+    before=$(tree_of "$HOME")
+    run_watched discard "$HOME/cases/kept/old $A" --confirm "old $A"
+    want="tlogger: the name of ~/cases/kept/old $A holds a space or a control character, which"
+    assert_refused 1 "$want a PRUNED line cannot hold; rename it"
+    [ "$(tree_of "$HOME")" = "$before" ]
+    refute_removed
 }
 
 @test "discard refuses a session folder that is a symlink, as resolve_session does" {
@@ -541,9 +753,10 @@ assert_discard_refused() {
     [ ! -e "$LOGS/PRUNED" ]
 }
 
-@test "discard refuses a PRUNED that is a symlink or not a regular file" {
+@test "discard refuses a PRUNED that is a symlink, not a regular file or has two links" {
     need modes
     need symlinks
+    need hardlinks
     make_session "$A"
     mkdir -m 700 "$HOME/elsewhere"
     make_stand_ins
@@ -556,6 +769,13 @@ assert_discard_refused() {
     mkdir -m 700 "$LOGS/PRUNED"
     assert_discard_refused "$A" "tlogger: $SHOWN/PRUNED is not a regular file"
     [ -z "$(ls -A "$LOGS/PRUNED")" ]
+    rmdir "$LOGS/PRUNED"
+    # A second name for PRUNED, which could change behind discard.
+    : > "$LOGS/PRUNED"
+    chmod 600 "$LOGS/PRUNED"
+    ln "$LOGS/PRUNED" "$HOME/elsewhere/PRUNED.copy"
+    assert_discard_refused "$A" "tlogger: $SHOWN/PRUNED has more than one hard link"
+    [ ! -s "$LOGS/PRUNED" ]
 }
 
 @test "discard names the first refusal in the order of its checks" {
@@ -563,13 +783,17 @@ assert_discard_refused() {
     need symlinks
     make_session "$A"
     fake_process "$REC_PID" "$REC_START"
-    unknown_session "$B" 0
+    unknown_session "$B"
     make_stand_ins
-    # Recorded, holding a SEAL and a stray file, in a folder that others may write in.
+    # Recorded, holding a SEAL and a stray file, in a folder that others may write in, in a log
+    # folder that its group may write in.
     printf 'part\n' > "$LOGS/$A/SEAL"
     printf 'note\n' > "$LOGS/$A/notes.txt"
     ln -s "$HOME/nowhere" "$LOGS/PRUNED"
     chmod 770 "$LOGS/$A"
+    chmod 1770 "$LOGS"
+    assert_discard_refused "$A" "$(open_parent_msg "$SHOWN")"
+    chmod 700 "$LOGS"
     assert_discard_refused "$A" "$(open_msg "$A")"
     chmod 700 "$LOGS/$A"
     assert_discard_refused "$A" "$(sealed_msg "$A")"
@@ -579,10 +803,10 @@ assert_discard_refused() {
     printf 'note\n' > "$LOGS/$B/notes.txt"
     assert_discard_refused "$B" "$(fresh_msg "$B")"
     # Old, the stray file comes before PRUNED.
-    age_session "$LOGS/$B" 720
+    age_by 720
     assert_discard_refused "$B" "$(foreign_msg "$B" notes.txt)"
     rm -f -- "$LOGS/$B/notes.txt"
-    age_session "$LOGS/$B" 720
+    age_by 720
     assert_discard_refused "$B" \
         "tlogger: $SHOWN/PRUNED is a symlink, which tlogger does not follow"
 }
@@ -893,6 +1117,18 @@ pty_out_has "tlogger: session $ID holds notes.txt, which is no file of a session
     pty_fail "a change made in time printed ${(V)PTY_OUT}"
 [[ ! -e $LOGS/PRUNED && -f $DIR/output.raw ]] || pty_fail 'a change made in time removed files'
 rm -f -- $DIR/notes.txt
+# So is a SEAL.
+pty_begin 'bash "$TLOGGER" discard "$S"'
+frame=$REPLY
+pty_expect "tlogger: this cannot be undone; type the session's id, $ID, to go ahead: "
+print -r -- part > $DIR/SEAL
+pty_send "$ID"
+pty_end $frame
+(( PTY_STATUS == 1 )) || pty_fail "a SEAL made in time made discard return $PTY_STATUS"
+pty_out_has "tlogger: session $ID is sealed; tlogger archive and tlogger prune remove sealed" ||
+    pty_fail "a SEAL made in time printed ${(V)PTY_OUT}"
+[[ ! -e $LOGS/PRUNED && -f $DIR/output.raw ]] || pty_fail 'a SEAL made in time removed files'
+rm -f -- $DIR/SEAL
 pty_begin 'bash "$TLOGGER" discard "$S"'
 frame=$REPLY
 pty_expect "tlogger: this cannot be undone; type the session's id, $ID, to go ahead: "

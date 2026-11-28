@@ -1069,18 +1069,26 @@ discard never takes the newest session by default, and takes one session at a ti
 It refuses, exits 1 and changes nothing when:
 
 - the session is sealed: its folder holds `SEAL`, `SHA256SUMS` or a temp file of either, or the
-  `MANIFEST` beside it has a line for it. `archive` and `prune` remove sealed sessions;
-- its recorder still runs: it verifies `recording`;
+  `MANIFEST` beside it has a line for it, or, for a session named by its id, the `MANIFEST` of
+  the log folder or of any engagement folder does. `archive` and `prune` remove sealed sessions;
+- one of its logs has mode 400, as seal leaves them, so it may be a sealed session whose seal is
+  gone;
+- its recorder still runs: it verifies `recording`, or a `script` process writes its
+  `output.raw`, recorder file or not;
 - it has no recorder file, and its folder or a file in it changed in the last 10 minutes, since a
-  terminal that writes no recorder file may still record into it;
+  terminal that writes no recorder file may still record into it. A change counts by the file's
+  change time too, which `touch` cannot set back;
 - its folder holds anything but the files of a session: `output.raw`, `timing`, `input.raw`,
   `commands.tsv`, `recorder`, `started`, `exited`, `stop-requested`, `transcript.txt` and
   `transcript.txt.part`. Dot files count;
 - a file in it is a symlink, not a regular file, another user's, or has a second hard link;
 - its folder is a symlink or another user's, its group or others may write in it, sticky bit or
   not, or you may not read, write and search it. discard never runs `chmod`;
-- `PRUNED` beside it is a symlink or not a regular file, the `MANIFEST` beside it cannot be read,
-  or you may not write in the folder that holds it.
+- the folder that holds it lets its group or others write in it, sticky bit or not, or you may
+  not write in it; for a session named by its id, the volume that `logdir_mount` names is not
+  mounted;
+- `PRUNED` beside it is a symlink, not a regular file, another user's or has a second hard link,
+  or the `MANIFEST` beside it cannot be read.
 
 Then it shows the session, with its start in UTC from its id, its recorded time and its number
 of commands, as `tlogger list` shows them:
@@ -1116,8 +1124,10 @@ but not wiped from the disk.
 discard removes the files a session may lack first, then `timing` and `output.raw`, and the
 `recorder` file last. When a removal fails, as on an immutable file, discard exits 1 and names
 the file. While `timing` and `output.raw` are still there, run it again once that is fixed: it
-works as the first run did and writes another line. Once either is gone, the folder no longer
-counts as a session folder, discard says so, and you remove what is left by hand.
+works as the first run did and writes another line. For a session without a recorder file, the
+files the first run removed count as a change to its folder, so the next run waits until 10
+minutes have passed. Once either is gone, the folder no longer counts as a session folder,
+discard says so, and you remove what is left by hand.
 
 discard never touches the `MANIFEST`, other sessions, the folder that holds the session but for
 `PRUNED`, `.archive` or an archive. `verify --all` names a discarded session no more. It cannot
