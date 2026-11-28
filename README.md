@@ -33,9 +33,10 @@ workflow.
 - checks with `tlogger doctor` that the log folder lies on encrypted, private storage that is
   mounted, as [Checking the log folder](#checking-the-log-folder) describes;
 - packs the sealed sessions of an engagement into one checked archive with `tlogger archive`,
-  and removes only sessions that such an archive holds, with `tlogger prune`, when you ask for
-  it and confirm, as [Keeping and removing logs](#keeping-and-removing-logs) describes. It
-  never removes a log that holds data by itself.
+  and removes only sessions that such an archive holds, with `tlogger prune`, or one session
+  that cannot be sealed, with `tlogger discard`, when you ask for it and confirm, as
+  [Keeping and removing logs](#keeping-and-removing-logs) describes. It never removes a log
+  that holds data by itself.
 
 ## Install
 
@@ -187,8 +188,9 @@ tlogger uninstall
 Outside zsh, run `~/.local/share/tlogger/current/bin/tlogger uninstall`. It removes the block and
 the code. The config stays unless `--purge-config` is given. The state folder, with the logs and
 the rc backups, always stays: uninstall deletes none of it. To remove sessions when the rules of
-the engagement allow it, run `tlogger prune` before you uninstall, as
-[Keeping and removing logs](#keeping-and-removing-logs) describes. `--dry-run` shows the change
+the engagement allow it, run `tlogger prune`, or `tlogger discard` for a session that cannot be
+sealed, before you uninstall, as [Keeping and removing logs](#keeping-and-removing-logs)
+describes. `--dry-run` shows the change
 to the rc and what would be removed.
 
 ### Exit status
@@ -196,8 +198,8 @@ to the rc and what would be removed.
 | Status | Meaning |
 |---|---|
 | 0 | Done, or nothing to change |
-| 1 | An error or a refusal; a refusal changes nothing. For `status`: installed only in part. For `verify`: a sealed session changed, or with `--all` a session is `missing`. For `doctor`: at least one check says `warn` or `unknown`. For `archive --verify`: a session changed, or the file cannot be read as an archive. For `prune`: a session to keep, a wrong folder name, or a removal that failed |
-| 2 | A usage error, `--mode` or `--yes` missing outside a terminal, or `prune --delete` without `--confirm` outside a terminal |
+| 1 | An error or a refusal; a refusal changes nothing. For `status`: installed only in part. For `verify`: a sealed session changed, or with `--all` a session is `missing`. For `doctor`: at least one check says `warn` or `unknown`. For `archive --verify`: a session changed, or the file cannot be read as an archive. For `prune`: a session to keep, a wrong folder name, or a removal that failed. For `discard`: a wrong id, or a removal that failed |
+| 2 | A usage error, `--mode` or `--yes` missing outside a terminal, or `prune --delete` or `discard` without `--confirm` outside a terminal |
 | 3 | Not installed, nothing to remove, no log folder, or no session to view, archive or prune |
 | 4 | For `verify`: nothing changed, but a finished session is not sealed, or has no recorder file |
 
@@ -597,7 +599,8 @@ hang, and so does a slow disk that wakes up; run `tlogger doctor` again then. Do
 
 `output.raw` with `timing` is the evidence: what the terminal showed, and when. tlogger never
 writes, moves or renames them; sealing only makes them read-only, and only
-`tlogger prune --delete` removes them, once a checked archive holds them. Three commands read
+`tlogger prune --delete` removes them, once a checked archive holds them, or `tlogger discard`,
+for a session that cannot be sealed. Three commands read
 them:
 
 | Command | What it does |
@@ -775,7 +778,7 @@ ended unexpectedly is not sealed by itself; its notice says to run `tlogger seal
 | `ok` | Sealed, and every file is as sealed |
 | `changed` | Sealed, but a log changed, is missing or is no longer 0400, the folder holds a file the seal does not cover, or the sums disagree; stderr names what |
 | `unsealed` | The recording has ended, but the session is not sealed yet; `tlogger seal --all` seals it |
-| `unknown` | The session has no readable `recorder` file, so tlogger cannot tell whether its recording ended, and `seal` refuses it |
+| `unknown` | The session has no readable `recorder` file, so tlogger cannot tell whether its recording ended, and `seal` refuses it. To remove such a session, use `tlogger discard`, as [Discarding a session that cannot be sealed](#discarding-a-session-that-cannot-be-sealed) describes |
 | `recording` | Its recorder still runs; it does not count for the exit status |
 | `pruned` | Only with `--all`: a `MANIFEST` names the session, its folder is gone, and `PRUNED` beside that `MANIFEST` records it with the same sum |
 | `moved` | Only with `--all`: a `MANIFEST` names the session, its folder is gone, and another folder of the walk holds a session folder of that id with the same sum, which gets its own line |
@@ -812,13 +815,14 @@ So set the engagement before the first terminal of the job.
 tlogger never removes a log that holds data by itself: there is no retention period, no timer
 and nothing that runs as a shell starts. The plugin removes only the folder of a recording that
 failed to start, while its logs are still empty. The contract of the engagement says how long
-you keep the logs, and when and how you destroy them. Three commands help:
+you keep the logs, and when and how you destroy them. Four commands help:
 
 | Command | What it does |
 |---|---|
 | `tlogger archive ENGAGEMENT\|--none [--older-than DAYS]` | Packs the sessions of one folder, which must all be sealed and verify `ok`, into a checked `.tar.gz` in `<log folder>/.archive/`, and prints its SHA-256. It removes nothing |
 | `tlogger archive --verify FILE` | Checks an archive without unpacking it, and prints `<session>  ok` or `changed` for each session in it |
 | `tlogger prune ENGAGEMENT\|--none --archive FILE [--older-than DAYS] [--delete [--confirm NAME]]` | Shows which sessions of one folder it would remove, and removes nothing. With `--delete` and the folder's name, it removes them: all of them or none, and only those that FILE, a checked archive of that folder, holds with the same sums. `PRUNED` records each removal first |
+| `tlogger discard SESSION [--confirm ID]` | Removes one session that cannot be sealed, `unsealed` or `unknown`, once it has shown it and you confirm its id, as [Discarding a session that cannot be sealed](#discarding-a-session-that-cannot-be-sealed) describes. `PRUNED` records it first |
 
 `archive` and `prune` take one folder: `ENGAGEMENT`, an engagement folder of the log folder, or
 `--none` for the sessions directly in the log folder, such as those of 0.2.0. They have no default
@@ -1020,13 +1024,14 @@ name holds one, and an engagement name holds none.
 
 - A session that `prune --delete` removed. tlogger keeps no other copy: only the archive brings
   it back.
+- A session that `discard` removed. No archive holds it, so nothing brings it back.
 - `PRUNED` and `MANIFEST` lines. Both only grow, and tlogger never removes either.
 - An archive, once it exists: it is a cleartext copy of every password typed in its sessions,
   and tlogger cannot follow where it goes.
 
 ### Removing is not destroying
 
-prune removes files from a file system. That is not secure erasure:
+prune and discard remove files from a file system. That is not secure erasure:
 
 - An SSD or NVMe drive remaps writes, and old blocks stay until it reuses them.
 - Copy-on-write file systems, snapshots (btrfs, LVM, VM snapshots, Timeshift) and journals keep
@@ -1046,6 +1051,81 @@ engagement folder on whatever lies beneath.
 
 Never delete evidence from a file manager either: its trash keeps the files, in a `.Trash` folder
 on the same volume or in your home folder's trash.
+
+## Discarding a session that cannot be sealed
+
+`archive` and `prune` take only sealed sessions. A session that cannot be sealed, such as a test
+recording or a stale one that verifies `unsealed` or `unknown`, stays until you remove it with
+`tlogger discard`:
+
+```bash
+tlogger discard 20261112T100000Z-a1B2c3
+```
+
+SESSION is required: a session id, which names a folder in the log folder or in one of its
+engagement folders, as for `seal` and `verify`, or a path to a session folder, which holds a `/`.
+discard never takes the newest session by default, and takes one session at a time.
+
+It refuses, exits 1 and changes nothing when:
+
+- the session is sealed: its folder holds `SEAL`, `SHA256SUMS` or a temp file of either, or the
+  `MANIFEST` beside it has a line for it. `archive` and `prune` remove sealed sessions;
+- its recorder still runs: it verifies `recording`;
+- it has no recorder file, and its folder or a file in it changed in the last 10 minutes, since a
+  terminal that writes no recorder file may still record into it;
+- its folder holds anything but the files of a session: `output.raw`, `timing`, `input.raw`,
+  `commands.tsv`, `recorder`, `started`, `exited`, `stop-requested`, `transcript.txt` and
+  `transcript.txt.part`. Dot files count;
+- a file in it is a symlink, not a regular file, another user's, or has a second hard link;
+- its folder is a symlink or another user's, its group or others may write in it, sticky bit or
+  not, or you may not read, write and search it. discard never runs `chmod`;
+- `PRUNED` beside it is a symlink or not a regular file, the `MANIFEST` beside it cannot be read,
+  or you may not write in the folder that holds it.
+
+Then it shows the session, with its start in UTC from its id, its recorded time and its number
+of commands, as `tlogger list` shows them:
+
+```text
+session   20261112T100000Z-a1B2c3
+folder    ~/.local/state/tlogger/sessions
+state     unsealed
+start     2026-11-12T10:00:00Z
+length    00:01:00
+commands  2
+```
+
+On a terminal it asks you to type the session's id. `--confirm ID` gives that answer without the
+question, and outside a terminal discard needs it, or exits 2. Any other id exits 1 with
+`tlogger: nothing changed`.
+
+Then it holds off HUP, INT, QUIT and TERM and checks the session again. It appends a line to
+`PRUNED` in the folder that holds the session, with mode 0600 when it creates the file, flushes
+it to the disk and prints it:
+
+```text
+2026-11-28T10:00:00Z  20261112T100000Z-a1B2c3  -  -  -  discarded unsealed by tlogger X.Y.Z
+```
+
+The three dashes stand where prune writes the sum of `SHA256SUMS`, the archive's file name and
+the archive's sum, so `verify --all` never counts this line as the prune of a sealed session of
+that id. When the line cannot be written or flushed, discard exits 1 and removes nothing. Only
+then does it remove each file by its own name with `unlink`, and the empty folder with `rmdir`.
+Its last line names the session and `PRUNED`, and says that its data is gone from this folder
+but not wiped from the disk.
+
+discard removes the files a session may lack first, then `timing` and `output.raw`, and the
+`recorder` file last. When a removal fails, as on an immutable file, discard exits 1 and names
+the file. While `timing` and `output.raw` are still there, run it again once that is fixed: it
+works as the first run did and writes another line. Once either is gone, the folder no longer
+counts as a session folder, discard says so, and you remove what is left by hand.
+
+discard never touches the `MANIFEST`, other sessions, the folder that holds the session but for
+`PRUNED`, `.archive` or an archive. `verify --all` names a discarded session no more. It cannot
+be undone, and removing is not wiping: the data stays on the disk, as
+[Removing is not destroying](#removing-is-not-destroying) describes.
+
+discard exits 0 when done, 1 for a refusal, a failure or a wrong id, 2 for a usage error or a
+missing `--confirm` outside a terminal, and 3 without a log folder.
 
 ## Security
 
